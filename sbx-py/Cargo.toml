@@ -1,0 +1,15 @@
+[package]
+name = "sbx-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../README.md"
+description = "Python bindings for Embedded micro-VM sandbox for running AI agents"
+keywords = ["ai", "sandbox", "vm", "embedded"]
+categories = ["embedded", "no-std"]
+
+[dependencies]
+
+[lints]
+workspace = true
