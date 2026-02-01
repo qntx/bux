@@ -1,5 +1,5 @@
 [package]
-name = "sbx-py"
+name = "bux-py"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

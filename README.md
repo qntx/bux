@@ -1,3 +1,3 @@
-# sbx
+# bux
 
 Embedded micro-VM sandbox for running AI agents.

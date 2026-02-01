@@ -1,13 +1,13 @@
 [workspace]
-members = ["sbx", "sbx-cli", "sbx-py"]
-default-members = ["sbx"]
+members = ["bux", "bux-cli", "bux-py"]
+default-members = ["bux"]
 resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/pyroth/sbx"
+repository = "https://github.com/pyroth/bux"
 
 [workspace.dependencies]
 clap = { version = "4.5", features = ["derive"] }

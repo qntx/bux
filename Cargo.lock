@@ -3,13 +3,13 @@
 version = 4
 
 [[package]]
-name = "sbx"
+name = "bux"
 version = "0.1.0"
 
 [[package]]
-name = "sbx-cli"
+name = "bux-cli"
 version = "0.1.0"
 
 [[package]]
-name = "sbx-py"
+name = "bux-py"
 version = "0.1.0"
