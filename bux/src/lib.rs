@@ -28,4 +28,5 @@ mod sys;
 mod vm;
 
 pub use error::{Error, Result};
+pub use sys::{DiskFormat, Feature, KernelFormat, LogStyle, SyncMode};
 pub use vm::{LogLevel, Vm, VmBuilder};
