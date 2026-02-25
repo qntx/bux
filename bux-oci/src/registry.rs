@@ -178,7 +178,9 @@ fn fetch_bearer_token(realm: &str, service: &str, repository: &str) -> Result<St
     let scope = format!("repository:{repository}:pull");
     let url = format!("{realm}?service={service}&scope={scope}");
 
-    let resp = ureq::get(&url).call().map_err(|e| Error::Http(e.to_string()))?;
+    let resp = ureq::get(&url)
+        .call()
+        .map_err(|e| Error::Http(e.to_string()))?;
     let mut body = Vec::new();
     resp.into_body()
         .into_reader()
@@ -216,4 +218,3 @@ fn select_platform(index: &ImageIndex) -> Result<&IndexEntry> {
             os: "linux".to_owned(),
         })
 }
-

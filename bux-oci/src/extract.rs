@@ -13,10 +13,7 @@ use crate::store;
 /// Handles OCI whiteout files:
 /// - `.wh.<name>` — deletes the named entry from a lower layer.
 /// - `.wh..wh..opq` — marks the directory as opaque (clears inherited contents).
-pub fn extract_layers(
-    blob_paths: &[std::path::PathBuf],
-    rootfs: &Path,
-) -> crate::Result<()> {
+pub fn extract_layers(blob_paths: &[std::path::PathBuf], rootfs: &Path) -> crate::Result<()> {
     fs::create_dir_all(rootfs)?;
 
     for path in blob_paths {

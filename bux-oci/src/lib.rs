@@ -68,7 +68,7 @@ pub enum Error {
 }
 
 /// Subset of the OCI image configuration relevant to container execution.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct ImageConfig {
     /// Default command (`CMD`).
@@ -149,13 +149,16 @@ impl Oci {
         on_status("Extracting rootfs...");
         extract::extract_layers(&blob_paths, &rootfs)?;
 
-        // 5. Persist image metadata.
+        // 5. Persist image metadata and config.
         let size: u64 = manifest.layers.iter().map(|l| l.size).sum();
         self.store.upsert_image(ImageMeta {
             reference: reference.to_string(),
             digest: manifest_digest,
             size,
         })?;
+        if let Some(ref cfg) = full_config.config {
+            self.store.save_image_config(&storage_key, cfg)?;
+        }
 
         on_status("Done.");
         Ok(PullResult {
@@ -163,6 +166,25 @@ impl Oci {
             rootfs,
             config: full_config.config,
         })
+    }
+
+    /// Returns a cached [`PullResult`] if the image is already present, otherwise pulls it.
+    ///
+    /// This is the preferred entry point for `bux run <image>` — fast when cached.
+    pub fn ensure(&mut self, image: &str, on_status: impl Fn(&str)) -> Result<PullResult> {
+        let reference = Reference::parse(image)?;
+        let key = reference.storage_key();
+
+        if self.store.has_rootfs(&key) {
+            let config = self.store.load_image_config(&key)?;
+            return Ok(PullResult {
+                reference,
+                rootfs: self.store.rootfs_path(&key),
+                config,
+            });
+        }
+
+        self.pull(image, on_status)
     }
 
     /// Returns the rootfs path for a previously pulled image.

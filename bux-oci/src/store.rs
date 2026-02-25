@@ -119,7 +119,29 @@ impl Store {
         self.save_images(&images)
     }
 
-    /// Removes an image entry and its rootfs from disk.
+    /// Returns the path to the stored image config JSON for a given storage key.
+    fn config_path(&self, key: &str) -> PathBuf {
+        self.root.join(ROOTFS_DIR).join(format!("{key}.json"))
+    }
+
+    /// Saves image config alongside the rootfs.
+    pub fn save_image_config(&self, key: &str, config: &crate::ImageConfig) -> crate::Result<()> {
+        let data = serde_json::to_string_pretty(config)?;
+        fs::write(self.config_path(key), data)?;
+        Ok(())
+    }
+
+    /// Loads a previously saved image config.
+    pub fn load_image_config(&self, key: &str) -> crate::Result<Option<crate::ImageConfig>> {
+        let path = self.config_path(key);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let data = fs::read_to_string(path)?;
+        Ok(Some(serde_json::from_str(&data)?))
+    }
+
+    /// Removes an image entry, its rootfs, and its config from disk.
     pub fn remove_image(&self, reference: &str, storage_key: &str) -> crate::Result<()> {
         let mut images = self.load_images()?;
         images.retain(|i| i.reference != reference);
@@ -128,6 +150,10 @@ impl Store {
         let rootfs = self.rootfs_path(storage_key);
         if rootfs.exists() {
             fs::remove_dir_all(&rootfs)?;
+        }
+        let cfg = self.config_path(storage_key);
+        if cfg.exists() {
+            fs::remove_file(&cfg)?;
         }
         Ok(())
     }
