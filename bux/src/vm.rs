@@ -104,6 +104,8 @@ pub struct VmBuilder {
     snd_device: Option<bool>,
     /// Redirect console output to a file.
     console_output: Option<String>,
+    /// vsock port mappings `(guest_port, host_socket_path, listen)`.
+    vsock_ports: Vec<(u32, String, bool)>,
 }
 
 impl VmBuilder {
@@ -205,6 +207,15 @@ impl VmBuilder {
         self
     }
 
+    /// Maps a guest vsock port to a host Unix socket path.
+    ///
+    /// When `listen` is `true`, the guest listens on the vsock port and the
+    /// host connects to the Unix socket (typical for guest agent pattern).
+    pub fn vsock_port(mut self, port: u32, host_path: impl Into<String>, listen: bool) -> Self {
+        self.vsock_ports.push((port, host_path.into(), listen));
+        self
+    }
+
     /// Builds and returns the configured [`Vm`].
     ///
     /// Creates a libkrun context and applies all configuration. If any step
@@ -259,6 +270,9 @@ impl VmBuilder {
         }
         if let Some(ref path) = self.console_output {
             sys::set_console_output(vm.ctx, path)?;
+        }
+        for (port, path, listen) in &self.vsock_ports {
+            sys::add_vsock_port2(vm.ctx, *port, path, *listen)?;
         }
 
         Ok(vm)
