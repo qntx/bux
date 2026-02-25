@@ -38,7 +38,10 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install llvm
-          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          LLVM_BIN="$(brew --prefix llvm)/bin"
+          echo "$LLVM_BIN" >> "$GITHUB_PATH"
+          # clang -fuse-ld=lld looks for 'ld.lld' — create symlink if brew didn't
+          [ -f "$LLVM_BIN/ld.lld" ] || ln -sf "$LLVM_BIN/lld" "$LLVM_BIN/ld.lld"
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
@@ -73,11 +76,10 @@ jobs:
 
           if [ "${{ runner.os }}" = "macOS" ]; then
             export PKG_CONFIG_PATH="${{ github.workspace }}/prefix/lib/pkgconfig"
-            # System clang (/usr/bin/clang) cannot find lld in PATH.
-            # Use brew's clang which ships with its own lld.
+            # Use brew's clang + explicit ld.lld path (system clang cannot find lld).
             LLVM_BIN="$(brew --prefix llvm)/bin"
             make -j$(sysctl -n hw.ncpu) NET=1 BLK=1 \
-              "CC_LINUX=${LLVM_BIN}/clang -target arm64-linux-gnu -fuse-ld=lld -Wl,-strip-debug --sysroot \$(SYSROOT_LINUX) -Wno-c23-extensions"
+              "CC_LINUX=${LLVM_BIN}/clang -target arm64-linux-gnu -fuse-ld=${LLVM_BIN}/ld.lld -Wl,-strip-debug --sysroot \$(SYSROOT_LINUX) -Wno-c23-extensions"
           else
             export PKG_CONFIG_PATH="${{ github.workspace }}/prefix/lib64/pkgconfig"
             make -j$(nproc) NET=1 BLK=1
