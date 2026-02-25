@@ -44,7 +44,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential patchelf libfdt-dev clang libclang-dev
+          sudo apt-get install -y build-essential patchelf libfdt-dev clang libclang-dev libcap-ng-dev
 
       - name: Build libkrunfw (macOS)
         if: runner.os == 'macOS'
@@ -67,17 +67,22 @@ jobs:
 
       - name: Build libkrun
         run: |
-          # Determine pkgconfig path (lib on macOS, lib64 on Linux)
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            export PKG_CONFIG_PATH="${{ github.workspace }}/prefix/lib/pkgconfig"
-          else
-            export PKG_CONFIG_PATH="${{ github.workspace }}/prefix/lib64/pkgconfig"
-          fi
-
           git clone --depth 1 --branch "v${LIBKRUN_VERSION}" --recurse-submodules \
             https://github.com/containers/libkrun.git libkrun-src
           cd libkrun-src
-          make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu) NET=1 BLK=1
+
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            export PKG_CONFIG_PATH="${{ github.workspace }}/prefix/lib/pkgconfig"
+            # System clang (/usr/bin/clang) cannot find lld in PATH.
+            # Use brew's clang which ships with its own lld.
+            LLVM_BIN="$(brew --prefix llvm)/bin"
+            make -j$(sysctl -n hw.ncpu) NET=1 BLK=1 \
+              "CC_LINUX=${LLVM_BIN}/clang -target arm64-linux-gnu -fuse-ld=lld -Wl,-strip-debug --sysroot \$(SYSROOT_LINUX) -Wno-c23-extensions"
+          else
+            export PKG_CONFIG_PATH="${{ github.workspace }}/prefix/lib64/pkgconfig"
+            make -j$(nproc) NET=1 BLK=1
+          fi
+
           make PREFIX="${{ github.workspace }}/prefix" install
 
       - name: Package libraries
