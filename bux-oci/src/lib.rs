@@ -1,19 +1,19 @@
 //! OCI image management for the bux micro-VM sandbox.
 //!
 //! Pulls, stores, and extracts OCI container images for use as
-//! rootfs directories with libkrun micro-VMs.
+//! rootfs directories with libkrun micro-VMs. Powered by [`oci_client`].
 
 #![allow(clippy::missing_docs_in_private_items)]
 
 mod extract;
-pub mod reference;
-mod registry;
 mod store;
 
 use std::path::PathBuf;
 
-pub use reference::{Identifier, Reference};
-use registry::Client;
+use oci_client::Reference;
+use oci_client::client::{ClientConfig, ClientProtocol};
+use oci_client::manifest::IMAGE_LAYER_GZIP_MEDIA_TYPE;
+use oci_client::secrets::RegistryAuth;
 pub use store::ImageMeta;
 use store::Store;
 
@@ -28,35 +28,17 @@ pub enum Error {
     #[error("invalid image reference: {0}")]
     InvalidReference(String),
 
-    /// The image was not found in the registry or local store.
+    /// The image was not found locally.
     #[error("image not found: {0}")]
     NotFound(String),
 
-    /// No manifest matched the current platform.
-    #[error("no matching platform for {arch}/{os}")]
-    NoPlatform {
-        /// CPU architecture.
-        arch: String,
-        /// Operating system.
-        os: String,
-    },
-
-    /// Downloaded content did not match its expected digest.
-    #[error("digest mismatch: expected {expected}, got {actual}")]
-    DigestMismatch {
-        /// Expected digest.
-        expected: String,
-        /// Computed digest.
-        actual: String,
-    },
-
     /// Local store error.
-    #[error("store error: {0}")]
+    #[error("store: {0}")]
     Store(String),
 
-    /// HTTP / registry protocol error.
-    #[error("HTTP error: {0}")]
-    Http(String),
+    /// OCI registry protocol error.
+    #[error("registry: {0}")]
+    Registry(String),
 
     /// Filesystem I/O error.
     #[error(transparent)]
@@ -67,21 +49,21 @@ pub enum Error {
     Json(#[from] serde_json::Error),
 }
 
-/// Subset of the OCI image configuration relevant to container execution.
+/// Subset of the OCI image configuration relevant to VM execution.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct ImageConfig {
     /// Default command (`CMD`).
-    #[serde(rename = "Cmd", default)]
+    #[serde(default, alias = "Cmd")]
     pub cmd: Option<Vec<String>>,
     /// Default entrypoint (`ENTRYPOINT`).
-    #[serde(rename = "Entrypoint", default)]
+    #[serde(default, alias = "Entrypoint")]
     pub entrypoint: Option<Vec<String>>,
     /// Default environment variables.
-    #[serde(rename = "Env", default)]
+    #[serde(default, alias = "Env")]
     pub env: Option<Vec<String>>,
     /// Default working directory.
-    #[serde(rename = "WorkingDir", default)]
+    #[serde(default, alias = "WorkingDir")]
     pub working_dir: Option<String>,
 }
 
@@ -89,112 +71,107 @@ pub struct ImageConfig {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PullResult {
-    /// Canonical image reference.
-    pub reference: Reference,
+    /// Canonical image reference string.
+    pub reference: String,
     /// Path to the extracted rootfs directory.
     pub rootfs: PathBuf,
     /// Image configuration (Cmd, Env, WorkingDir, etc.).
     pub config: Option<ImageConfig>,
 }
 
-/// OCI image manager backed by a local content-addressable store.
-#[derive(Debug)]
+/// OCI image manager backed by a local rootfs store.
+#[allow(missing_debug_implementations)]
 pub struct Oci {
     store: Store,
-    client: Client,
+    client: oci_client::Client,
 }
 
 impl Oci {
     /// Opens the OCI manager with the default storage location.
     pub fn open() -> Result<Self> {
+        let config = ClientConfig {
+            protocol: ClientProtocol::Https,
+            ..Default::default()
+        };
         Ok(Self {
             store: Store::open()?,
-            client: Client::new(),
+            client: oci_client::Client::new(config),
         })
     }
 
     /// Pulls an image from a registry, extracts its rootfs, and returns the result.
     ///
     /// `on_status` is called with human-readable progress messages.
-    pub fn pull(&mut self, image: &str, on_status: impl Fn(&str)) -> Result<PullResult> {
-        let reference = Reference::parse(image)?;
+    pub async fn pull(&mut self, image: &str, on_status: impl Fn(&str)) -> Result<PullResult> {
+        let reference = parse_reference(image)?;
+        let ref_str = reference.to_string();
+        let key = storage_key(&reference);
 
-        // 1. Pull manifest (resolves multi-arch index automatically).
-        on_status("Resolving manifest...");
-        let (manifest, manifest_digest) = self.client.pull_manifest(&reference)?;
+        // 1. Pull all layers via oci-client.
+        on_status("Pulling image...");
+        let image_data = self
+            .client
+            .pull(
+                &reference,
+                &RegistryAuth::Anonymous,
+                vec![IMAGE_LAYER_GZIP_MEDIA_TYPE],
+            )
+            .await
+            .map_err(|e| Error::Registry(e.to_string()))?;
 
-        // 2. Pull and parse image config.
-        self.client
-            .download_blob(&reference, &self.store, &manifest.config.digest)?;
-        let config_data = std::fs::read(self.store.blob_path(&manifest.config.digest))?;
-        let full_config: registry::FullImageConfig = serde_json::from_slice(&config_data)?;
-
-        // 3. Pull layer blobs.
-        let total = manifest.layers.len();
-        let mut blob_paths = Vec::with_capacity(total);
-        for (i, layer) in manifest.layers.iter().enumerate() {
-            let short = &layer.digest[..std::cmp::min(19, layer.digest.len())];
-            on_status(&format!("Pulling layer {}/{total}: {short}…", i + 1));
-            self.client
-                .download_blob(&reference, &self.store, &layer.digest)?;
-            blob_paths.push(self.store.blob_path(&layer.digest));
-        }
-
-        // 4. Extract rootfs.
-        let storage_key = reference.storage_key();
-        let rootfs = self.store.rootfs_path(&storage_key);
+        // 2. Extract rootfs from in-memory layers.
+        let rootfs = self.store.rootfs_path(&key);
         if rootfs.exists() {
             std::fs::remove_dir_all(&rootfs)?;
         }
         on_status("Extracting rootfs...");
-        extract::extract_layers(&blob_paths, &rootfs)?;
+        let layers: Vec<Vec<u8>> = image_data
+            .layers
+            .into_iter()
+            .map(|l| l.data.to_vec())
+            .collect();
+        extract::extract_layers(&layers, &rootfs)?;
 
-        // 5. Persist image metadata and config.
-        let size: u64 = manifest.layers.iter().map(|l| l.size).sum();
+        // 3. Parse and persist image config.
+        let config = parse_image_config(&image_data.config.data);
+        if let Some(ref cfg) = config {
+            self.store.save_image_config(&key, cfg)?;
+        }
+
+        // 4. Persist image metadata.
+        let digest = image_data.digest.unwrap_or_default();
+        let size = layers.iter().map(|l| l.len() as u64).sum();
         self.store.upsert_image(ImageMeta {
-            reference: reference.to_string(),
-            digest: manifest_digest,
+            reference: ref_str.clone(),
+            digest,
             size,
         })?;
-        if let Some(ref cfg) = full_config.config {
-            self.store.save_image_config(&storage_key, cfg)?;
-        }
 
         on_status("Done.");
         Ok(PullResult {
-            reference,
+            reference: ref_str,
             rootfs,
-            config: full_config.config,
+            config,
         })
     }
 
     /// Returns a cached [`PullResult`] if the image is already present, otherwise pulls it.
     ///
     /// This is the preferred entry point for `bux run <image>` — fast when cached.
-    pub fn ensure(&mut self, image: &str, on_status: impl Fn(&str)) -> Result<PullResult> {
-        let reference = Reference::parse(image)?;
-        let key = reference.storage_key();
+    pub async fn ensure(&mut self, image: &str, on_status: impl Fn(&str)) -> Result<PullResult> {
+        let reference = parse_reference(image)?;
+        let key = storage_key(&reference);
 
         if self.store.has_rootfs(&key) {
             let config = self.store.load_image_config(&key)?;
             return Ok(PullResult {
-                reference,
+                reference: reference.to_string(),
                 rootfs: self.store.rootfs_path(&key),
                 config,
             });
         }
 
-        self.pull(image, on_status)
-    }
-
-    /// Returns the rootfs path for a previously pulled image.
-    pub fn rootfs(&self, image: &str) -> Result<PathBuf> {
-        let reference = Reference::parse(image)?;
-        let path = self.store.rootfs_path(&reference.storage_key());
-        if !path.exists() {
-            return Err(Error::NotFound(image.to_owned()));
-        }
-        Ok(path)
+        self.pull(image, on_status).await
     }
 
     /// Lists all locally stored images.
@@ -204,8 +181,32 @@ impl Oci {
 
     /// Removes a locally stored image and its extracted rootfs.
     pub fn remove(&self, image: &str) -> Result<()> {
-        let reference = Reference::parse(image)?;
+        let reference = parse_reference(image)?;
         self.store
-            .remove_image(&reference.to_string(), &reference.storage_key())
+            .remove_image(&reference.to_string(), &storage_key(&reference))
     }
+}
+
+/// Parses an image string into an [`oci_client::Reference`].
+fn parse_reference(image: &str) -> Result<Reference> {
+    image
+        .parse()
+        .map_err(|e: oci_client::ParseError| Error::InvalidReference(e.to_string()))
+}
+
+/// Converts a reference into a filesystem-safe storage key.
+fn storage_key(reference: &Reference) -> String {
+    reference.to_string().replace(['/', ':', '@'], "_")
+}
+
+/// Deserializes the raw OCI config JSON blob into our minimal [`ImageConfig`].
+///
+/// The config blob wraps the config under a top-level `"config"` key with PascalCase fields.
+/// [`ImageConfig`] uses `serde(alias)` to accept both PascalCase and lowercase keys.
+fn parse_image_config(data: &[u8]) -> Option<ImageConfig> {
+    #[derive(serde::Deserialize)]
+    struct TopLevel {
+        config: Option<ImageConfig>,
+    }
+    serde_json::from_slice::<TopLevel>(data).ok()?.config
 }

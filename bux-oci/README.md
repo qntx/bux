@@ -1,118 +1,98 @@
 # bux-oci
 
-Pure Rust OCI image management for the [bux](https://github.com/qntx/bux) micro-VM sandbox.
+Async OCI image management for [bux](https://github.com/qntx/bux) micro-VMs, powered by [`oci-client`](https://github.com/oras-project/rust-oci-client) (CNCF ORAS project).
 
-Pulls, stores, and extracts OCI container images from any OCI-compliant registry (Docker Hub, GHCR, etc.) and prepares root filesystems for [libkrun](https://github.com/containers/libkrun) micro-VMs — with zero external tool dependencies.
+Pulls OCI images from any compliant registry, extracts layers into a directory-based rootfs, and provides the filesystem path to `libkrun`'s `krun_set_root()` — no external tools required.
 
 ## Features
 
-- **Docker-compatible reference parsing** — `ubuntu`, `ubuntu:22.04`, `ghcr.io/org/app:v1`, digests
-- **OCI Distribution protocol** — bearer token auth for Docker Hub and GHCR
-- **Multi-architecture support** — automatic platform selection from image index manifests
-- **Content-addressable blob storage** — SHA-256 verified, deduplicated layer cache
-- **OCI whiteout handling** — correct `.wh.<name>` deletion and `.wh..wh..opq` opaque directories
-- **Image config inheritance** — `CMD`, `ENTRYPOINT`, `ENV`, `WorkingDir` forwarded to the VM
-- **Self-contained** — no `buildah`, `skopeo`, `e2fsprogs`, or any external binaries required
+- **Async pull** from any OCI Distribution Spec–compliant registry (Docker Hub, GHCR, ECR, etc.)
+- **Local caching** with content-addressable storage; `ensure()` skips the network when the image is already present
+- **Layer extraction** via `flate2` + `tar` — no runtime dependency on `skopeo`, `umoci`, or container runtimes
+- **Progress reporting** through a caller-supplied callback
+- **Multi-arch resolution** delegated to `oci-client` (selects the manifest matching the host platform)
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```bash
+cargo add bux-oci
+```
 
 ## Usage
 
 ```rust
 let mut oci = bux_oci::Oci::open()?;
 
-// Pull an image
-let result = oci.pull("ubuntu:24.04", |msg| eprintln!("{msg}"))?;
+// Pull (always fetches from registry)
+let result = oci.pull("ubuntu:24.04", |msg| eprintln!("{msg}")).await?;
+
+// Ensure (cache hit → instant, cache miss → pull)
+let result = oci.ensure("ubuntu:24.04", |msg| eprintln!("{msg}")).await?;
 println!("rootfs: {}", result.rootfs.display());
 
-// Ensure (use cache or pull)
-let result = oci.ensure("ubuntu:24.04", |msg| eprintln!("{msg}"))?;
-
-// List local images
+// List cached images
 for img in oci.images()? {
-    println!("{} ({})", img.reference, img.digest);
+    println!("{}", img.reference);
 }
 
-// Remove an image
+// Remove a cached image
 oci.remove("ubuntu:24.04")?;
 ```
 
-### Pull Pipeline
+## API Overview
 
-```text
-parse reference → resolve manifest (handle multi-arch index)
-    → download config blob → download layer blobs (skip cached)
-    → extract layers in order (tar+gzip, whiteout handling)
-    → persist metadata + config → return rootfs path
-```
+| Method | Description |
+| --- | --- |
+| `Oci::open()` | Open the local image store (creates it if absent) |
+| `oci.pull(reference, callback)` | Pull an image from the registry unconditionally |
+| `oci.ensure(reference, callback)` | Return cached rootfs if present, otherwise pull |
+| `oci.images()` | List all locally cached images |
+| `oci.remove(reference)` | Delete a cached image and its extracted rootfs |
 
-### Storage Layout
+**Registry protocol** (authentication, manifest negotiation, digest verification, multi-arch resolution) is entirely delegated to `oci-client`. bux-oci is responsible only for layer extraction, rootfs assembly, and metadata persistence.
+
+## Storage Layout
 
 ```text
 $BUX_HOME/                          # or <platform_data_dir>/bux
-├── blobs/sha256/
-│   ├── <layer-digest-hex>          # Compressed layer tarballs
-│   └── <config-digest-hex>         # Image config JSON blobs
-├── rootfs/
-│   ├── <storage_key>/              # Extracted root filesystem
-│   └── <storage_key>.json          # Cached image config
-└── images.json                     # Image index (reference, digest, size)
+├── images.json                     # Metadata index (reference, digest, size)
+└── rootfs/
+    ├── <storage_key>/              # Extracted filesystem tree
+    │   ├── bin/
+    │   ├── etc/
+    │   └── ...
+    └── <storage_key>.json          # Cached image config (Cmd, Env, ...)
 ```
 
-## Design Decisions
+Layers are applied in order (bottom → top) via sequential tar extraction into a single directory, producing a merged rootfs equivalent to an overlay filesystem.
 
-### Why Pure Rust? (vs. shelling out to external tools)
+## Design: Directory rootfs vs. QCOW2 Disk Image
 
-We evaluated three major approaches for OCI image management:
+This is the core architectural decision that differentiates bux from projects like [BoxLite](https://github.com/boxlite-ai/boxlite):
 
-| Approach | Pros | Cons |
+| Feature | Directory rootfs | QCOW2 block device |
 | --- | --- | --- |
-| **A. `buildah` / `skopeo`** | Mature, battle-tested, full OCI spec | Heavy external dependency (~50MB), requires root or `newuidmap`, complex installation, not embeddable |
-| **B. `oci-client` (async)** | Official Rust OCI Distribution client | Pulls in `tokio` + full async runtime (~2MB+ compile), over-engineered for synchronous CLI use case |
-| **C. Pure Rust (sync) ✅** | Zero external deps, minimal binary size, single-threaded simplicity | Must implement protocol ourselves (but it's simple HTTP) |
+| libkrun API | `krun_set_root()` + virtio-fs | `krun_add_disk()` + virtio-blk |
+| Image → rootfs | tar extract to directory | tar extract → `mkfs.ext4` → QCOW2 |
+| External deps | None | `e2fsprogs` (mkfs.ext4) |
+| Snapshot / Clone | Not supported | QCOW2 CoW backing chain |
+| Stateful sandbox | No (ephemeral by design) | Yes (state persists in QCOW2) |
+| Host inspection | Direct filesystem access | Must mount QCOW2 |
+| Target use case | Stateless execution: CI, tool calls, one-shot tasks | Stateful agents: persistent sessions, snapshot/restore |
 
-**We chose Approach C** for the following reasons:
+**bux chooses directory rootfs** because:
 
-1. **Self-contained distribution** — `bux` ships as a single static binary. Requiring `buildah` or `skopeo` would break this promise and add complex installation requirements across platforms.
+1. **`krun_set_root()` is the simplest libkrun path** — host directory → guest rootfs via virtio-fs. No kernel, initrd, or bootloader. No disk image creation toolchain.
+2. **Stateless execution is the primary use case** — `bux run ubuntu -- cmd` is analogous to `docker run --rm`. The VM runs, produces output, and exits. No state to persist.
+3. **Zero external dependencies** — QCOW2 conversion requires `mkfs.ext4` + `qemu-img` (or equivalent Rust implementations that don't exist at production quality). Directory extraction requires only `flate2` + `tar`.
+4. **Non-exclusive** — QCOW2 support via `krun_add_disk()` can be added as a separate code path without changing the OCI pull pipeline. The layer extraction is the same; only the final storage format differs.
 
-2. **No async runtime needed** — OCI pulls are inherently sequential (resolve manifest → download blobs → extract). An async runtime adds ~2MB to compile time and significant complexity for no practical throughput benefit in this use case.
+## Limitations
 
-3. **OCI Distribution is simple HTTP** — The core protocol is just a few REST endpoints (`/v2/<repo>/manifests/<ref>`, `/v2/<repo>/blobs/<digest>`) with optional bearer token auth. Implementing this directly with `ureq` (a synchronous HTTP client) takes ~150 lines.
-
-4. **`krunvm` demonstrates the problem** — The existing [krunvm](https://github.com/containers/krunvm) project depends on `buildah` for image management, which causes installation friction, platform-specific issues, and requires `newuidmap`/`newgidmap` for rootless operation. We explicitly avoid this path.
-
-### Why Directory-based rootfs? (vs. ext4 disk image)
-
-| Approach | Pros | Cons |
-| --- | --- | --- |
-| **A. Directory rootfs ✅** | Simple, fast extraction, `krun_set_root` native support, easy inspection/debugging | Slightly slower VM boot vs. block device, no CoW |
-| **B. ext4 disk image** | Block-level CoW possible, closer to real VM experience | Requires `e2fsprogs` or pure-Rust ext4 writer (none mature), `krun_add_disk` needs kernel+initrd, much more complex |
-
-**We chose directory-based rootfs** because:
-
-1. **`libkrun` natively supports it** — `krun_set_root(ctx, path)` directly mounts a host directory as the guest rootfs via virtio-fs. No kernel, initrd, or bootloader needed.
-
-2. **No `e2fsprogs` dependency** — Creating ext4 images requires either shelling out to `mkfs.ext4` (external dependency) or using an immature pure-Rust ext4 writer. Neither is acceptable for a self-contained tool.
-
-3. **Simpler mental model** — Users can inspect, modify, and debug the extracted rootfs directly on the host filesystem.
-
-4. **ext4 remains a future option** — If block-level performance becomes necessary, `krun_add_disk` support can be added later without changing the pull/store pipeline.
-
-### Why `ureq`? (vs. `reqwest` / `hyper`)
-
-| Crate | Async | TLS | Binary size impact |
-| --- | --- | --- | --- |
-| **`reqwest`** | Yes (tokio) | native-tls or rustls | ~2MB+ |
-| **`hyper`** | Yes (tokio) | BYO | ~1.5MB+ |
-| **`ureq` ✅** | No (blocking) | rustls built-in | ~500KB |
-
-`ureq` is the natural choice for a synchronous application: minimal dependencies, built-in `rustls` TLS, and a clean streaming API for large blob downloads. Since our pull pipeline is inherently sequential, async provides no benefit.
-
-### Why custom reference parser? (vs. `oci-spec` / `docker-reference`)
-
-The OCI image reference format is well-defined but no standalone Rust crate handles the full Docker-compatible normalization (implicit `docker.io` registry, `library/` prefix for official images, default `latest` tag). Our parser is ~80 lines with 7 unit tests covering all common formats. Adding a dependency for this would be heavier than the implementation itself.
-
-### Content Integrity
-
-Every blob downloaded from a registry is verified against its content digest using streaming SHA-256 (`HashWriter`). If the computed digest doesn't match, the blob is deleted and an error is returned. This follows the OCI Distribution spec requirement for content-addressable storage.
+- **Pull-only** — no OCI image build or push. Image creation is out of scope.
+- **No layer deduplication** — each image stores a fully merged rootfs. Shared base layers are not deduplicated across images.
 
 ## License
 
