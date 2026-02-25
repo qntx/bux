@@ -34,10 +34,12 @@ mod vm;
 
 pub use bux_proto::ExecReq;
 #[cfg(unix)]
-pub use client::{Client, ExecOutput};
+pub use client::{Client, ExecEvent, ExecOutput};
 pub use error::{Error, Result};
 #[cfg(unix)]
 pub use runtime::{Runtime, VmHandle};
+#[cfg(unix)]
+pub use state::StateDb;
 pub use state::{Status, VmConfig, VmState};
 pub use sys::{DiskFormat, Feature, KernelFormat, LogStyle, SyncMode};
 pub use vm::{LogLevel, Vm, VmBuilder};

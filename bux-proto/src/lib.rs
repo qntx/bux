@@ -7,5 +7,5 @@
 mod codec;
 mod message;
 
-pub use codec::{decode, encode};
+pub use codec::{recv, send};
 pub use message::{AGENT_PORT, ExecReq, Request, Response};

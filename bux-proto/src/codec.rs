@@ -1,30 +1,36 @@
-//! Length-prefixed frame codec over any `Read`/`Write` stream.
+//! Async length-prefixed frame codec over any [`AsyncRead`]/[`AsyncWrite`] stream.
 //!
 //! Each frame is: `[u32 big-endian length][postcard payload]`.
 
-use std::io::{self, Read, Write};
+use std::io;
 
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Maximum allowed frame payload (16 MiB).
 const MAX_FRAME: u32 = 16 * 1024 * 1024;
 
-/// Encodes `msg` as a length-prefixed postcard frame and writes it to `w`.
-pub fn encode<W: Write>(w: &mut W, msg: &impl Serialize) -> io::Result<()> {
+/// Sends a postcard-serialized message with a 4-byte BE length prefix.
+pub async fn send(w: &mut (impl AsyncWrite + Unpin), msg: &impl Serialize) -> io::Result<()> {
     let payload =
         postcard::to_allocvec(msg).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let len = u32::try_from(payload.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame exceeds u32::MAX"))?;
-    w.write_all(&len.to_be_bytes())?;
-    w.write_all(&payload)?;
-    w.flush()
+    // Pre-assemble frame to minimize syscalls.
+    let mut frame = Vec::with_capacity(4 + payload.len());
+    frame.extend_from_slice(&len.to_be_bytes());
+    frame.extend_from_slice(&payload);
+    w.write_all(&frame).await?;
+    w.flush().await
 }
 
-/// Reads a length-prefixed postcard frame from `r` and decodes it.
-pub fn decode<T: for<'de> Deserialize<'de>>(r: &mut impl Read) -> io::Result<T> {
-    let mut buf = [0u8; 4];
-    r.read_exact(&mut buf)?;
-    let len = u32::from_be_bytes(buf);
+/// Receives and deserializes a length-prefixed postcard message.
+pub async fn recv<T: for<'de> Deserialize<'de>>(
+    r: &mut (impl AsyncRead + Unpin),
+) -> io::Result<T> {
+    let mut hdr = [0u8; 4];
+    r.read_exact(&mut hdr).await?;
+    let len = u32::from_be_bytes(hdr);
     if len > MAX_FRAME {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -32,7 +38,7 @@ pub fn decode<T: for<'de> Deserialize<'de>>(r: &mut impl Read) -> io::Result<T> 
         ));
     }
     let mut payload = vec![0u8; len as usize];
-    r.read_exact(&mut payload)?;
+    r.read_exact(&mut payload).await?;
     postcard::from_bytes(&payload).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
@@ -41,18 +47,16 @@ mod tests {
     use super::*;
     use crate::{ExecReq, Request, Response};
 
-    #[test]
-    fn roundtrip_ping_pong() {
-        let mut buf = Vec::new();
-        encode(&mut buf, &Request::Ping).unwrap();
-
-        let mut cursor = io::Cursor::new(&buf);
-        let decoded: Request = decode(&mut cursor).unwrap();
+    #[tokio::test]
+    async fn roundtrip_ping_pong() {
+        let (mut client, mut server) = tokio::io::duplex(1024);
+        send(&mut client, &Request::Ping).await.unwrap();
+        let decoded: Request = recv(&mut server).await.unwrap();
         assert!(matches!(decoded, Request::Ping));
     }
 
-    #[test]
-    fn roundtrip_exec() {
+    #[tokio::test]
+    async fn roundtrip_exec() {
         let req = Request::Exec(ExecReq {
             cmd: "/bin/ls".into(),
             args: vec!["-la".into()],
@@ -60,11 +64,9 @@ mod tests {
             cwd: Some("/tmp".into()),
         });
 
-        let mut buf = Vec::new();
-        encode(&mut buf, &req).unwrap();
-
-        let mut cursor = io::Cursor::new(&buf);
-        let decoded: Request = decode(&mut cursor).unwrap();
+        let (mut client, mut server) = tokio::io::duplex(1024);
+        send(&mut client, &req).await.unwrap();
+        let decoded: Request = recv(&mut server).await.unwrap();
         match decoded {
             Request::Exec(e) => {
                 assert_eq!(e.cmd, "/bin/ls");
@@ -74,8 +76,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn roundtrip_response_variants() {
+    #[tokio::test]
+    async fn roundtrip_response_variants() {
         let cases: Vec<Response> = vec![
             Response::Stdout(b"hello".to_vec()),
             Response::Stderr(b"error".to_vec()),
@@ -86,20 +88,19 @@ mod tests {
         ];
 
         for resp in cases {
-            let mut buf = Vec::new();
-            encode(&mut buf, &resp).unwrap();
-
-            let mut cursor = io::Cursor::new(&buf);
-            let _decoded: Response = decode(&mut cursor).unwrap();
+            let (mut client, mut server) = tokio::io::duplex(1024);
+            send(&mut client, &resp).await.unwrap();
+            let _: Response = recv(&mut server).await.unwrap();
         }
     }
 
-    #[test]
-    fn rejects_oversized_frame() {
-        // Craft a frame header claiming 32 MiB
-        let header = (32u32 * 1024 * 1024).to_be_bytes();
-        let mut cursor = io::Cursor::new(&header[..]);
-        let result: io::Result<Request> = decode(&mut cursor);
+    #[tokio::test]
+    async fn rejects_oversized_frame() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(32u32 * 1024 * 1024).to_be_bytes());
+        buf.extend_from_slice(&[0u8; 16]); // dummy payload bytes
+        let mut cursor = io::Cursor::new(buf);
+        let result: io::Result<Request> = recv(&mut cursor).await;
         assert!(result.is_err());
     }
 }

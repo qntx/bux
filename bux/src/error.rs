@@ -25,4 +25,21 @@ pub enum Error {
     /// An I/O error from runtime, client, or state operations.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    /// A VM or resource was not found.
+    #[error("{0}")]
+    NotFound(String),
+
+    /// An ambiguous identifier matched multiple VMs.
+    #[error("{0}")]
+    Ambiguous(String),
+
+    /// SQLite database error.
+    #[cfg(unix)]
+    #[error(transparent)]
+    Db(#[from] rusqlite::Error),
+
+    /// JSON serialization error (for config stored in SQLite).
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
 }

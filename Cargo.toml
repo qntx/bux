@@ -4,15 +4,15 @@ default-members = ["bux"]
 resolver = "3"
 
 [workspace.package]
-version = "0.4.1"
+version = "0.6.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/qntx/bux"
 
 [workspace.dependencies]
-bux = { version = "0.4", path = "bux" }
-bux-oci = { version = "0.4", path = "bux-oci" }
-bux-proto = { version = "0.4", path = "bux-proto" }
+bux = { version = "0.6", path = "bux" }
+bux-oci = { version = "0.6", path = "bux-oci" }
+bux-proto = { version = "0.6", path = "bux-proto" }
 bux-sys = { version = "0.1", path = "bux-sys" }
 
 anyhow = "1"
@@ -26,7 +26,9 @@ serde_json = "1"
 libc = "0.2"
 postcard = { version = "1", features = ["alloc"] }
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "io-util", "net", "time", "sync"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio-vsock = "0.7"
 bindgen = "0.72"
 flate2 = "1"
 tar = "0.4"

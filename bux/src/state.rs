@@ -1,8 +1,7 @@
-//! VM state types and JSON persistence.
+//! VM state types and SQLite persistence.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::SystemTime;
-use std::{fs, io};
 
 use serde::{Deserialize, Serialize};
 
@@ -44,6 +43,8 @@ pub struct VmConfig {
 pub struct VmState {
     /// Short hex identifier.
     pub id: String,
+    /// Optional human-friendly name (unique across the runtime).
+    pub name: Option<String>,
     /// Host PID of the VM process.
     pub pid: u32,
     /// OCI image reference (if pulled from a registry).
@@ -56,20 +57,6 @@ pub struct VmState {
     pub config: VmConfig,
     /// Timestamp when the VM was created.
     pub created_at: SystemTime,
-}
-
-impl VmState {
-    /// Loads state from a JSON file.
-    pub fn load(path: &Path) -> io::Result<Self> {
-        let data = fs::read_to_string(path)?;
-        serde_json::from_str(&data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-    }
-
-    /// Persists state to a JSON file.
-    pub fn save(&self, path: &Path) -> io::Result<()> {
-        let file = fs::File::create(path)?;
-        serde_json::to_writer_pretty(file, self).map_err(io::Error::other)
-    }
 }
 
 /// Generates a 12-character hex VM identifier.
@@ -89,3 +76,178 @@ pub(crate) fn gen_id() -> String {
     );
     format!("{:012x}", h.finish())
 }
+
+// --- SQLite persistence layer ---
+
+#[cfg(unix)]
+mod db {
+    use std::path::Path;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use rusqlite::{Connection, params};
+
+    use super::{Status, VmConfig, VmState};
+    use crate::error::{Error, Result};
+
+    const SCHEMA: &str = "
+        CREATE TABLE IF NOT EXISTS vms (
+            id         TEXT PRIMARY KEY NOT NULL,
+            name       TEXT UNIQUE,
+            pid        INTEGER NOT NULL,
+            image      TEXT,
+            socket     TEXT NOT NULL,
+            status     TEXT NOT NULL DEFAULT 'running',
+            config     TEXT NOT NULL,
+            created_at REAL NOT NULL
+        );
+    ";
+
+    /// SQLite-backed VM state database.
+    #[derive(Debug)]
+    pub struct StateDb {
+        conn: Connection,
+    }
+
+    impl StateDb {
+        /// Opens (or creates) the database at `path`.
+        pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+            let conn = Connection::open(path)?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+            conn.execute_batch(SCHEMA)?;
+            Ok(Self { conn })
+        }
+
+        /// Inserts a new VM state record.
+        pub fn insert(&self, s: &VmState) -> Result<()> {
+            let config_json = serde_json::to_string(&s.config)?;
+            let ts = system_time_to_f64(s.created_at);
+            self.conn.execute(
+                "INSERT INTO vms (id, name, pid, image, socket, status, config, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    s.id,
+                    s.name,
+                    s.pid,
+                    s.image,
+                    s.socket.to_string_lossy(),
+                    status_str(s.status),
+                    config_json,
+                    ts,
+                ],
+            )?;
+            Ok(())
+        }
+
+        /// Updates the status of a VM.
+        pub fn update_status(&self, id: &str, status: Status) -> Result<()> {
+            self.conn.execute(
+                "UPDATE vms SET status = ?1 WHERE id = ?2",
+                params![status_str(status), id],
+            )?;
+            Ok(())
+        }
+
+        /// Finds a VM by exact name.
+        pub fn get_by_name(&self, name: &str) -> Result<Option<VmState>> {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT * FROM vms WHERE name = ?1")?;
+            let mut rows = stmt.query_map(params![name], row_to_state)?;
+            rows.next().transpose().map_err(Into::into)
+        }
+
+        /// Finds a VM by exact ID or unique ID prefix.
+        pub fn get_by_id_prefix(&self, prefix: &str) -> Result<VmState> {
+            // Try exact match first.
+            let mut stmt = self
+                .conn
+                .prepare("SELECT * FROM vms WHERE id = ?1")?;
+            let mut rows = stmt.query_map(params![prefix], row_to_state)?;
+            if let Some(row) = rows.next() {
+                return Ok(row?);
+            }
+            drop(rows);
+            drop(stmt);
+
+            // Prefix search (id LIKE 'prefix%').
+            let pattern = format!("{prefix}%");
+            let mut stmt = self
+                .conn
+                .prepare("SELECT * FROM vms WHERE id LIKE ?1")?;
+            let matches: Vec<VmState> = stmt
+                .query_map(params![pattern], row_to_state)?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+
+            match matches.len() {
+                0 => Err(Error::NotFound(format!("no VM matching '{prefix}'"))),
+                1 => Ok(matches.into_iter().next().unwrap()),
+                n => Err(Error::Ambiguous(format!(
+                    "prefix '{prefix}' matches {n} VMs"
+                ))),
+            }
+        }
+
+        /// Lists all VMs.
+        pub fn list(&self) -> Result<Vec<VmState>> {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT * FROM vms ORDER BY created_at DESC")?;
+            let rows = stmt.query_map([], row_to_state)?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        }
+
+        /// Deletes a VM record by ID.
+        pub fn delete(&self, id: &str) -> Result<()> {
+            self.conn
+                .execute("DELETE FROM vms WHERE id = ?1", params![id])?;
+            Ok(())
+        }
+    }
+
+    /// Maps a row to a [`VmState`].
+    fn row_to_state(row: &rusqlite::Row<'_>) -> rusqlite::Result<VmState> {
+        let status_text: String = row.get("status")?;
+        let config_json: String = row.get("config")?;
+        let ts: f64 = row.get("created_at")?;
+        let socket_str: String = row.get("socket")?;
+
+        Ok(VmState {
+            id: row.get("id")?,
+            name: row.get("name")?,
+            pid: row.get("pid")?,
+            image: row.get("image")?,
+            socket: socket_str.into(),
+            status: parse_status(&status_text),
+            config: serde_json::from_str(&config_json)
+                .unwrap_or_else(|_| panic!("corrupt config JSON for VM")),
+            created_at: f64_to_system_time(ts),
+        })
+    }
+
+    fn status_str(s: Status) -> &'static str {
+        match s {
+            Status::Running => "running",
+            Status::Stopped => "stopped",
+        }
+    }
+
+    fn parse_status(s: &str) -> Status {
+        match s {
+            "running" => Status::Running,
+            _ => Status::Stopped,
+        }
+    }
+
+    fn system_time_to_f64(t: SystemTime) -> f64 {
+        t.duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64()
+    }
+
+    fn f64_to_system_time(secs: f64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs_f64(secs)
+    }
+}
+
+#[cfg(unix)]
+pub use db::StateDb;

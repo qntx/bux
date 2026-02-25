@@ -6,9 +6,6 @@
     clippy::missing_docs_in_private_items
 )]
 
-#[cfg(unix)]
-use std::io::Write;
-
 use anyhow::{Context, Result};
 use bux::{Feature, LogLevel, Vm};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -117,6 +114,14 @@ struct RunArgs {
     #[arg(long)]
     root: Option<String>,
 
+    /// Assign a name to the VM.
+    #[arg(long)]
+    name: Option<String>,
+
+    /// Run in background and print VM ID.
+    #[arg(long, short = 'd')]
+    detach: bool,
+
     /// Number of virtual CPUs.
     #[arg(long, default_value_t = 1)]
     cpus: u8,
@@ -195,12 +200,12 @@ impl Cli {
                 Ok(())
             }
             Command::Ps { format } => ps(format),
-            Command::Stop { id } => vm_stop(&id),
+            Command::Stop { id } => vm_stop(&id).await,
             Command::Kill { id } => vm_kill(&id),
             Command::Rm { id } => vm_rm(&id),
-            Command::Exec { id, command } => vm_exec(&id, command),
+            Command::Exec { id, command } => vm_exec(&id, command).await,
             Command::Inspect { id } => vm_inspect(&id),
-            Command::Cp { src, dst } => vm_cp(&src, &dst),
+            Command::Cp { src, dst } => vm_cp(&src, &dst).await,
         }
     }
 }
@@ -208,6 +213,11 @@ impl Cli {
 impl RunArgs {
     async fn run(self) -> Result<()> {
         let (rootfs, cfg) = self.resolve_rootfs().await?;
+
+        // Save fields needed after partial moves below.
+        let image = self.image.clone();
+        let name = self.name;
+        let detach = self.detach;
 
         let mut b = Vm::builder()
             .vcpus(self.cpus)
@@ -279,8 +289,7 @@ impl RunArgs {
             b = b.console_output(path);
         }
 
-        b.build()?.start()?;
-        Ok(())
+        spawn_vm(b, image, name, detach).await
     }
 
     /// Resolves rootfs path and optional OCI config from image or --root flag.
@@ -413,6 +422,46 @@ fn info(format: OutputFormat) -> Result<()> {
     Ok(())
 }
 
+/// Spawns a VM via the runtime for managed lifecycle.
+#[cfg(unix)]
+async fn spawn_vm(
+    builder: bux::VmBuilder,
+    image: Option<String>,
+    name: Option<String>,
+    detach: bool,
+) -> Result<()> {
+    let rt = open_runtime()?;
+    let handle = rt.spawn(builder, image, name).await?;
+
+    let id = &handle.state().id;
+    if detach {
+        println!(
+            "{}",
+            handle.state().name.as_deref().unwrap_or(id)
+        );
+        return Ok(());
+    }
+
+    // Foreground: print ID and wait for VM to exit.
+    eprintln!("{id}");
+    while handle.is_alive() {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Ok(())
+}
+
+/// Spawns a VM (non-unix stub).
+#[cfg(not(unix))]
+#[allow(clippy::unused_async)]
+async fn spawn_vm(
+    _builder: bux::VmBuilder,
+    _image: Option<String>,
+    _name: Option<String>,
+    _detach: bool,
+) -> Result<()> {
+    anyhow::bail!("VM execution requires Linux or macOS")
+}
+
 #[cfg(unix)]
 fn open_runtime() -> Result<bux::Runtime> {
     let data_dir = dirs::data_dir()
@@ -435,24 +484,31 @@ fn ps(format: OutputFormat) -> Result<()> {
         println!("No VMs.");
         return Ok(());
     }
-    println!("{:<14} {:<8} {:<10} {}", "ID", "PID", "STATUS", "IMAGE");
+    println!(
+        "{:<14} {:<16} {:<8} {:<10} {}",
+        "ID", "NAME", "PID", "STATUS", "IMAGE"
+    );
     for vm in &vms {
+        let name = vm.name.as_deref().unwrap_or("-");
         let image = vm.image.as_deref().unwrap_or("-");
         let status = match vm.status {
             bux::Status::Running => "running",
             bux::Status::Stopped => "stopped",
             _ => "unknown",
         };
-        println!("{:<14} {:<8} {:<10} {}", vm.id, vm.pid, status, image);
+        println!(
+            "{:<14} {:<16} {:<8} {:<10} {}",
+            vm.id, name, vm.pid, status, image
+        );
     }
     Ok(())
 }
 
 #[cfg(unix)]
-fn vm_stop(id: &str) -> Result<()> {
+async fn vm_stop(id: &str) -> Result<()> {
     let rt = open_runtime()?;
     let mut handle = rt.get(id)?;
-    handle.stop()?;
+    handle.stop().await?;
     eprintln!("Stopped: {}", handle.state().id);
     Ok(())
 }
@@ -475,19 +531,28 @@ fn vm_rm(id: &str) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn vm_exec(id: &str, command: Vec<String>) -> Result<()> {
+async fn vm_exec(id: &str, command: Vec<String>) -> Result<()> {
+    use std::io::Write;
+
     let rt = open_runtime()?;
     let handle = rt.get(id)?;
 
     let (cmd, args) = command.split_first().context("exec requires a command")?;
     let req = bux::ExecReq::new(cmd).args(args.to_vec());
-    let output = handle.exec(req)?;
 
-    std::io::stdout().write_all(&output.stdout)?;
-    std::io::stderr().write_all(&output.stderr)?;
+    let code = handle
+        .exec_stream(req, |event| match event {
+            bux::ExecEvent::Stdout(d) => {
+                let _ = std::io::stdout().write_all(&d);
+            }
+            bux::ExecEvent::Stderr(d) => {
+                let _ = std::io::stderr().write_all(&d);
+            }
+        })
+        .await?;
 
-    if output.code != 0 {
-        std::process::exit(output.code);
+    if code != 0 {
+        std::process::exit(code);
     }
     Ok(())
 }
@@ -509,21 +574,21 @@ fn parse_guest_ref(s: &str) -> Option<(&str, &str)> {
 }
 
 #[cfg(unix)]
-fn vm_cp(src: &str, dst: &str) -> Result<()> {
+async fn vm_cp(src: &str, dst: &str) -> Result<()> {
     let rt = open_runtime()?;
 
     match (parse_guest_ref(src), parse_guest_ref(dst)) {
         // guest → host
         (Some((id, guest_path)), None) => {
             let handle = rt.get(id)?;
-            let data = handle.read_file(guest_path)?;
+            let data = handle.read_file(guest_path).await?;
             std::fs::write(dst, &data)?;
         }
         // host → guest
         (None, Some((id, guest_path))) => {
             let handle = rt.get(id)?;
             let data = std::fs::read(src)?;
-            handle.write_file(guest_path, &data, 0o644)?;
+            handle.write_file(guest_path, &data, 0o644).await?;
         }
         _ => anyhow::bail!("exactly one of src/dst must use <id>:<path> format"),
     }
@@ -533,9 +598,16 @@ fn vm_cp(src: &str, dst: &str) -> Result<()> {
 // Non-unix stubs — VM commands require libkrun (Linux/macOS).
 #[cfg(not(unix))]
 macro_rules! unix_only_stub {
-    ($($name:ident($($arg:ident: $ty:ty),*));+ $(;)?) => {
+    (sync: $($name:ident($($arg:ident: $ty:ty),*));+ $(;)?) => {
         $(
             fn $name($(_: $ty),*) -> Result<()> {
+                anyhow::bail!("VM management requires Linux or macOS")
+            }
+        )+
+    };
+    (async: $($name:ident($($arg:ident: $ty:ty),*));+ $(;)?) => {
+        $(
+            async fn $name($(_: $ty),*) -> Result<()> {
                 anyhow::bail!("VM management requires Linux or macOS")
             }
         )+
@@ -544,11 +616,17 @@ macro_rules! unix_only_stub {
 
 #[cfg(not(unix))]
 unix_only_stub! {
+    sync:
     ps(format: OutputFormat);
-    vm_stop(id: &str);
     vm_kill(id: &str);
     vm_rm(id: &str);
-    vm_exec(id: &str, command: Vec<String>);
     vm_inspect(id: &str);
+}
+
+#[cfg(not(unix))]
+unix_only_stub! {
+    async:
+    vm_stop(id: &str);
+    vm_exec(id: &str, command: Vec<String>);
     vm_cp(src: &str, dst: &str);
 }

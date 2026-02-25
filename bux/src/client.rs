@@ -1,15 +1,26 @@
-//! Host-side client for communicating with a bux guest agent.
+//! Async host-side client for communicating with a bux guest agent.
 //!
-//! Connects to the guest agent via the Unix socket that libkrun maps
-//! from a vsock port (see [`krun_add_vsock_port2`]).
+//! Connects via the Unix socket that libkrun maps from a vsock port.
+//! Uses a persistent connection with interior mutability (`tokio::sync::Mutex`)
+//! so all methods take `&self`.
 
 #[cfg(unix)]
 mod inner {
     use std::io;
-    use std::os::unix::net::UnixStream;
     use std::path::Path;
 
     use bux_proto::{ExecReq, Request, Response};
+    use tokio::net::UnixStream;
+    use tokio::sync::Mutex;
+
+    /// Event emitted during streaming command execution.
+    #[derive(Debug)]
+    pub enum ExecEvent {
+        /// A chunk of stdout data.
+        Stdout(Vec<u8>),
+        /// A chunk of stderr data.
+        Stderr(Vec<u8>),
+    }
 
     /// Output captured from a command executed inside the guest.
     #[derive(Debug)]
@@ -22,58 +33,57 @@ mod inner {
         pub code: i32,
     }
 
-    /// A client connection to a running guest agent.
+    /// Async client connection to a running guest agent.
+    ///
+    /// Holds a persistent Unix socket connection. All methods take `&self`
+    /// thanks to an internal `Mutex`.
     #[derive(Debug)]
     pub struct Client {
-        /// The underlying Unix socket stream.
-        stream: UnixStream,
+        stream: Mutex<UnixStream>,
     }
 
     impl Client {
         /// Connects to a guest agent via its Unix socket path.
-        pub fn connect(path: impl AsRef<Path>) -> io::Result<Self> {
-            let stream = UnixStream::connect(path)?;
-            Ok(Self { stream })
-        }
-
-        /// Sends a ping and waits for a pong.
-        pub fn ping(&mut self) -> io::Result<()> {
-            self.send_expect(&Request::Ping, |r| matches!(r, Response::Pong))
-        }
-
-        /// Requests graceful shutdown of the guest agent.
-        pub fn shutdown(&mut self) -> io::Result<()> {
-            self.send_expect(&Request::Shutdown, |r| matches!(r, Response::Ok))
-        }
-
-        /// Sends a signal to a process inside the guest.
-        pub fn signal(&mut self, pid: u32, signal: i32) -> io::Result<()> {
-            self.send_expect(&Request::Signal { pid, signal }, |r| {
-                matches!(r, Response::Ok)
+        pub async fn connect(path: impl AsRef<Path>) -> io::Result<Self> {
+            let stream = UnixStream::connect(path).await?;
+            Ok(Self {
+                stream: Mutex::new(stream),
             })
         }
 
-        /// Executes a command and collects all output.
-        ///
-        /// Blocks until the command exits. Stdout and stderr chunks are
-        /// accumulated into [`ExecOutput`].
-        pub fn exec(&mut self, req: ExecReq) -> io::Result<ExecOutput> {
-            bux_proto::encode(&mut self.stream, &Request::Exec(req))?;
+        /// Sends a ping and waits for a pong.
+        pub async fn ping(&self) -> io::Result<()> {
+            self.send_expect(&Request::Ping, |r| matches!(r, Response::Pong))
+                .await
+        }
 
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
+        /// Requests graceful shutdown of the guest agent.
+        pub async fn shutdown(&self) -> io::Result<()> {
+            self.send_expect(&Request::Shutdown, |r| matches!(r, Response::Ok))
+                .await
+        }
 
+        /// Sends a signal to a process inside the guest.
+        pub async fn signal(&self, pid: u32, signal: i32) -> io::Result<()> {
+            self.send_expect(&Request::Signal { pid, signal }, |r| {
+                matches!(r, Response::Ok)
+            })
+            .await
+        }
+
+        /// Executes a command, streaming output via callback. Returns exit code.
+        pub async fn exec_stream(
+            &self,
+            req: ExecReq,
+            mut on: impl FnMut(ExecEvent),
+        ) -> io::Result<i32> {
+            let mut stream = self.stream.lock().await;
+            bux_proto::send(&mut *stream, &Request::Exec(req)).await?;
             loop {
-                match bux_proto::decode::<Response>(&mut self.stream)? {
-                    Response::Stdout(d) => stdout.extend(d),
-                    Response::Stderr(d) => stderr.extend(d),
-                    Response::Exit(code) => {
-                        return Ok(ExecOutput {
-                            stdout,
-                            stderr,
-                            code,
-                        });
-                    }
+                match bux_proto::recv::<Response>(&mut *stream).await? {
+                    Response::Stdout(d) => on(ExecEvent::Stdout(d)),
+                    Response::Stderr(d) => on(ExecEvent::Stderr(d)),
+                    Response::Exit(code) => return Ok(code),
                     Response::Error(e) => {
                         return Err(io::Error::new(io::ErrorKind::Other, e));
                     }
@@ -87,15 +97,34 @@ mod inner {
             }
         }
 
+        /// Executes a command and collects all output.
+        pub async fn exec(&self, req: ExecReq) -> io::Result<ExecOutput> {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = self
+                .exec_stream(req, |event| match event {
+                    ExecEvent::Stdout(d) => stdout.extend(d),
+                    ExecEvent::Stderr(d) => stderr.extend(d),
+                })
+                .await?;
+            Ok(ExecOutput {
+                stdout,
+                stderr,
+                code,
+            })
+        }
+
         /// Reads a file from the guest filesystem.
-        pub fn read_file(&mut self, path: &str) -> io::Result<Vec<u8>> {
-            bux_proto::encode(
-                &mut self.stream,
+        pub async fn read_file(&self, path: &str) -> io::Result<Vec<u8>> {
+            let mut stream = self.stream.lock().await;
+            bux_proto::send(
+                &mut *stream,
                 &Request::ReadFile {
                     path: path.to_owned(),
                 },
-            )?;
-            match bux_proto::decode::<Response>(&mut self.stream)? {
+            )
+            .await?;
+            match bux_proto::recv::<Response>(&mut *stream).await? {
                 Response::FileData(data) => Ok(data),
                 Response::Error(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
                 _ => Err(io::Error::new(
@@ -106,7 +135,7 @@ mod inner {
         }
 
         /// Writes a file to the guest filesystem.
-        pub fn write_file(&mut self, path: &str, data: &[u8], mode: u32) -> io::Result<()> {
+        pub async fn write_file(&self, path: &str, data: &[u8], mode: u32) -> io::Result<()> {
             self.send_expect(
                 &Request::WriteFile {
                     path: path.to_owned(),
@@ -115,16 +144,18 @@ mod inner {
                 },
                 |r| matches!(r, Response::Ok),
             )
+            .await
         }
 
         /// Sends a request and expects a specific response variant.
-        fn send_expect(
-            &mut self,
+        async fn send_expect(
+            &self,
             req: &Request,
             ok: impl FnOnce(&Response) -> bool,
         ) -> io::Result<()> {
-            bux_proto::encode(&mut self.stream, req)?;
-            let resp: Response = bux_proto::decode(&mut self.stream)?;
+            let mut stream = self.stream.lock().await;
+            bux_proto::send(&mut *stream, req).await?;
+            let resp: Response = bux_proto::recv(&mut *stream).await?;
             if ok(&resp) {
                 Ok(())
             } else if let Response::Error(e) = resp {
@@ -140,4 +171,4 @@ mod inner {
 }
 
 #[cfg(unix)]
-pub use inner::{Client, ExecOutput};
+pub use inner::{Client, ExecEvent, ExecOutput};

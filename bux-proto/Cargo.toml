@@ -12,6 +12,10 @@ categories = ["encoding"]
 [dependencies]
 postcard = { workspace = true }
 serde = { workspace = true }
+tokio = { workspace = true, features = ["io-util"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true
