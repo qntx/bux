@@ -175,7 +175,7 @@ checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
 
 [[package]]
 name = "bux"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bux-proto",
  "bux-sys",
@@ -187,20 +187,21 @@ dependencies = [
 
 [[package]]
 name = "bux-cli"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "bux",
  "bux-oci",
  "clap",
  "clap_complete",
+ "dirs",
  "serde_json",
  "tokio",
 ]
 
 [[package]]
 name = "bux-guest"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bux-proto",
  "libc",
@@ -208,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "bux-oci"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "dirs",
  "flate2",
@@ -222,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "bux-proto"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "postcard",
  "serde",
