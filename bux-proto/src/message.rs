@@ -26,6 +26,7 @@ pub enum Request {
 
 /// Command execution request.
 #[derive(Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ExecReq {
     /// Executable path or name.
     pub cmd: String,
