@@ -307,43 +307,69 @@ impl Vm {
 
     /// Adds a disk image with an explicit format.
     pub fn add_disk2(
-        &mut self, block_id: &str, path: &str, format: DiskFormat, read_only: bool,
+        &mut self,
+        block_id: &str,
+        path: &str,
+        format: DiskFormat,
+        read_only: bool,
     ) -> Result<()> {
         sys::add_disk2(self.ctx, block_id, path, format, read_only)
     }
 
     /// Adds a disk image with full options: format, direct I/O, and sync mode.
     pub fn add_disk3(
-        &mut self, block_id: &str, path: &str, format: DiskFormat,
-        read_only: bool, direct_io: bool, sync: SyncMode,
+        &mut self,
+        block_id: &str,
+        path: &str,
+        format: DiskFormat,
+        read_only: bool,
+        direct_io: bool,
+        sync: SyncMode,
     ) -> Result<()> {
         sys::add_disk3(self.ctx, block_id, path, format, read_only, direct_io, sync)
     }
 
     /// Configures a block device as the root filesystem (remount after boot).
     pub fn set_root_disk_remount(
-        &mut self, device: &str, fstype: Option<&str>, options: Option<&str>,
+        &mut self,
+        device: &str,
+        fstype: Option<&str>,
+        options: Option<&str>,
     ) -> Result<()> {
         sys::set_root_disk_remount(self.ctx, device, fstype, options)
     }
 
     /// Adds a virtio-net device with a Unix stream backend (passt / socket\_vmnet).
     pub fn add_net_unixstream(
-        &mut self, path: Option<&str>, fd: i32, mac: &[u8; 6], features: u32, flags: u32,
+        &mut self,
+        path: Option<&str>,
+        fd: i32,
+        mac: &[u8; 6],
+        features: u32,
+        flags: u32,
     ) -> Result<()> {
         sys::add_net_unixstream(self.ctx, path, fd, mac, features, flags)
     }
 
     /// Adds a virtio-net device with a Unix datagram backend (gvproxy / vmnet-helper).
     pub fn add_net_unixgram(
-        &mut self, path: Option<&str>, fd: i32, mac: &[u8; 6], features: u32, flags: u32,
+        &mut self,
+        path: Option<&str>,
+        fd: i32,
+        mac: &[u8; 6],
+        features: u32,
+        flags: u32,
     ) -> Result<()> {
         sys::add_net_unixgram(self.ctx, path, fd, mac, features, flags)
     }
 
     /// Adds a virtio-net device with a TAP backend.
     pub fn add_net_tap(
-        &mut self, name: &str, mac: &[u8; 6], features: u32, flags: u32,
+        &mut self,
+        name: &str,
+        mac: &[u8; 6],
+        features: u32,
+        flags: u32,
     ) -> Result<()> {
         sys::add_net_tap(self.ctx, name, mac, features, flags)
     }
@@ -399,7 +425,12 @@ impl Vm {
     }
 
     /// Sets the physical size of a display in millimeters.
-    pub fn display_set_physical_size(&mut self, display_id: u32, w_mm: u16, h_mm: u16) -> Result<()> {
+    pub fn display_set_physical_size(
+        &mut self,
+        display_id: u32,
+        w_mm: u16,
+        h_mm: u16,
+    ) -> Result<()> {
         sys::display_set_physical_size(self.ctx, display_id, w_mm, h_mm)
     }
 
@@ -420,8 +451,11 @@ impl Vm {
 
     /// Sets the kernel, initramfs, and command line.
     pub fn set_kernel(
-        &mut self, path: &str, format: KernelFormat,
-        initramfs: Option<&str>, cmdline: Option<&str>,
+        &mut self,
+        path: &str,
+        format: KernelFormat,
+        initramfs: Option<&str>,
+        cmdline: Option<&str>,
     ) -> Result<()> {
         sys::set_kernel(self.ctx, path, format, initramfs, cmdline)
     }
@@ -437,7 +471,13 @@ impl Vm {
     }
 
     /// Initializes logging with full control.
-    pub fn init_log(&mut self, target_fd: i32, level: u32, style: LogStyle, options: u32) -> Result<()> {
+    pub fn init_log(
+        &mut self,
+        target_fd: i32,
+        level: u32,
+        style: LogStyle,
+        options: u32,
+    ) -> Result<()> {
         sys::init_log(target_fd, level, style, options)
     }
 
@@ -447,7 +487,12 @@ impl Vm {
     }
 
     /// Adds a default virtio console with explicit file descriptors.
-    pub fn add_virtio_console_default(&mut self, input_fd: i32, output_fd: i32, err_fd: i32) -> Result<()> {
+    pub fn add_virtio_console_default(
+        &mut self,
+        input_fd: i32,
+        output_fd: i32,
+        err_fd: i32,
+    ) -> Result<()> {
         sys::add_virtio_console_default(self.ctx, input_fd, output_fd, err_fd)
     }
 
@@ -468,7 +513,11 @@ impl Vm {
 
     /// Adds an I/O port to a multiport console.
     pub fn add_console_port_inout(
-        &mut self, console_id: u32, name: &str, input_fd: i32, output_fd: i32,
+        &mut self,
+        console_id: u32,
+        name: &str,
+        input_fd: i32,
+        output_fd: i32,
     ) -> Result<()> {
         sys::add_console_port_inout(self.ctx, console_id, name, input_fd, output_fd)
     }
