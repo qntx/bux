@@ -20,11 +20,13 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Header URL pinned to a release tag on the containers/libkrun fork.
-/// Version **must** match `LIBKRUN_VERSION` in `.github/workflows/deps-build.yml`.
+/// Pinned native library versions — keep in sync with `.github/workflows/deps-build.yml`.
+const LIBKRUN_VERSION: &str = "1.17.4";
+const LIBKRUNFW_VERSION: &str = "5.2.1";
+
+/// Base URL template for downloading the libkrun header.
 #[cfg(feature = "regenerate")]
-const HEADER_URL: &str =
-    "https://raw.githubusercontent.com/containers/libkrun/v1.17.4/include/libkrun.h";
+const HEADER_URL_BASE: &str = "https://raw.githubusercontent.com/containers/libkrun";
 
 /// GitHub repository for downloading pre-built library releases.
 const GITHUB_REPO: &str = "qntx/bux";
@@ -61,10 +63,6 @@ fn main() {
     println!("cargo:LIB_DIR={}", lib_dir.display());
 }
 
-// ===========================================================================
-// Bindings generation (only compiled with `regenerate` feature)
-// ===========================================================================
-
 /// Download `libkrun.h` from the pinned fork into `$OUT_DIR`.
 #[cfg(feature = "regenerate")]
 fn download_header(out_dir: &Path) -> PathBuf {
@@ -73,8 +71,9 @@ fn download_header(out_dir: &Path) -> PathBuf {
         return path;
     }
 
-    eprintln!("bux-sys: downloading header from {HEADER_URL}");
-    let resp = ureq::get(HEADER_URL)
+    let url = format!("{HEADER_URL_BASE}/v{LIBKRUN_VERSION}/include/libkrun.h");
+    eprintln!("bux-sys: downloading header from {url}");
+    let resp = ureq::get(&url)
         .call()
         .unwrap_or_else(|e| panic!("Failed to download libkrun.h: {e}"));
 
@@ -121,10 +120,6 @@ fn generate_bindings(header: &Path, out_dir: &Path) {
         );
     }
 }
-
-// ===========================================================================
-// Library acquisition
-// ===========================================================================
 
 /// Obtain the pre-built dynamic library — local directory or GitHub Releases.
 fn obtain_libraries(target: &str, out_dir: &Path) -> PathBuf {
@@ -177,4 +172,48 @@ fn download_libs(version: &str, target: &str, dest: &Path) {
         dest.join(lib_filename(target)).exists(),
         "Library not found after extraction. Check GitHub Release deps-v{version}."
     );
+
+    // libkrun loads libkrunfw via dlopen with a versioned soname.
+    // Create versioned symlinks so the runtime linker can find them.
+    create_versioned_symlinks(dest, target);
+}
+
+/// Extract the major version component from a semver string (e.g. `"5.2.1"` → `"5"`).
+fn major_version(version: &str) -> &str {
+    version.split('.').next().expect("empty version string")
+}
+
+/// Create versioned symlinks (e.g. `libkrunfw.so.5 -> libkrunfw.so`) so that
+/// `dlopen("libkrunfw.so.5")` succeeds at runtime.
+fn create_versioned_symlinks(dir: &Path, target: &str) {
+    if target.contains("apple") {
+        // macOS uses unversioned dylib names — no symlinks needed.
+        return;
+    }
+
+    // Derive major version from pinned version strings for soname symlinks.
+    let krun_major = major_version(LIBKRUN_VERSION);
+    let krunfw_major = major_version(LIBKRUNFW_VERSION);
+
+    let pairs = [
+        ("libkrun.so", format!("libkrun.so.{krun_major}")),
+        ("libkrunfw.so", format!("libkrunfw.so.{krunfw_major}")),
+    ];
+
+    for (src, link) in &pairs {
+        let src_path = dir.join(src);
+        let link_path = dir.join(link);
+        if src_path.exists() && !link_path.exists() {
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(src, &link_path).unwrap_or_else(|e| {
+                    eprintln!("bux-sys: warning: failed to create symlink {link}: {e}");
+                });
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = fs::copy(&src_path, &link_path);
+            }
+        }
+    }
 }
