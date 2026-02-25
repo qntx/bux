@@ -41,7 +41,10 @@ impl CStringArray {
             .collect::<std::result::Result<_, _>>()?;
         let mut ptrs: Vec<*const c_char> = owned.iter().map(|c| c.as_ptr()).collect();
         ptrs.push(std::ptr::null());
-        Ok(Self { _owned: owned, ptrs })
+        Ok(Self {
+            _owned: owned,
+            ptrs,
+        })
     }
 
     /// Returns a pointer to the NULL-terminated array.
@@ -93,7 +96,9 @@ pub fn set_vm_config(ctx: u32, vcpus: u8, ram_mib: u32) -> Result<()> {
 /// Sets the root filesystem path.
 pub fn set_root(ctx: u32, path: &str) -> Result<()> {
     let c = CString::new(path)?;
-    check("set_root", unsafe { bux_sys::krun_set_root(ctx, c.as_ptr()) })
+    check("set_root", unsafe {
+        bux_sys::krun_set_root(ctx, c.as_ptr())
+    })
 }
 
 /// Sets the working directory inside the VM.
@@ -107,12 +112,7 @@ pub fn set_workdir(ctx: u32, path: &str) -> Result<()> {
 /// Sets the executable, arguments, and optionally environment variables.
 ///
 /// If `env` is `None`, libkrun auto-inherits the host environment.
-pub fn set_exec(
-    ctx: u32,
-    path: &str,
-    args: &[String],
-    env: Option<&[String]>,
-) -> Result<()> {
+pub fn set_exec(ctx: u32, path: &str, args: &[String], env: Option<&[String]>) -> Result<()> {
     let c_path = CString::new(path)?;
     let argv = CStringArray::new(args)?;
 
@@ -160,9 +160,7 @@ pub fn add_virtiofs(ctx: u32, tag: &str, host_path: &str) -> Result<()> {
 /// On success this function **never returns** — libkrun calls `exit()` when
 /// the VM shuts down.  It only returns on pre-start configuration errors.
 pub fn start_enter(ctx: u32) -> Result<()> {
-    check("start_enter", unsafe {
-        bux_sys::krun_start_enter(ctx)
-    })
+    check("start_enter", unsafe { bux_sys::krun_start_enter(ctx) })
 }
 
 // ---------------------------------------------------------------------------

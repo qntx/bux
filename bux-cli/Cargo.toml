@@ -5,11 +5,18 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 readme = "../README.md"
-description = "CLI for Embedded micro-VM sandbox for running AI agents"
-keywords = ["ai", "sandbox", "vm", "embedded"]
-categories = ["embedded", "no-std"]
+description = "CLI for the bux micro-VM sandbox"
+keywords = ["ai", "sandbox", "vm", "cli"]
+categories = ["command-line-utilities", "virtualization"]
+
+[[bin]]
+name = "bux"
+path = "src/main.rs"
 
 [dependencies]
+bux.workspace = true
+anyhow.workspace = true
+clap.workspace = true
 
 [lints]
 workspace = true
