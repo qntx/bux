@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 bux.workspace = true
+bux-oci.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 

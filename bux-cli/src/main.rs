@@ -183,7 +183,11 @@ fn info() -> Result<()> {
         .filter(|(f, _)| Vm::has_feature(*f).unwrap_or(false))
         .map(|(_, name)| *name)
         .collect();
-    let label = if supported.is_empty() { "none".into() } else { supported.join(", ") };
+    let label = if supported.is_empty() {
+        "none".into()
+    } else {
+        supported.join(", ")
+    };
     println!("features:  {label}");
 
     match Vm::check_nested_virt() {
