@@ -6,10 +6,12 @@ license.workspace = true
 repository.workspace = true
 readme = "../README.md"
 description = "Embedded micro-VM sandbox for running AI agents"
-keywords = ["ai", "sandbox", "vm", "embedded"]
-categories = ["embedded", "no-std"]
+keywords = ["ai", "sandbox", "vm", "kvm"]
+categories = ["virtualization", "api-bindings"]
 
 [dependencies]
+bux-sys.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true
