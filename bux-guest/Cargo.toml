@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "../README.md"
+description = "Guest agent for bux micro-VM sandbox"
+keywords = ["ai", "sandbox", "vm", "guest"]
+categories = ["virtualization"]
 
 [dependencies]
 
