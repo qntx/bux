@@ -75,7 +75,7 @@ jobs:
           fi
 
           git clone --depth 1 --branch "v${LIBKRUN_VERSION}" --recurse-submodules \
-            https://github.com/qntx/libkrun.git libkrun-src
+            https://github.com/containers/libkrun.git libkrun-src
           cd libkrun-src
           make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu) NET=1 BLK=1
           make PREFIX="${{ github.workspace }}/prefix" install
