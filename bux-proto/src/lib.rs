@@ -1,14 +1,11 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Wire protocol for bux host↔guest communication.
+//!
+//! Messages are serialized with [`postcard`] and framed with a 4-byte
+//! big-endian length prefix, suitable for any reliable byte stream
+//! (vsock, Unix socket, TCP).
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+mod codec;
+mod message;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use codec::{decode, encode};
+pub use message::{AGENT_PORT, ExecReq, Request, Response};
