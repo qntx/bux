@@ -7,11 +7,17 @@ resolver = "3"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/pyroth/bux"
+repository = "https://github.com/qntx/bux"
 
 [workspace.dependencies]
+bux-sys = { version = "0.1", path = "bux-sys" }
+
 clap = { version = "4.5", features = ["derive"] }
 colored = "3.0"
+bindgen = "0.72"
+flate2 = "1"
+tar = "0.4"
+ureq = "3"
 
 [profile.release]
 lto = true

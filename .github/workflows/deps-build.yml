@@ -1,0 +1,215 @@
+name: Build Dependencies
+
+# Triggered by pushing a deps version tag, or manually.
+on:
+  push:
+    tags:
+      - "deps-v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Deps version override (e.g. 0.1.0)"
+        required: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pin native library versions for reproducible builds.
+  LIBKRUN_VERSION: "1.17.4"
+  LIBKRUNFW_VERSION: "5.2.1"
+  LIBKRUNFW_REPO: "containers/libkrunfw"
+  LIBKRUN_REPO: "containers/libkrun"
+          
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS Apple Silicon
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            libkrun_lib: libkrun.dylib
+            libkrunfw_lib: libkrunfw.dylib
+
+          # Linux x86_64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            libkrun_lib: libkrun.so
+            libkrunfw_lib: libkrunfw.so
+
+          # Linux ARM64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            libkrun_lib: libkrun.so
+            libkrunfw_lib: libkrunfw.so
+            cross: true
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm lld patchelf || true
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential patchelf libfdt-dev
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.cross
+        run: |
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Clone libkrunfw
+        run: |
+          git clone --depth 1 --branch "v${{ env.LIBKRUNFW_VERSION }}" \
+            "https://github.com/${{ env.LIBKRUNFW_REPO }}.git" libkrunfw-src
+
+      - name: Clone libkrun
+        run: |
+          git clone --depth 1 --branch "v${{ env.LIBKRUN_VERSION }}" \
+            --recurse-submodules \
+            "https://github.com/${{ env.LIBKRUN_REPO }}.git" libkrun-src
+
+      - name: Build libkrunfw (macOS — from prebuilt kernel.c)
+        if: runner.os == 'macOS'
+        run: |
+          cd libkrunfw-src
+          # Download prebuilt kernel.c from upstream releases
+          KRUNFW_URL="https://github.com/${{ env.LIBKRUNFW_REPO }}/releases/download/v${{ env.LIBKRUNFW_VERSION }}/libkrunfw-prebuilt-aarch64.tgz"
+          curl -fsSL "$KRUNFW_URL" | tar xz
+          cd libkrunfw
+          make -j$(sysctl -n hw.ncpu)
+          make PREFIX="${{ github.workspace }}/install-krunfw" install
+
+      - name: Download libkrunfw (Linux x86_64 — prebuilt .so)
+        if: runner.os == 'Linux' && !matrix.cross
+        run: |
+          ARCH=$(uname -m)
+          KRUNFW_URL="https://github.com/${{ env.LIBKRUNFW_REPO }}/releases/download/v${{ env.LIBKRUNFW_VERSION }}/libkrunfw-${ARCH}.tgz"
+          mkdir -p "${{ github.workspace }}/install-krunfw"
+          curl -fsSL "$KRUNFW_URL" | tar xz -C "${{ github.workspace }}/install-krunfw"
+
+      - name: Download libkrunfw (Linux ARM64 — prebuilt .so)
+        if: matrix.cross
+        run: |
+          KRUNFW_URL="https://github.com/${{ env.LIBKRUNFW_REPO }}/releases/download/v${{ env.LIBKRUNFW_VERSION }}/libkrunfw-aarch64.tgz"
+          mkdir -p "${{ github.workspace }}/install-krunfw"
+          curl -fsSL "$KRUNFW_URL" | tar xz -C "${{ github.workspace }}/install-krunfw"
+
+      - name: Build libkrun (macOS)
+        if: runner.os == 'macOS'
+        env:
+          PKG_CONFIG_PATH: ${{ github.workspace }}/install-krunfw/lib/pkgconfig
+        run: |
+          cd libkrun-src
+          CLANG_PATH="$(brew --prefix llvm)/bin/clang"
+          CC_LINUX="${CLANG_PATH} -target aarch64-linux-gnu -fuse-ld=lld -Wl,-strip-debug --sysroot \$(SYSROOT_LINUX) -Wno-c23-extensions"
+          make -j$(sysctl -n hw.ncpu) NET=1 BLK=1 "CC_LINUX=${CC_LINUX}"
+          make PREFIX="${{ github.workspace }}/install-krun" install
+
+      - name: Build libkrun (Linux x86_64)
+        if: runner.os == 'Linux' && !matrix.cross
+        env:
+          PKG_CONFIG_PATH: ${{ github.workspace }}/install-krunfw/lib64/pkgconfig
+        run: |
+          cd libkrun-src
+          make -j$(nproc) NET=1 BLK=1
+          make PREFIX="${{ github.workspace }}/install-krun" install
+
+      - name: Build libkrun (Linux ARM64 cross)
+        if: matrix.cross
+        env:
+          PKG_CONFIG_PATH: ${{ github.workspace }}/install-krunfw/lib64/pkgconfig
+        run: |
+          cd libkrun-src
+          # Cross-compile for aarch64
+          export ARCH=aarch64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          make -j$(nproc) NET=1 BLK=1
+          make PREFIX="${{ github.workspace }}/install-krun" install
+
+      - name: Package libraries
+        run: |
+          mkdir -p dist
+
+          # Determine library directories
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            KRUN_LIB="${{ github.workspace }}/install-krun/lib"
+            KRUNFW_LIB="${{ github.workspace }}/install-krunfw/lib"
+          else
+            KRUN_LIB="${{ github.workspace }}/install-krun/lib64"
+            KRUNFW_LIB="${{ github.workspace }}/install-krunfw/lib64"
+          fi
+
+          # Copy libkrun (resolve symlinks, take the real file)
+          find "$KRUN_LIB" -name 'libkrun.*' -not -type l | head -1 | while read f; do
+            cp "$f" "dist/${{ matrix.libkrun_lib }}"
+          done
+
+          # Copy libkrunfw (resolve symlinks, take the real file)
+          find "$KRUNFW_LIB" -name 'libkrunfw.*' -not -type l | head -1 | while read f; do
+            cp "$f" "dist/${{ matrix.libkrunfw_lib }}"
+          done
+
+          # Fix SONAME / install_name
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            install_name_tool -id "@rpath/${{ matrix.libkrun_lib }}" "dist/${{ matrix.libkrun_lib }}"
+            install_name_tool -id "@rpath/${{ matrix.libkrunfw_lib }}" "dist/${{ matrix.libkrunfw_lib }}"
+            codesign -s - --force "dist/${{ matrix.libkrun_lib }}"
+            codesign -s - --force "dist/${{ matrix.libkrunfw_lib }}"
+          else
+            patchelf --set-soname "${{ matrix.libkrun_lib }}" "dist/${{ matrix.libkrun_lib }}"
+            patchelf --set-soname "${{ matrix.libkrunfw_lib }}" "dist/${{ matrix.libkrunfw_lib }}"
+          fi
+
+          ls -la dist/
+
+          # Create tarball (flat — files at archive root)
+          tar -czf "bux-deps-${{ matrix.target }}.tar.gz" -C dist .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bux-deps-${{ matrix.target }}
+          path: bux-deps-${{ matrix.target }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/deps-v')
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bux-deps-*.tar.gz
+          generate_release_notes: true
+
+  publish-sys:
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/deps-v')
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish bux-sys
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p bux-sys
