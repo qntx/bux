@@ -68,8 +68,7 @@ impl VmState {
     /// Persists state to a JSON file.
     pub fn save(&self, path: &Path) -> io::Result<()> {
         let file = fs::File::create(path)?;
-        serde_json::to_writer_pretty(file, self)
-            .map_err(io::Error::other)
+        serde_json::to_writer_pretty(file, self).map_err(io::Error::other)
     }
 }
 

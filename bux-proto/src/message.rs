@@ -38,6 +38,40 @@ pub struct ExecReq {
     pub cwd: Option<String>,
 }
 
+impl ExecReq {
+    /// Creates a new exec request for the given command.
+    #[must_use]
+    pub fn new(cmd: impl Into<String>) -> Self {
+        Self {
+            cmd: cmd.into(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+        }
+    }
+
+    /// Sets the command-line arguments.
+    #[must_use]
+    pub fn args(mut self, args: impl Into<Vec<String>>) -> Self {
+        self.args = args.into();
+        self
+    }
+
+    /// Sets the environment variables.
+    #[must_use]
+    pub fn env(mut self, env: impl Into<Vec<String>>) -> Self {
+        self.env = env.into();
+        self
+    }
+
+    /// Sets the working directory.
+    #[must_use]
+    pub fn cwd(mut self, cwd: impl Into<String>) -> Self {
+        self.cwd = Some(cwd.into());
+        self
+    }
+}
+
 /// Response sent from guest to host.
 ///
 /// For [`Request::Exec`], the guest streams zero or more [`Response::Stdout`]

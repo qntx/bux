@@ -32,6 +32,7 @@ mod state;
 mod sys;
 mod vm;
 
+pub use bux_proto::ExecReq;
 #[cfg(unix)]
 pub use client::{Client, ExecOutput};
 pub use error::{Error, Result};

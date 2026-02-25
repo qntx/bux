@@ -6,6 +6,9 @@
     clippy::missing_docs_in_private_items
 )]
 
+#[cfg(unix)]
+use std::io::Write;
+
 use anyhow::{Context, Result};
 use bux::{Feature, LogLevel, Vm};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -48,6 +51,40 @@ enum Command {
     Completion {
         /// Target shell.
         shell: Shell,
+    },
+    /// List managed VMs.
+    Ps {
+        /// Output format.
+        #[arg(long, default_value = "table")]
+        format: OutputFormat,
+    },
+    /// Stop a running VM (graceful shutdown).
+    Stop {
+        /// VM ID or prefix.
+        id: String,
+    },
+    /// Force-kill a running VM.
+    Kill {
+        /// VM ID or prefix.
+        id: String,
+    },
+    /// Remove a stopped VM.
+    Rm {
+        /// VM ID or prefix.
+        id: String,
+    },
+    /// Execute a command inside a running VM.
+    Exec {
+        /// VM ID or prefix.
+        id: String,
+        /// Command and arguments (after --).
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Show detailed information about a VM.
+    Inspect {
+        /// VM ID or prefix.
+        id: String,
     },
 }
 
@@ -148,6 +185,12 @@ impl Cli {
                 clap_complete::generate(shell, &mut Self::command(), "bux", &mut std::io::stdout());
                 Ok(())
             }
+            Command::Ps { format } => ps(format),
+            Command::Stop { id } => vm_stop(&id),
+            Command::Kill { id } => vm_kill(&id),
+            Command::Rm { id } => vm_rm(&id),
+            Command::Exec { id, command } => vm_exec(&id, command),
+            Command::Inspect { id } => vm_inspect(&id),
         }
     }
 }
@@ -358,4 +401,117 @@ fn info(format: OutputFormat) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn open_runtime() -> Result<bux::Runtime> {
+    let data_dir = dirs::data_dir()
+        .context("no platform data directory")?
+        .join("bux");
+    Ok(bux::Runtime::open(data_dir)?)
+}
+
+#[cfg(unix)]
+fn ps(format: OutputFormat) -> Result<()> {
+    let rt = open_runtime()?;
+    let vms = rt.list()?;
+
+    if matches!(format, OutputFormat::Json) {
+        println!("{}", serde_json::to_string_pretty(&vms)?);
+        return Ok(());
+    }
+
+    if vms.is_empty() {
+        println!("No VMs.");
+        return Ok(());
+    }
+    println!("{:<14} {:<8} {:<10} {}", "ID", "PID", "STATUS", "IMAGE");
+    for vm in &vms {
+        let image = vm.image.as_deref().unwrap_or("-");
+        let status = match vm.status {
+            bux::Status::Running => "running",
+            bux::Status::Stopped => "stopped",
+            _ => "unknown",
+        };
+        println!("{:<14} {:<8} {:<10} {}", vm.id, vm.pid, status, image);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn vm_stop(id: &str) -> Result<()> {
+    let rt = open_runtime()?;
+    let mut handle = rt.get(id)?;
+    handle.stop()?;
+    eprintln!("Stopped: {}", handle.state().id);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn vm_kill(id: &str) -> Result<()> {
+    let rt = open_runtime()?;
+    let mut handle = rt.get(id)?;
+    handle.kill()?;
+    eprintln!("Killed: {}", handle.state().id);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn vm_rm(id: &str) -> Result<()> {
+    let rt = open_runtime()?;
+    rt.remove(id)?;
+    eprintln!("Removed: {id}");
+    Ok(())
+}
+
+#[cfg(unix)]
+fn vm_exec(id: &str, command: Vec<String>) -> Result<()> {
+    let rt = open_runtime()?;
+    let handle = rt.get(id)?;
+
+    let (cmd, args) = command.split_first().context("exec requires a command")?;
+    let req = bux::ExecReq::new(cmd).args(args.to_vec());
+    let output = handle.exec(req)?;
+
+    std::io::stdout().write_all(&output.stdout)?;
+    std::io::stderr().write_all(&output.stderr)?;
+
+    if output.code != 0 {
+        std::process::exit(output.code);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn vm_inspect(id: &str) -> Result<()> {
+    let rt = open_runtime()?;
+    let handle = rt.get(id)?;
+    println!("{}", serde_json::to_string_pretty(handle.state())?);
+    Ok(())
+}
+
+// Non-unix stubs — these commands require libkrun (Linux/macOS).
+#[cfg(not(unix))]
+fn ps(_: OutputFormat) -> Result<()> {
+    anyhow::bail!("VM management requires Linux or macOS")
+}
+#[cfg(not(unix))]
+fn vm_stop(_: &str) -> Result<()> {
+    anyhow::bail!("VM management requires Linux or macOS")
+}
+#[cfg(not(unix))]
+fn vm_kill(_: &str) -> Result<()> {
+    anyhow::bail!("VM management requires Linux or macOS")
+}
+#[cfg(not(unix))]
+fn vm_rm(_: &str) -> Result<()> {
+    anyhow::bail!("VM management requires Linux or macOS")
+}
+#[cfg(not(unix))]
+fn vm_exec(_: &str, _: Vec<String>) -> Result<()> {
+    anyhow::bail!("VM management requires Linux or macOS")
+}
+#[cfg(not(unix))]
+fn vm_inspect(_: &str) -> Result<()> {
+    anyhow::bail!("VM management requires Linux or macOS")
 }
