@@ -1,6 +1,8 @@
 //! Virtual machine builder and lifecycle management.
 
 use crate::error::Result;
+#[cfg(unix)]
+use crate::state::VmConfig;
 use crate::sys::{self, DiskFormat, Feature, KernelFormat, LogStyle, SyncMode};
 
 /// Log verbosity level for libkrun.
@@ -214,6 +216,21 @@ impl VmBuilder {
     pub fn vsock_port(mut self, port: u32, host_path: impl Into<String>, listen: bool) -> Self {
         self.vsock_ports.push((port, host_path.into(), listen));
         self
+    }
+
+    /// Extracts a serializable configuration snapshot.
+    #[cfg(unix)]
+    pub(crate) fn to_config(&self) -> VmConfig {
+        VmConfig {
+            vcpus: self.vcpus,
+            ram_mib: self.ram_mib,
+            rootfs: self.root.clone(),
+            exec_path: self.exec_path.clone(),
+            exec_args: self.exec_args.clone(),
+            env: self.env.clone(),
+            workdir: self.workdir.clone(),
+            ports: self.ports.clone(),
+        }
     }
 
     /// Builds and returns the configured [`Vm`].

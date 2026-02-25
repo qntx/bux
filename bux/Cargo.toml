@@ -10,8 +10,14 @@ keywords = ["ai", "sandbox", "vm", "kvm"]
 categories = ["virtualization", "api-bindings"]
 
 [dependencies]
+bux-proto.workspace = true
 bux-sys.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [lints]
 workspace = true

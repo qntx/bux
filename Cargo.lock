@@ -177,7 +177,11 @@ checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
 name = "bux"
 version = "0.3.0"
 dependencies = [
+ "bux-proto",
  "bux-sys",
+ "libc",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
