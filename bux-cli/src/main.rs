@@ -7,26 +7,25 @@
 )]
 
 use anyhow::{Context, Result};
-use bux::{LogLevel, Vm};
+use bux::{Feature, LogLevel, Vm};
 use clap::{Parser, Subcommand};
 
-/// Embedded micro-VM sandbox for running AI agents.
-#[derive(Parser, Debug)]
-#[command(name = "bux", version, about)]
+#[derive(Parser)]
+#[command(name = "bux", version, about = "Micro-VM sandbox powered by libkrun")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand)]
 enum Command {
-    /// Start a micro-VM with the given root filesystem.
-    Run(RunArgs),
-    /// Query the maximum number of vCPUs supported by the hypervisor.
-    MaxVcpus,
+    /// Run a command in an isolated micro-VM.
+    Run(Box<RunArgs>),
+    /// Display system capabilities and libkrun feature support.
+    Info,
 }
 
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args)]
 struct RunArgs {
     /// Root filesystem path.
     #[arg(long)]
@@ -56,6 +55,30 @@ struct RunArgs {
     #[arg(long = "env", short = 'e')]
     envs: Vec<String>,
 
+    /// Set UID inside the VM.
+    #[arg(long)]
+    uid: Option<u32>,
+
+    /// Set GID inside the VM.
+    #[arg(long)]
+    gid: Option<u32>,
+
+    /// Resource limit (RESOURCE=RLIM_CUR:RLIM_MAX). Repeatable.
+    #[arg(long)]
+    rlimit: Vec<String>,
+
+    /// Enable nested virtualization (macOS only).
+    #[arg(long)]
+    nested_virt: bool,
+
+    /// Enable virtio-snd audio device.
+    #[arg(long)]
+    snd: bool,
+
+    /// Redirect console output to a file.
+    #[arg(long)]
+    console_output: Option<String>,
+
     /// libkrun log level.
     #[arg(long, default_value = "info")]
     log_level: LogLevel,
@@ -66,55 +89,108 @@ struct RunArgs {
 }
 
 fn main() {
-    let cli = Cli::parse();
-    if let Err(e) = dispatch(cli) {
+    if let Err(e) = Cli::parse().dispatch() {
         eprintln!("bux: {e:#}");
         std::process::exit(1);
     }
 }
 
-fn dispatch(cli: Cli) -> Result<()> {
-    match cli.command {
-        Command::Run(args) => run(args),
-        Command::MaxVcpus => {
-            println!("{}", Vm::max_vcpus()?);
-            Ok(())
+impl Cli {
+    fn dispatch(self) -> Result<()> {
+        match self.command {
+            Command::Run(args) => args.run(),
+            Command::Info => info(),
         }
     }
 }
 
-fn run(args: RunArgs) -> Result<()> {
-    let mut builder = Vm::builder()
-        .vcpus(args.cpus)
-        .ram_mib(args.ram)
-        .root(args.root)
-        .log_level(args.log_level);
+impl RunArgs {
+    fn run(self) -> Result<()> {
+        let mut builder = Vm::builder()
+            .vcpus(self.cpus)
+            .ram_mib(self.ram)
+            .root(&self.root)
+            .log_level(self.log_level);
 
-    if !args.command.is_empty() {
-        let exec_args: Vec<&str> = args.command[1..].iter().map(String::as_str).collect();
-        builder = builder.exec(&args.command[0], &exec_args);
+        if let Some(workdir) = self.workdir {
+            builder = builder.workdir(workdir);
+        }
+
+        if !self.command.is_empty() {
+            let args: Vec<&str> = self.command[1..].iter().map(String::as_str).collect();
+            builder = builder.exec(&self.command[0], &args);
+        }
+
+        if !self.envs.is_empty() {
+            let refs: Vec<&str> = self.envs.iter().map(String::as_str).collect();
+            builder = builder.env(&refs);
+        }
+
+        for port in self.ports {
+            builder = builder.port(port);
+        }
+
+        for vol in &self.volumes {
+            let (tag, path) = vol
+                .split_once(':')
+                .context("volume must be in TAG:HOST_PATH format")?;
+            builder = builder.virtiofs(tag, path);
+        }
+
+        if let Some(uid) = self.uid {
+            builder = builder.uid(uid);
+        }
+        if let Some(gid) = self.gid {
+            builder = builder.gid(gid);
+        }
+        for rl in self.rlimit {
+            builder = builder.rlimit(rl);
+        }
+        if self.nested_virt {
+            builder = builder.nested_virt(true);
+        }
+        if self.snd {
+            builder = builder.snd_device(true);
+        }
+        if let Some(path) = self.console_output {
+            builder = builder.console_output(path);
+        }
+
+        builder.build()?.start()?;
+        Ok(())
+    }
+}
+
+const FEATURES: &[(Feature, &str)] = &[
+    (Feature::Net, "net"),
+    (Feature::Blk, "blk"),
+    (Feature::Gpu, "gpu"),
+    (Feature::Snd, "snd"),
+    (Feature::Input, "input"),
+    (Feature::Efi, "efi"),
+    (Feature::Tee, "tee"),
+    (Feature::AmdSev, "amd-sev"),
+    (Feature::IntelTdx, "intel-tdx"),
+    (Feature::AwsNitro, "aws-nitro"),
+    (Feature::VirglResourceMap2, "virgl-resource-map2"),
+];
+
+fn info() -> Result<()> {
+    println!("max vCPUs: {}", Vm::max_vcpus()?);
+
+    let supported: Vec<&str> = FEATURES
+        .iter()
+        .filter(|(f, _)| Vm::has_feature(*f).unwrap_or(false))
+        .map(|(_, name)| *name)
+        .collect();
+    let label = if supported.is_empty() { "none".into() } else { supported.join(", ") };
+    println!("features:  {label}");
+
+    match Vm::check_nested_virt() {
+        Ok(true) => println!("nested:    supported"),
+        Ok(false) => println!("nested:    not supported"),
+        Err(_) => {}
     }
 
-    if !args.envs.is_empty() {
-        let env_refs: Vec<&str> = args.envs.iter().map(String::as_str).collect();
-        builder = builder.env(&env_refs);
-    }
-
-    if let Some(workdir) = args.workdir {
-        builder = builder.workdir(workdir);
-    }
-
-    for port in args.ports {
-        builder = builder.port(port);
-    }
-
-    for vol in &args.volumes {
-        let (tag, path) = vol
-            .split_once(':')
-            .context("volume must be in TAG:HOST_PATH format")?;
-        builder = builder.virtiofs(tag, path);
-    }
-
-    builder.build()?.start()?;
     Ok(())
 }
