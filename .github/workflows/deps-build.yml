@@ -34,31 +34,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install dependencies (macOS)
+      - name: Install libkrun & libkrunfw (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install llvm
-          LLVM_BIN="$(brew --prefix llvm)/bin"
-          echo "$LLVM_BIN" >> "$GITHUB_PATH"
-          # clang -fuse-ld=lld looks for 'ld.lld' — create symlink if brew didn't
-          [ -f "$LLVM_BIN/ld.lld" ] || ln -sf "$LLVM_BIN/lld" "$LLVM_BIN/ld.lld"
+          brew tap slp/krun
+          brew install slp/krun/libkrunfw slp/krun/libkrun
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential patchelf libfdt-dev clang libclang-dev libcap-ng-dev
-
-      - name: Build libkrunfw (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          git clone --depth 1 --branch "v${LIBKRUNFW_VERSION}" \
-            https://github.com/containers/libkrunfw.git libkrunfw-src
-          cd libkrunfw-src
-          curl -fsSL "https://github.com/containers/libkrunfw/releases/download/v${LIBKRUNFW_VERSION}/libkrunfw-prebuilt-aarch64.tgz" | tar xz
-          cd libkrunfw
-          make -j$(sysctl -n hw.ncpu)
-          make PREFIX="${{ github.workspace }}/prefix" install
+          sudo apt-get install -y build-essential patchelf libfdt-dev \
+            clang libclang-dev libcap-ng-dev
 
       - name: Download libkrunfw (Linux)
         if: runner.os == 'Linux'
@@ -68,35 +55,27 @@ jobs:
           curl -fsSL "https://github.com/containers/libkrunfw/releases/download/v${LIBKRUNFW_VERSION}/libkrunfw-${ARCH}.tgz" | \
             tar xz -C "${{ github.workspace }}/prefix"
 
-      - name: Build libkrun
+      - name: Build libkrun (Linux)
+        if: runner.os == 'Linux'
         run: |
+          export PKG_CONFIG_PATH="${{ github.workspace }}/prefix/lib64/pkgconfig"
           git clone --depth 1 --branch "v${LIBKRUN_VERSION}" --recurse-submodules \
             https://github.com/containers/libkrun.git libkrun-src
           cd libkrun-src
-
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            export PKG_CONFIG_PATH="${{ github.workspace }}/prefix/lib/pkgconfig"
-            # Use brew's clang + explicit ld.lld path (system clang cannot find lld).
-            LLVM_BIN="$(brew --prefix llvm)/bin"
-            make -j$(sysctl -n hw.ncpu) NET=1 BLK=1 \
-              "CC_LINUX=${LLVM_BIN}/clang -target arm64-linux-gnu -fuse-ld=${LLVM_BIN}/ld.lld -Wl,-strip-debug --sysroot \$(SYSROOT_LINUX) -Wno-c23-extensions"
-          else
-            export PKG_CONFIG_PATH="${{ github.workspace }}/prefix/lib64/pkgconfig"
-            make -j$(nproc) NET=1 BLK=1
-          fi
-
+          make -j$(nproc) NET=1 BLK=1
           make PREFIX="${{ github.workspace }}/prefix" install
 
       - name: Package libraries
         run: |
           mkdir dist
 
-          # Copy library files (-L follows symlinks to the versioned real file)
-          # and fix SONAME / install_name for clean redistribution.
           if [ "${{ runner.os }}" = "macOS" ]; then
-            LIB="${{ github.workspace }}/prefix/lib"
-            cp -L "$LIB/libkrun.dylib" dist/
-            cp -L "$LIB/libkrunfw.dylib" dist/
+            # Copy from Homebrew Cellar (-L resolves symlinks)
+            KRUN="$(brew --prefix libkrun)/lib"
+            KRUNFW="$(brew --prefix libkrunfw)/lib"
+            cp -L "$KRUN/libkrun.dylib" dist/
+            cp -L "$KRUNFW/libkrunfw.dylib" dist/
+            # Fix install names for portable redistribution
             install_name_tool -id "@rpath/libkrun.dylib" dist/libkrun.dylib
             install_name_tool -id "@rpath/libkrunfw.dylib" dist/libkrunfw.dylib
             codesign -s - --force dist/libkrun.dylib
