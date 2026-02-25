@@ -6,22 +6,16 @@ use std::path::Path;
 
 use flate2::read::GzDecoder;
 
-use crate::store;
-
-/// Extracts gzip-compressed tar layers in order into a rootfs directory.
+/// Extracts in-memory gzip-compressed tar layers in order into a rootfs directory.
 ///
 /// Handles OCI whiteout files:
 /// - `.wh.<name>` — deletes the named entry from a lower layer.
 /// - `.wh..wh..opq` — marks the directory as opaque (clears inherited contents).
-pub fn extract_layers(blob_paths: &[std::path::PathBuf], rootfs: &Path) -> crate::Result<()> {
+pub fn extract_layers(layers: &[Vec<u8>], rootfs: &Path) -> crate::Result<()> {
     fs::create_dir_all(rootfs)?;
-
-    for path in blob_paths {
-        let file = fs::File::open(path)?;
-        let gz = GzDecoder::new(file);
-        extract_layer(gz, rootfs)?;
+    for data in layers {
+        extract_layer(GzDecoder::new(data.as_slice()), rootfs)?;
     }
-
     Ok(())
 }
 
@@ -45,7 +39,7 @@ fn extract_layer(reader: impl Read, rootfs: &Path) -> crate::Result<()> {
             if let Some(parent) = rel.parent() {
                 let target = rootfs.join(parent);
                 if target.exists() {
-                    store::clear_directory(&target)?;
+                    clear_directory(&target)?;
                 }
             }
             continue;
@@ -68,5 +62,18 @@ fn extract_layer(reader: impl Read, rootfs: &Path) -> crate::Result<()> {
         entry.unpack_in(rootfs)?;
     }
 
+    Ok(())
+}
+
+/// Removes all contents of a directory without removing the directory itself.
+fn clear_directory(dir: &Path) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            fs::remove_dir_all(&path)?;
+        } else {
+            fs::remove_file(&path)?;
+        }
+    }
     Ok(())
 }

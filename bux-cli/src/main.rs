@@ -8,7 +8,8 @@
 
 use anyhow::{Context, Result};
 use bux::{Feature, LogLevel, Vm};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 
 #[derive(Parser)]
 #[command(name = "bux", version, about = "Micro-VM sandbox powered by libkrun")]
@@ -27,14 +28,37 @@ enum Command {
         image: String,
     },
     /// List locally stored images.
-    Images,
+    Images {
+        /// Output format.
+        #[arg(long, default_value = "table")]
+        format: OutputFormat,
+    },
     /// Remove a locally stored image.
     Rmi {
         /// Image reference to remove.
         image: String,
     },
     /// Display system capabilities and libkrun feature support.
-    Info,
+    Info {
+        /// Output format.
+        #[arg(long, default_value = "table")]
+        format: OutputFormat,
+    },
+    /// Generate shell completion scripts.
+    Completion {
+        /// Target shell.
+        shell: Shell,
+    },
+}
+
+/// Output format for list/info commands.
+#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
+enum OutputFormat {
+    /// Human-readable table.
+    #[default]
+    Table,
+    /// Machine-readable JSON.
+    Json,
 }
 
 #[derive(clap::Args)]
@@ -104,111 +128,115 @@ struct RunArgs {
     command: Vec<String>,
 }
 
-fn main() {
-    if let Err(e) = Cli::parse().dispatch() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    if let Err(e) = Cli::parse().dispatch().await {
         eprintln!("bux: {e:#}");
         std::process::exit(1);
     }
 }
 
 impl Cli {
-    fn dispatch(self) -> Result<()> {
+    async fn dispatch(self) -> Result<()> {
         match self.command {
-            Command::Run(args) => args.run(),
-            Command::Pull { image } => pull(&image),
-            Command::Images => images(),
+            Command::Run(args) => args.run().await,
+            Command::Pull { image } => pull(&image).await,
+            Command::Images { format } => images(format),
             Command::Rmi { image } => rmi(&image),
-            Command::Info => info(),
+            Command::Info { format } => info(format),
+            Command::Completion { shell } => {
+                clap_complete::generate(shell, &mut Self::command(), "bux", &mut std::io::stdout());
+                Ok(())
+            }
         }
     }
 }
 
 impl RunArgs {
-    fn run(self) -> Result<()> {
-        // Resolve rootfs: from OCI image or explicit --root path.
-        let (rootfs, oci_config) = self.resolve_rootfs()?;
+    async fn run(self) -> Result<()> {
+        let (rootfs, cfg) = self.resolve_rootfs().await?;
 
-        let mut builder = Vm::builder()
+        let mut b = Vm::builder()
             .vcpus(self.cpus)
             .ram_mib(self.ram)
             .root(&rootfs)
             .log_level(self.log_level);
 
         // Working directory: CLI flag > OCI config > none.
-        if let Some(ref workdir) = self.workdir {
-            builder = builder.workdir(workdir);
-        } else if let Some(ref cfg) = oci_config
-            && let Some(ref wd) = cfg.working_dir
-            && !wd.is_empty()
-        {
-            builder = builder.workdir(wd);
+        let workdir = self
+            .workdir
+            .or_else(|| cfg.as_ref()?.working_dir.clone())
+            .filter(|w| !w.is_empty());
+        if let Some(ref wd) = workdir {
+            b = b.workdir(wd);
         }
 
-        // Command: CLI args > OCI Entrypoint+Cmd > none.
-        if !self.command.is_empty() {
-            let args: Vec<&str> = self.command[1..].iter().map(String::as_str).collect();
-            builder = builder.exec(&self.command[0], &args);
-        } else if let Some(ref cfg) = oci_config {
-            let resolved = resolve_oci_command(cfg);
-            if !resolved.is_empty() {
-                let args: Vec<&str> = resolved[1..].iter().map(String::as_str).collect();
-                builder = builder.exec(&resolved[0], &args);
-            }
+        // Command: CLI args > OCI ENTRYPOINT+CMD > none.
+        let cmd = if self.command.is_empty() {
+            cfg.as_ref().map(oci_command).unwrap_or_default()
+        } else {
+            self.command
+        };
+        if !cmd.is_empty() {
+            let args: Vec<&str> = cmd[1..].iter().map(String::as_str).collect();
+            b = b.exec(&cmd[0], &args);
         }
 
-        // Environment: merge OCI defaults + CLI overrides.
-        let mut all_env: Vec<String> = Vec::new();
-        if let Some(ref cfg) = oci_config
-            && let Some(ref env) = cfg.env
-        {
-            all_env.extend(env.iter().cloned());
-        }
-        all_env.extend(self.envs.iter().cloned());
-        if !all_env.is_empty() {
-            let refs: Vec<&str> = all_env.iter().map(String::as_str).collect();
-            builder = builder.env(&refs);
+        // Environment: OCI defaults + CLI overrides.
+        let env: Vec<String> = cfg
+            .as_ref()
+            .and_then(|c| c.env.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .chain(self.envs)
+            .collect();
+        if !env.is_empty() {
+            let refs: Vec<&str> = env.iter().map(String::as_str).collect();
+            b = b.env(&refs);
         }
 
-        for port in self.ports {
-            builder = builder.port(port);
+        // Ports, volumes, resource limits.
+        for p in self.ports {
+            b = b.port(p);
         }
         for vol in &self.volumes {
             let (tag, path) = vol
                 .split_once(':')
                 .context("volume must be in TAG:HOST_PATH format")?;
-            builder = builder.virtiofs(tag, path);
-        }
-        if let Some(uid) = self.uid {
-            builder = builder.uid(uid);
-        }
-        if let Some(gid) = self.gid {
-            builder = builder.gid(gid);
+            b = b.virtiofs(tag, path);
         }
         for rl in self.rlimit {
-            builder = builder.rlimit(rl);
-        }
-        if self.nested_virt {
-            builder = builder.nested_virt(true);
-        }
-        if self.snd {
-            builder = builder.snd_device(true);
-        }
-        if let Some(path) = self.console_output {
-            builder = builder.console_output(path);
+            b = b.rlimit(rl);
         }
 
-        builder.build()?.start()?;
+        // Optional overrides.
+        if let Some(uid) = self.uid {
+            b = b.uid(uid);
+        }
+        if let Some(gid) = self.gid {
+            b = b.gid(gid);
+        }
+        if self.nested_virt {
+            b = b.nested_virt(true);
+        }
+        if self.snd {
+            b = b.snd_device(true);
+        }
+        if let Some(path) = self.console_output {
+            b = b.console_output(path);
+        }
+
+        b.build()?.start()?;
         Ok(())
     }
 
     /// Resolves rootfs path and optional OCI config from image or --root flag.
-    fn resolve_rootfs(&self) -> Result<(String, Option<bux_oci::ImageConfig>)> {
+    async fn resolve_rootfs(&self) -> Result<(String, Option<bux_oci::ImageConfig>)> {
         match (&self.image, &self.root) {
-            (Some(image), None) => {
+            (Some(img), None) => {
                 let mut oci = bux_oci::Oci::open()?;
-                let result = oci.ensure(image, |msg| eprintln!("{msg}"))?;
-                let path = result.rootfs.to_string_lossy().into_owned();
-                Ok((path, result.config))
+                let r = oci.ensure(img, |msg| eprintln!("{msg}")).await?;
+                Ok((r.rootfs.to_string_lossy().into_owned(), r.config))
             }
             (None, Some(root)) => Ok((root.clone(), None)),
             (None, None) => anyhow::bail!("specify an image or --root <path>"),
@@ -217,8 +245,8 @@ impl RunArgs {
     }
 }
 
-/// Resolves the command from OCI config: ENTRYPOINT + CMD.
-fn resolve_oci_command(cfg: &bux_oci::ImageConfig) -> Vec<String> {
+/// Resolves ENTRYPOINT + CMD from an OCI image config.
+fn oci_command(cfg: &bux_oci::ImageConfig) -> Vec<String> {
     let mut parts = Vec::new();
     if let Some(ref ep) = cfg.entrypoint {
         parts.extend(ep.iter().cloned());
@@ -229,16 +257,22 @@ fn resolve_oci_command(cfg: &bux_oci::ImageConfig) -> Vec<String> {
     parts
 }
 
-fn pull(image: &str) -> Result<()> {
+async fn pull(image: &str) -> Result<()> {
     let mut oci = bux_oci::Oci::open()?;
-    let result = oci.pull(image, |msg| eprintln!("{msg}"))?;
+    let result = oci.pull(image, |msg| eprintln!("{msg}")).await?;
     println!("{}", result.reference);
     Ok(())
 }
 
-fn images() -> Result<()> {
+fn images(format: OutputFormat) -> Result<()> {
     let oci = bux_oci::Oci::open()?;
     let list = oci.images()?;
+
+    if matches!(format, OutputFormat::Json) {
+        println!("{}", serde_json::to_string_pretty(&list)?);
+        return Ok(());
+    }
+
     if list.is_empty() {
         println!("No images.");
         return Ok(());
@@ -291,25 +325,36 @@ const FEATURES: &[(Feature, &str)] = &[
     (Feature::VirglResourceMap2, "virgl-resource-map2"),
 ];
 
-fn info() -> Result<()> {
-    println!("max vCPUs: {}", Vm::max_vcpus()?);
-
+fn info(format: OutputFormat) -> Result<()> {
+    let max_vcpus = Vm::max_vcpus()?;
     let supported: Vec<&str> = FEATURES
         .iter()
         .filter(|(f, _)| Vm::has_feature(*f).unwrap_or(false))
         .map(|(_, name)| *name)
         .collect();
+    let nested = Vm::check_nested_virt().ok();
+
+    if matches!(format, OutputFormat::Json) {
+        let obj = serde_json::json!({
+            "max_vcpus": max_vcpus,
+            "features": supported,
+            "nested_virt": nested,
+        });
+        println!("{}", serde_json::to_string_pretty(&obj)?);
+        return Ok(());
+    }
+
+    println!("max vCPUs: {max_vcpus}");
     let label = if supported.is_empty() {
-        "none".into()
+        "none"
     } else {
-        supported.join(", ")
+        &supported.join(", ")
     };
     println!("features:  {label}");
-
-    match Vm::check_nested_virt() {
-        Ok(true) => println!("nested:    supported"),
-        Ok(false) => println!("nested:    not supported"),
-        Err(_) => {}
+    match nested {
+        Some(true) => println!("nested:    supported"),
+        Some(false) => println!("nested:    not supported"),
+        None => {}
     }
 
     Ok(())
