@@ -21,4 +21,8 @@ pub enum Error {
     /// A string argument contained an interior NUL byte.
     #[error("interior NUL byte in string argument")]
     Nul(#[from] NulError),
+
+    /// An I/O error from runtime, client, or state operations.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
