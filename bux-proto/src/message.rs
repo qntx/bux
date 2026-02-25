@@ -18,6 +18,20 @@ pub enum Request {
         /// Signal number (e.g. `libc::SIGTERM`).
         signal: i32,
     },
+    /// Read a file from the guest filesystem.
+    ReadFile {
+        /// Absolute path inside the guest.
+        path: String,
+    },
+    /// Write a file to the guest filesystem.
+    WriteFile {
+        /// Absolute path inside the guest.
+        path: String,
+        /// File contents.
+        data: Vec<u8>,
+        /// Unix permission mode (e.g. `0o644`).
+        mode: u32,
+    },
     /// Health-check ping.
     Ping,
     /// Request graceful shutdown of the guest agent.
@@ -89,6 +103,8 @@ pub enum Response {
     Error(String),
     /// Reply to [`Request::Ping`].
     Pong,
-    /// Acknowledgment for [`Request::Signal`] / [`Request::Shutdown`].
+    /// File contents returned for [`Request::ReadFile`].
+    FileData(Vec<u8>),
+    /// Acknowledgment for [`Request::Signal`] / [`Request::Shutdown`] / [`Request::WriteFile`].
     Ok,
 }

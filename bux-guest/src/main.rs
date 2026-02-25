@@ -69,6 +69,10 @@ mod agent {
                     }
                     bux_proto::encode(&mut w, &Response::Ok)?;
                 }
+                Request::ReadFile { path } => read_file(&mut w, &path)?,
+                Request::WriteFile { path, data, mode } => {
+                    write_file(&mut w, &path, &data, mode)?;
+                }
                 Request::Shutdown => {
                     bux_proto::encode(&mut w, &Response::Ok)?;
                     std::process::exit(0);
@@ -101,6 +105,33 @@ mod agent {
                 }
                 bux_proto::encode(w, &Response::Exit(out.status.code().unwrap_or(-1)))
             }
+            Err(e) => bux_proto::encode(w, &Response::Error(e.to_string())),
+        }
+    }
+
+    /// Reads a file and sends its contents back to the host.
+    fn read_file(w: &mut impl io::Write, path: &str) -> io::Result<()> {
+        match std::fs::read(path) {
+            Ok(data) => bux_proto::encode(w, &Response::FileData(data)),
+            Err(e) => bux_proto::encode(w, &Response::Error(e.to_string())),
+        }
+    }
+
+    /// Writes data to a file with the specified permission mode.
+    fn write_file(w: &mut impl io::Write, path: &str, data: &[u8], mode: u32) -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let result = (|| -> io::Result<()> {
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, data)?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => bux_proto::encode(w, &Response::Ok),
             Err(e) => bux_proto::encode(w, &Response::Error(e.to_string())),
         }
     }

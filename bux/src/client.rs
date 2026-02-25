@@ -87,6 +87,36 @@ mod inner {
             }
         }
 
+        /// Reads a file from the guest filesystem.
+        pub fn read_file(&mut self, path: &str) -> io::Result<Vec<u8>> {
+            bux_proto::encode(
+                &mut self.stream,
+                &Request::ReadFile {
+                    path: path.to_owned(),
+                },
+            )?;
+            match bux_proto::decode::<Response>(&mut self.stream)? {
+                Response::FileData(data) => Ok(data),
+                Response::Error(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unexpected response",
+                )),
+            }
+        }
+
+        /// Writes a file to the guest filesystem.
+        pub fn write_file(&mut self, path: &str, data: &[u8], mode: u32) -> io::Result<()> {
+            self.send_expect(
+                &Request::WriteFile {
+                    path: path.to_owned(),
+                    data: data.to_vec(),
+                    mode,
+                },
+                |r| matches!(r, Response::Ok),
+            )
+        }
+
         /// Sends a request and expects a specific response variant.
         fn send_expect(
             &mut self,

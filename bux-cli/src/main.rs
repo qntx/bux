@@ -86,6 +86,15 @@ enum Command {
         /// VM ID or prefix.
         id: String,
     },
+    /// Copy files between host and a running VM.
+    ///
+    /// Use `<id>:<path>` to refer to a guest path.
+    Cp {
+        /// Source (host path or `<id>:<guest_path>`).
+        src: String,
+        /// Destination (host path or `<id>:<guest_path>`).
+        dst: String,
+    },
 }
 
 /// Output format for list/info commands.
@@ -191,6 +200,7 @@ impl Cli {
             Command::Rm { id } => vm_rm(&id),
             Command::Exec { id, command } => vm_exec(&id, command),
             Command::Inspect { id } => vm_inspect(&id),
+            Command::Cp { src, dst } => vm_cp(&src, &dst),
         }
     }
 }
@@ -490,28 +500,55 @@ fn vm_inspect(id: &str) -> Result<()> {
     Ok(())
 }
 
-// Non-unix stubs — these commands require libkrun (Linux/macOS).
-#[cfg(not(unix))]
-fn ps(_: OutputFormat) -> Result<()> {
-    anyhow::bail!("VM management requires Linux or macOS")
+/// Parses `id:path` guest reference. Returns `(id, guest_path)`.
+#[cfg(unix)]
+fn parse_guest_ref(s: &str) -> Option<(&str, &str)> {
+    let colon = s.find(':')?;
+    if colon == 0 { return None; }
+    Some((&s[..colon], &s[colon + 1..]))
 }
-#[cfg(not(unix))]
-fn vm_stop(_: &str) -> Result<()> {
-    anyhow::bail!("VM management requires Linux or macOS")
+
+#[cfg(unix)]
+fn vm_cp(src: &str, dst: &str) -> Result<()> {
+    let rt = open_runtime()?;
+
+    match (parse_guest_ref(src), parse_guest_ref(dst)) {
+        // guest → host
+        (Some((id, guest_path)), None) => {
+            let handle = rt.get(id)?;
+            let data = handle.read_file(guest_path)?;
+            std::fs::write(dst, &data)?;
+        }
+        // host → guest
+        (None, Some((id, guest_path))) => {
+            let handle = rt.get(id)?;
+            let data = std::fs::read(src)?;
+            handle.write_file(guest_path, &data, 0o644)?;
+        }
+        _ => anyhow::bail!("exactly one of src/dst must use <id>:<path> format"),
+    }
+    Ok(())
 }
+
+// Non-unix stubs — VM commands require libkrun (Linux/macOS).
 #[cfg(not(unix))]
-fn vm_kill(_: &str) -> Result<()> {
-    anyhow::bail!("VM management requires Linux or macOS")
+macro_rules! unix_only_stub {
+    ($($name:ident($($arg:ident: $ty:ty),*));+ $(;)?) => {
+        $(
+            fn $name($(_: $ty),*) -> Result<()> {
+                anyhow::bail!("VM management requires Linux or macOS")
+            }
+        )+
+    };
 }
+
 #[cfg(not(unix))]
-fn vm_rm(_: &str) -> Result<()> {
-    anyhow::bail!("VM management requires Linux or macOS")
-}
-#[cfg(not(unix))]
-fn vm_exec(_: &str, _: Vec<String>) -> Result<()> {
-    anyhow::bail!("VM management requires Linux or macOS")
-}
-#[cfg(not(unix))]
-fn vm_inspect(_: &str) -> Result<()> {
-    anyhow::bail!("VM management requires Linux or macOS")
+unix_only_stub! {
+    ps(format: OutputFormat);
+    vm_stop(id: &str);
+    vm_kill(id: &str);
+    vm_rm(id: &str);
+    vm_exec(id: &str, command: Vec<String>);
+    vm_inspect(id: &str);
+    vm_cp(src: &str, dst: &str);
 }

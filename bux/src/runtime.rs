@@ -7,7 +7,6 @@
 //!
 //! This module is only available on Unix (Linux / macOS).
 
-#![cfg(unix)]
 #![allow(unsafe_code)]
 
 use std::path::{Path, PathBuf};
@@ -243,6 +242,18 @@ impl VmHandle {
     /// Returns `true` if the VM process is still alive.
     pub fn is_alive(&self) -> bool {
         is_pid_alive(self.state.pid)
+    }
+
+    /// Reads a file from the guest filesystem.
+    pub fn read_file(&self, path: &str) -> Result<Vec<u8>> {
+        let mut c = Client::connect(&self.state.socket)?;
+        Ok(c.read_file(path)?)
+    }
+
+    /// Writes a file to the guest filesystem.
+    pub fn write_file(&self, path: &str, data: &[u8], mode: u32) -> Result<()> {
+        let mut c = Client::connect(&self.state.socket)?;
+        Ok(c.write_file(path, data, mode)?)
     }
 
     /// Pings the guest agent. Returns `Ok(())` if reachable.
