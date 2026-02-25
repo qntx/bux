@@ -1,5 +1,5 @@
 [workspace]
-members = ["bux", "bux-cli", "bux-guest", "bux-sys"]
+members = ["bux", "bux-cli", "bux-ext", "bux-guest", "bux-sys"]
 default-members = ["bux"]
 resolver = "3"
 
@@ -13,6 +13,7 @@ repository = "https://github.com/qntx/bux"
 bux = { version = "0.1", path = "bux" }
 bux-sys = { version = "0.1", path = "bux-sys" }
 
+anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
 colored = "3.0"
 thiserror = "2"

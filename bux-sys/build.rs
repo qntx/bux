@@ -115,7 +115,10 @@ fn generate_bindings(header: &Path, out_dir: &Path) {
             PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"));
         let committed = manifest.join("src").join("bindings.rs");
         fs::copy(&out_file, &committed).expect("Failed to copy bindings.rs to src/");
-        println!("cargo:warning=Updated committed bindings: {}", committed.display());
+        println!(
+            "cargo:warning=Updated committed bindings: {}",
+            committed.display()
+        );
     }
 }
 
@@ -141,13 +144,18 @@ fn obtain_libraries(target: &str, out_dir: &Path) -> PathBuf {
 }
 
 fn is_supported_target(target: &str) -> bool {
-    let linux = target.contains("linux") && (target.contains("x86_64") || target.contains("aarch64"));
+    let linux =
+        target.contains("linux") && (target.contains("x86_64") || target.contains("aarch64"));
     let macos = target.contains("apple") && target.contains("aarch64");
     linux || macos
 }
 
 fn lib_filename(target: &str) -> &'static str {
-    if target.contains("apple") { "libkrun.dylib" } else { "libkrun.so" }
+    if target.contains("apple") {
+        "libkrun.dylib"
+    } else {
+        "libkrun.so"
+    }
 }
 
 fn download_libs(version: &str, target: &str, dest: &Path) {
