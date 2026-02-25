@@ -166,7 +166,7 @@ checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
 
 [[package]]
 name = "bux"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bux-sys",
  "thiserror 2.0.18",
@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "bux-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "bux",
@@ -187,15 +187,15 @@ dependencies = [
 
 [[package]]
 name = "bux-ext"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "bux-guest"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "bux-oci"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "dirs",
  "flate2",
