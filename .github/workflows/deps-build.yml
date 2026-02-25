@@ -31,7 +31,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install libkrun & libkrunfw (macOS)
@@ -91,7 +91,7 @@ jobs:
           ls -la dist/
           tar -czf "bux-deps-${{ matrix.target }}.tar.gz" -C dist .
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: bux-deps-${{ matrix.target }}
           path: bux-deps-${{ matrix.target }}.tar.gz
@@ -103,7 +103,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
@@ -116,7 +116,7 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/deps-v')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo publish -p bux-sys
         env:

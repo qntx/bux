@@ -186,10 +186,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bux-ext"
-version = "0.2.1"
-
-[[package]]
 name = "bux-guest"
 version = "0.2.1"
 
@@ -206,6 +202,10 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
 ]
+
+[[package]]
+name = "bux-proto"
+version = "0.2.1"
 
 [[package]]
 name = "bux-sys"

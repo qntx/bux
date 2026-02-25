@@ -1,5 +1,5 @@
 [workspace]
-members = ["bux", "bux-cli", "bux-ext", "bux-guest", "bux-oci", "bux-sys"]
+members = ["bux", "bux-cli", "bux-guest", "bux-oci", "bux-proto", "bux-sys"]
 default-members = ["bux"]
 resolver = "3"
 
