@@ -1,0 +1,12 @@
+[package]
+name = "bux-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bindings for Bux"
+
+[dependencies]
+
+[lints]
+workspace = true

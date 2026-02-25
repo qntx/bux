@@ -11,5 +11,5 @@ name = "bux-cli"
 version = "0.1.0"
 
 [[package]]
-name = "bux-py"
+name = "bux-sys"
 version = "0.1.0"
