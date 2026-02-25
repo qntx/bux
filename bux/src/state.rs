@@ -77,8 +77,6 @@ pub(crate) fn gen_id() -> String {
     format!("{:012x}", h.finish())
 }
 
-// --- SQLite persistence layer ---
-
 #[cfg(unix)]
 mod db {
     use std::path::Path;
