@@ -11,13 +11,18 @@ mod inner {
     use std::path::Path;
 
     use bux_proto::{ExecReq, Request, Response};
+    use tokio::io::AsyncWriteExt;
     use tokio::net::UnixStream;
     use tokio::sync::Mutex;
 
     /// Event emitted during streaming command execution.
-    #[non_exhaustive]
     #[derive(Debug)]
     pub enum ExecEvent {
+        /// Process spawned with the given PID.
+        Started {
+            /// Child process ID inside the guest.
+            pid: u32,
+        },
         /// A chunk of stdout data.
         Stdout(Vec<u8>),
         /// A chunk of stderr data.
@@ -25,9 +30,10 @@ mod inner {
     }
 
     /// Output captured from a command executed inside the guest.
-    #[non_exhaustive]
     #[derive(Debug)]
     pub struct ExecOutput {
+        /// Child process ID inside the guest.
+        pub pid: u32,
         /// Stdout bytes.
         pub stdout: Vec<u8>,
         /// Stderr bytes.
@@ -76,6 +82,9 @@ mod inner {
         }
 
         /// Executes a command, streaming output via callback. Returns exit code.
+        ///
+        /// The callback receives [`ExecEvent::Started`] first with the child PID,
+        /// then zero or more [`ExecEvent::Stdout`]/[`ExecEvent::Stderr`] chunks.
         pub async fn exec_stream(
             &self,
             req: ExecReq,
@@ -85,12 +94,11 @@ mod inner {
             bux_proto::send(&mut *stream, &Request::Exec(req)).await?;
             loop {
                 match bux_proto::recv::<Response>(&mut *stream).await? {
+                    Response::Started { pid } => on(ExecEvent::Started { pid }),
                     Response::Stdout(d) => on(ExecEvent::Stdout(d)),
                     Response::Stderr(d) => on(ExecEvent::Stderr(d)),
                     Response::Exit(code) => return Ok(code),
-                    Response::Error(e) => {
-                        return Err(io::Error::other(e));
-                    }
+                    Response::Error(e) => return Err(io::Error::other(e)),
                     _ => {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
@@ -103,19 +111,85 @@ mod inner {
 
         /// Executes a command and collects all output.
         pub async fn exec(&self, req: ExecReq) -> io::Result<ExecOutput> {
+            let mut pid = 0;
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             let code = self
                 .exec_stream(req, |event| match event {
+                    ExecEvent::Started { pid: p } => pid = p,
                     ExecEvent::Stdout(d) => stdout.extend(d),
                     ExecEvent::Stderr(d) => stderr.extend(d),
                 })
                 .await?;
             Ok(ExecOutput {
+                pid,
                 stdout,
                 stderr,
                 code,
             })
+        }
+
+        /// Executes a command with stdin data piped to the process.
+        ///
+        /// Splits the stream internally so stdin writes and stdout/stderr
+        /// reads proceed concurrently (avoids deadlock on large payloads).
+        pub async fn exec_with_stdin(
+            &self,
+            mut req: ExecReq,
+            stdin_data: &[u8],
+            mut on: impl FnMut(ExecEvent),
+        ) -> io::Result<i32> {
+            req.stdin = true;
+            let mut guard = self.stream.lock().await;
+            bux_proto::send(&mut *guard, &Request::Exec(req)).await?;
+
+            // Split for concurrent read/write to prevent deadlock.
+            let (mut r, mut w) = tokio::io::split(&mut *guard);
+
+            // First response must be Started.
+            let pid = match bux_proto::recv::<Response>(&mut r).await? {
+                Response::Started { pid } => {
+                    on(ExecEvent::Started { pid });
+                    pid
+                }
+                Response::Error(e) => return Err(io::Error::other(e)),
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "expected Started",
+                    ))
+                }
+            };
+
+            // Send stdin and read output concurrently.
+            let stdin_data = stdin_data.to_vec();
+            let write_stdin = async {
+                let _ = bux_proto::send(
+                    &mut w,
+                    &Request::Stdin {
+                        pid,
+                        data: stdin_data,
+                    },
+                )
+                .await;
+                let _ = bux_proto::send(&mut w, &Request::StdinClose { pid }).await;
+                let _ = w.flush().await;
+            };
+
+            let read_output = async {
+                loop {
+                    match bux_proto::recv::<Response>(&mut r).await? {
+                        Response::Stdout(d) => on(ExecEvent::Stdout(d)),
+                        Response::Stderr(d) => on(ExecEvent::Stderr(d)),
+                        Response::Exit(code) => return io::Result::Ok(code),
+                        Response::Error(e) => return Err(io::Error::other(e)),
+                        _ => {}
+                    }
+                }
+            };
+
+            let ((), code) = tokio::join!(write_stdin, read_output);
+            code
         }
 
         /// Reads a file from the guest filesystem.
@@ -149,6 +223,38 @@ mod inner {
                 |r| matches!(r, Response::Ok),
             )
             .await
+        }
+
+        /// Copies a tar archive into the guest, unpacking at `dest`.
+        pub async fn copy_in(&self, dest: &str, tar_data: &[u8]) -> io::Result<()> {
+            self.send_expect(
+                &Request::CopyIn {
+                    dest: dest.to_owned(),
+                    tar: tar_data.to_vec(),
+                },
+                |r| matches!(r, Response::Ok),
+            )
+            .await
+        }
+
+        /// Copies a path from the guest as a tar archive.
+        pub async fn copy_out(&self, path: &str) -> io::Result<Vec<u8>> {
+            let mut stream = self.stream.lock().await;
+            bux_proto::send(
+                &mut *stream,
+                &Request::CopyOut {
+                    path: path.to_owned(),
+                },
+            )
+            .await?;
+            match bux_proto::recv::<Response>(&mut *stream).await? {
+                Response::TarData(data) => Ok(data),
+                Response::Error(e) => Err(io::Error::other(e)),
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unexpected response",
+                )),
+            }
         }
 
         /// Sends a request and expects a specific response variant.

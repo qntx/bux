@@ -55,12 +55,14 @@ mod tests {
 
     #[tokio::test]
     async fn roundtrip_exec() {
-        let req = Request::Exec(ExecReq {
-            cmd: "/bin/ls".into(),
-            args: vec!["-la".into()],
-            env: vec!["PATH=/usr/bin".into()],
-            cwd: Some("/tmp".into()),
-        });
+        let req = Request::Exec(
+            ExecReq::new("/bin/ls")
+                .args(vec!["-la".into()])
+                .env(vec!["PATH=/usr/bin".into()])
+                .cwd("/tmp")
+                .user(1000, 1000)
+                .with_stdin(),
+        );
 
         let (mut client, mut server) = tokio::io::duplex(1024);
         send(&mut client, &req).await.unwrap();
@@ -69,6 +71,8 @@ mod tests {
             Request::Exec(e) => {
                 assert_eq!(e.cmd, "/bin/ls");
                 assert_eq!(e.args, vec!["-la"]);
+                assert_eq!(e.uid, Some(1000));
+                assert!(e.stdin);
             }
             _ => panic!("expected Exec"),
         }
@@ -77,11 +81,14 @@ mod tests {
     #[tokio::test]
     async fn roundtrip_response_variants() {
         let cases: Vec<Response> = vec![
+            Response::Started { pid: 42 },
             Response::Stdout(b"hello".to_vec()),
             Response::Stderr(b"error".to_vec()),
             Response::Exit(0),
             Response::Error("boom".into()),
             Response::Pong,
+            Response::FileData(b"content".to_vec()),
+            Response::TarData(b"tarball".to_vec()),
             Response::Ok,
         ];
 
@@ -90,6 +97,18 @@ mod tests {
             send(&mut client, &resp).await.unwrap();
             let _: Response = recv(&mut server).await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn roundtrip_copy_in() {
+        let req = Request::CopyIn {
+            dest: "/tmp/upload".into(),
+            tar: vec![1, 2, 3, 4],
+        };
+        let (mut client, mut server) = tokio::io::duplex(1024);
+        send(&mut client, &req).await.unwrap();
+        let decoded: Request = recv(&mut server).await.unwrap();
+        assert!(matches!(decoded, Request::CopyIn { .. }));
     }
 
     #[tokio::test]

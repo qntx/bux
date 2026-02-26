@@ -36,9 +36,9 @@ pub fn ps(format: OutputFormat) -> Result<()> {
         let name = vm.name.as_deref().unwrap_or("-");
         let image = vm.image.as_deref().unwrap_or("-");
         let status = match vm.status {
+            bux::Status::Creating => "creating",
             bux::Status::Running => "running",
             bux::Status::Stopped => "stopped",
-            _ => "unknown",
         };
         println!(
             "{:<14} {:<16} {:<8} {:<10} {}",
@@ -88,6 +88,7 @@ pub async fn exec(id: &str, command: Vec<String>) -> Result<()> {
 
     let code = handle
         .exec_stream(req, |event| match event {
+            bux::ExecEvent::Started { .. } => {}
             bux::ExecEvent::Stdout(d) => {
                 let _ = std::io::stdout().write_all(&d);
             }
@@ -126,17 +127,31 @@ pub async fn cp(src: &str, dst: &str) -> Result<()> {
     let rt = open_runtime()?;
 
     match (parse_guest_ref(src), parse_guest_ref(dst)) {
-        // guest → host
+        // guest → host: download as tar, unpack locally.
         (Some((id, guest_path)), None) => {
             let handle = rt.get(id)?;
-            let data = handle.read_file(guest_path).await?;
-            std::fs::write(dst, &data)?;
+            let tar_data = handle.copy_out(guest_path).await?;
+            std::fs::create_dir_all(dst)?;
+            let cursor = std::io::Cursor::new(tar_data);
+            let mut archive = tar::Archive::new(cursor);
+            archive.unpack(dst)?;
         }
-        // host → guest
+        // host → guest: pack as tar, upload.
         (None, Some((id, guest_path))) => {
             let handle = rt.get(id)?;
-            let data = std::fs::read(src)?;
-            handle.write_file(guest_path, &data, 0o644).await?;
+            let meta = std::fs::metadata(src)?;
+            if meta.is_dir() {
+                let mut buf = Vec::new();
+                {
+                    let mut ar = tar::Builder::new(&mut buf);
+                    ar.append_dir_all(".", src)?;
+                    ar.finish()?;
+                }
+                handle.copy_in(guest_path, &buf).await?;
+            } else {
+                let data = std::fs::read(src)?;
+                handle.write_file(guest_path, &data, 0o644).await?;
+            }
         }
         _ => anyhow::bail!("exactly one of src/dst must use <id>:<path> format"),
     }

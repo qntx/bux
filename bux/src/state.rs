@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 
 /// VM lifecycle status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
 pub enum Status {
+    /// VM is being prepared (disk creation, etc.).
+    Creating,
     /// VM process is running.
     Running,
     /// VM has been stopped or exited.
@@ -17,7 +18,6 @@ pub enum Status {
 
 /// Serializable snapshot of a VM's configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[non_exhaustive]
 pub struct VmConfig {
     /// Number of virtual CPUs.
     pub vcpus: u8,
@@ -35,11 +35,12 @@ pub struct VmConfig {
     pub workdir: Option<String>,
     /// TCP port mappings (`"host:guest"`).
     pub ports: Vec<String>,
+    /// Remove VM state automatically when it stops.
+    pub auto_remove: bool,
 }
 
 /// Persisted state of a managed VM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[non_exhaustive]
 pub struct VmState {
     /// Short hex identifier.
     pub id: String,
@@ -88,19 +89,30 @@ mod db {
     use super::{Status, VmState};
     use crate::error::{Error, Result};
 
-    /// SQL schema for the `vms` table.
-    const SCHEMA: &str = "
-        CREATE TABLE IF NOT EXISTS vms (
-            id         TEXT PRIMARY KEY NOT NULL,
-            name       TEXT UNIQUE,
-            pid        INTEGER NOT NULL,
-            image      TEXT,
-            socket     TEXT NOT NULL,
-            status     TEXT NOT NULL DEFAULT 'running',
-            config     TEXT NOT NULL,
-            created_at REAL NOT NULL
-        );
-    ";
+    /// Schema migration step.
+    struct Migration {
+        /// Sequential version number.
+        version: u32,
+        /// SQL to apply for this migration.
+        sql: &'static str,
+    }
+
+    /// Ordered list of schema migrations. New migrations are appended here.
+    const MIGRATIONS: &[Migration] = &[Migration {
+        version: 1,
+        sql: "
+            CREATE TABLE IF NOT EXISTS vms (
+                id          TEXT PRIMARY KEY NOT NULL,
+                name        TEXT UNIQUE,
+                pid         INTEGER NOT NULL,
+                image       TEXT,
+                socket      TEXT NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'running',
+                config      TEXT NOT NULL,
+                created_at  REAL NOT NULL
+            );
+        ",
+    }];
 
     /// SQLite-backed VM state database.
     #[derive(Debug)]
@@ -110,11 +122,11 @@ mod db {
     }
 
     impl StateDb {
-        /// Opens (or creates) the database at `path`.
+        /// Opens (or creates) the database at `path`, running pending migrations.
         pub fn open(path: impl AsRef<Path>) -> Result<Self> {
             let conn = Connection::open(path)?;
             conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-            conn.execute_batch(SCHEMA)?;
+            migrate(&conn)?;
             Ok(Self { conn })
         }
 
@@ -175,16 +187,15 @@ mod db {
 
             match matches.len() {
                 0 => Err(Error::NotFound(format!("no VM matching '{prefix}'"))),
-                // SAFETY: len() == 1 guarantees next() returns Some.
                 #[allow(clippy::expect_used)]
-                1 => Ok(matches.into_iter().next().expect("len==1 guarantees Some")),
+                1 => Ok(matches.into_iter().next().expect("len==1")),
                 n => Err(Error::Ambiguous(format!(
                     "prefix '{prefix}' matches {n} VMs"
                 ))),
             }
         }
 
-        /// Lists all VMs.
+        /// Lists all VMs, optionally filtering auto-removed stopped VMs.
         pub fn list(&self) -> Result<Vec<VmState>> {
             let mut stmt = self
                 .conn
@@ -199,6 +210,28 @@ mod db {
                 .execute("DELETE FROM vms WHERE id = ?1", params![id])?;
             Ok(())
         }
+    }
+
+    /// Runs all pending schema migrations inside a transaction.
+    fn migrate(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);",
+        )?;
+
+        let current: u32 = conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |r| r.get(0),
+        )?;
+
+        for m in MIGRATIONS.iter().filter(|m| m.version > current) {
+            conn.execute_batch(m.sql)?;
+            conn.execute(
+                "INSERT INTO schema_version (version) VALUES (?1)",
+                params![m.version],
+            )?;
+        }
+        Ok(())
     }
 
     /// Maps a row to a [`VmState`].
@@ -229,6 +262,7 @@ mod db {
     /// Converts a [`Status`] to its database string representation.
     const fn status_str(s: Status) -> &'static str {
         match s {
+            Status::Creating => "creating",
             Status::Running => "running",
             Status::Stopped => "stopped",
         }
@@ -237,6 +271,7 @@ mod db {
     /// Parses a database string into a [`Status`].
     fn parse_status(s: &str) -> Status {
         match s {
+            "creating" => Status::Creating,
             "running" => Status::Running,
             _ => Status::Stopped,
         }

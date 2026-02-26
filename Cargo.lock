@@ -198,6 +198,7 @@ dependencies = [
  "clap_complete",
  "dirs",
  "serde_json",
+ "tar",
  "tokio",
 ]
 
@@ -218,6 +219,7 @@ version = "0.6.0"
 dependencies = [
  "bux-proto",
  "libc",
+ "tar",
  "tokio",
  "tokio-vsock",
 ]

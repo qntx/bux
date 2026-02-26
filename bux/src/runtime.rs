@@ -64,6 +64,7 @@ impl Runtime {
         builder: VmBuilder,
         image: Option<String>,
         name: Option<String>,
+        auto_remove: bool,
     ) -> Result<VmHandle> {
         // Validate name uniqueness via DB index.
         if let Some(ref n) = name
@@ -78,7 +79,8 @@ impl Runtime {
         let socket = self.socks_dir.join(format!("{id}.sock"));
 
         // Extract config before consuming the builder.
-        let config = builder.to_config();
+        let mut config = builder.to_config();
+        config.auto_remove = auto_remove;
 
         // Add vsock port so guest agent is reachable via Unix socket.
         let socket_str = socket.to_string_lossy().into_owned();
@@ -122,16 +124,28 @@ impl Runtime {
         }
     }
 
-    /// Lists all known VMs, reconciling liveness.
+    /// Lists all known VMs, reconciling liveness and auto-removing stopped VMs.
     pub fn list(&self) -> Result<Vec<VmState>> {
-        let mut vms = self.db.list()?;
-        for vm in &mut vms {
+        let vms = self.db.list()?;
+        let mut keep = Vec::with_capacity(vms.len());
+
+        for mut vm in vms {
+            // Reconcile: mark dead processes as stopped.
             if vm.status == Status::Running && !is_pid_alive(vm.pid) {
                 vm.status = Status::Stopped;
                 let _ = self.db.update_status(&vm.id, Status::Stopped);
             }
+
+            // Auto-remove stopped VMs with auto_remove flag.
+            if vm.status == Status::Stopped && vm.config.auto_remove {
+                let _ = fs::remove_file(&vm.socket);
+                let _ = self.db.delete(&vm.id);
+                continue;
+            }
+
+            keep.push(vm);
         }
-        Ok(vms)
+        Ok(keep)
     }
 
     /// Retrieves a handle by name or ID prefix.
@@ -250,6 +264,20 @@ impl VmHandle {
         is_pid_alive(self.state.pid)
     }
 
+    /// Executes a command with stdin data piped to the process.
+    pub async fn exec_with_stdin(
+        &self,
+        req: ExecReq,
+        stdin_data: &[u8],
+        on: impl FnMut(ExecEvent),
+    ) -> Result<i32> {
+        Ok(self
+            .client()
+            .await?
+            .exec_with_stdin(req, stdin_data, on)
+            .await?)
+    }
+
     /// Reads a file from the guest filesystem.
     pub async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
         Ok(self.client().await?.read_file(path).await?)
@@ -258,6 +286,16 @@ impl VmHandle {
     /// Writes a file to the guest filesystem.
     pub async fn write_file(&self, path: &str, data: &[u8], mode: u32) -> Result<()> {
         Ok(self.client().await?.write_file(path, data, mode).await?)
+    }
+
+    /// Copies a tar archive into the guest, unpacking at `dest`.
+    pub async fn copy_in(&self, dest: &str, tar_data: &[u8]) -> Result<()> {
+        Ok(self.client().await?.copy_in(dest, tar_data).await?)
+    }
+
+    /// Copies a path from the guest as a tar archive.
+    pub async fn copy_out(&self, path: &str) -> Result<Vec<u8>> {
+        Ok(self.client().await?.copy_out(path).await?)
     }
 
     /// Pings the guest agent.

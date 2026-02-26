@@ -230,6 +230,7 @@ impl VmBuilder {
             env: self.env.clone(),
             workdir: self.workdir.clone(),
             ports: self.ports.clone(),
+            auto_remove: false,
         }
     }
 

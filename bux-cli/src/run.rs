@@ -22,6 +22,10 @@ pub struct RunArgs {
     #[arg(long, short = 'd')]
     detach: bool,
 
+    /// Automatically remove the VM when it stops.
+    #[arg(long)]
+    rm: bool,
+
     /// Number of virtual CPUs.
     #[arg(long, default_value_t = 1)]
     cpus: u8,
@@ -87,6 +91,7 @@ impl RunArgs {
         let image = self.image.clone();
         let name = self.name;
         let detach = self.detach;
+        let auto_remove = self.rm;
 
         let mut b = Vm::builder()
             .vcpus(self.cpus)
@@ -158,7 +163,7 @@ impl RunArgs {
             b = b.console_output(path);
         }
 
-        spawn_vm(b, image, name, detach).await
+        spawn_vm(b, image, name, detach, auto_remove).await
     }
 
     /// Resolves rootfs path and optional OCI config from image or --root flag.
@@ -191,13 +196,14 @@ fn oci_command(cfg: &bux_oci::ImageConfig) -> Vec<String> {
 /// Spawns a VM via the runtime for managed lifecycle.
 #[cfg(unix)]
 async fn spawn_vm(
-    builder: bux::VmBuilder,
+    mut builder: bux::VmBuilder,
     image: Option<String>,
     name: Option<String>,
     detach: bool,
+    auto_remove: bool,
 ) -> Result<()> {
     let rt = crate::vm::open_runtime()?;
-    let handle = rt.spawn(builder, image, name).await?;
+    let handle = rt.spawn(builder, image, name, auto_remove).await?;
 
     let id = &handle.state().id;
     if detach {
@@ -221,6 +227,7 @@ async fn spawn_vm(
     _image: Option<String>,
     _name: Option<String>,
     _detach: bool,
+    _auto_remove: bool,
 ) -> Result<()> {
     anyhow::bail!("VM execution requires Linux or macOS")
 }
