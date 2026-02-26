@@ -157,7 +157,7 @@ mod inner {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "expected Started",
-                    ))
+                    ));
                 }
             };
 

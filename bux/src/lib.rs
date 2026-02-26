@@ -25,6 +25,8 @@
 
 #[cfg(unix)]
 mod client;
+#[cfg(unix)]
+mod disk;
 mod error;
 #[cfg(unix)]
 mod runtime;
@@ -35,6 +37,8 @@ mod vm;
 pub use bux_proto::ExecReq;
 #[cfg(unix)]
 pub use client::{Client, ExecEvent, ExecOutput};
+#[cfg(unix)]
+pub use disk::DiskManager;
 pub use error::{Error, Result};
 #[cfg(unix)]
 pub use runtime::{Runtime, VmHandle};

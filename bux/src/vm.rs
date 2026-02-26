@@ -7,7 +7,6 @@ use crate::sys::{self, DiskFormat, Feature, KernelFormat, LogStyle, SyncMode};
 
 /// Log verbosity level for libkrun.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
 #[repr(u32)]
 pub enum LogLevel {
     /// Logging disabled.
@@ -78,8 +77,10 @@ pub struct VmBuilder {
     vcpus: u8,
     /// RAM size in MiB.
     ram_mib: u32,
-    /// Root filesystem path.
+    /// Root filesystem directory path.
     root: Option<String>,
+    /// Root filesystem disk image path (mutually exclusive with `root`).
+    root_disk: Option<String>,
     /// Executable path inside the VM.
     exec_path: Option<String>,
     /// Arguments passed to the executable (does not include argv[0]).
@@ -123,9 +124,20 @@ impl VmBuilder {
         self
     }
 
-    /// Sets the root filesystem path for process isolation.
+    /// Sets the root filesystem directory path (virtiofs-based).
     pub fn root(mut self, path: impl Into<String>) -> Self {
         self.root = Some(path.into());
+        self.root_disk = None;
+        self
+    }
+
+    /// Sets the root filesystem disk image path (block device-based).
+    ///
+    /// The image is attached as `/dev/vda` and remounted as the root
+    /// filesystem during boot. Mutually exclusive with [`root()`](Self::root).
+    pub fn root_disk(mut self, path: impl Into<String>) -> Self {
+        self.root_disk = Some(path.into());
+        self.root = None;
         self
     }
 
@@ -225,6 +237,7 @@ impl VmBuilder {
             vcpus: self.vcpus,
             ram_mib: self.ram_mib,
             rootfs: self.root.clone(),
+            root_disk: self.root_disk.clone(),
             exec_path: self.exec_path.clone(),
             exec_args: self.exec_args.clone(),
             env: self.env.clone(),
@@ -251,6 +264,9 @@ impl VmBuilder {
 
         if let Some(ref root) = self.root {
             sys::set_root(vm.ctx, root)?;
+        } else if let Some(ref disk) = self.root_disk {
+            sys::add_disk(vm.ctx, "rootfs", disk, false)?;
+            sys::set_root_disk_remount(vm.ctx, "/dev/vda", Some("ext4"), None)?;
         }
 
         for (tag, host_path) in &self.virtiofs {

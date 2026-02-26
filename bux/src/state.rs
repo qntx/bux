@@ -23,8 +23,10 @@ pub struct VmConfig {
     pub vcpus: u8,
     /// RAM size in MiB.
     pub ram_mib: u32,
-    /// Root filesystem path on the host.
+    /// Root filesystem directory path on the host.
     pub rootfs: Option<String>,
+    /// Root filesystem disk image path on the host.
+    pub root_disk: Option<String>,
     /// Executable path inside the VM.
     pub exec_path: Option<String>,
     /// Arguments passed to the executable.

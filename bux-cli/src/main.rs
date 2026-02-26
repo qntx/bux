@@ -96,6 +96,30 @@ enum Command {
         /// Destination (host path or `<id>:<guest_path>`).
         dst: String,
     },
+    /// Manage ext4 disk images.
+    Disk {
+        #[command(subcommand)]
+        action: DiskAction,
+    },
+}
+
+/// Subcommands for `bux disk`.
+#[derive(Subcommand)]
+enum DiskAction {
+    /// Create a base ext4 image from an OCI rootfs directory.
+    Create {
+        /// Path to the rootfs directory.
+        rootfs: String,
+        /// Digest identifier for the base image.
+        digest: String,
+    },
+    /// List all base disk images.
+    List,
+    /// Remove a base disk image by digest.
+    Rm {
+        /// Digest identifier of the base image to remove.
+        digest: String,
+    },
 }
 
 /// Output format for list/info commands.
@@ -135,8 +159,46 @@ impl Cli {
             Command::Exec { id, command } => vm::exec(&id, command).await,
             Command::Inspect { id } => vm::inspect(&id),
             Command::Cp { src, dst } => vm::cp(&src, &dst).await,
+            Command::Disk { action } => disk_cmd(action),
         }
     }
+}
+
+#[cfg(unix)]
+fn disk_cmd(action: DiskAction) -> Result<()> {
+    let data_dir = dirs::data_dir()
+        .ok_or_else(|| anyhow::anyhow!("no platform data directory"))?
+        .join("bux");
+    let dm = bux::DiskManager::open(&data_dir)?;
+
+    match action {
+        DiskAction::Create { rootfs, digest } => {
+            let path = dm.create_base(std::path::Path::new(&rootfs), &digest)?;
+            println!("{}", path.display());
+        }
+        DiskAction::List => {
+            let bases = dm.list_bases()?;
+            if bases.is_empty() {
+                println!("No disk images.");
+            } else {
+                for d in &bases {
+                    let path = dm.base_path(d);
+                    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    println!("{:<40} {:>10}", d, human_size(size));
+                }
+            }
+        }
+        DiskAction::Rm { digest } => {
+            dm.remove_base(&digest)?;
+            eprintln!("Removed: {digest}");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn disk_cmd(_action: DiskAction) -> Result<()> {
+    anyhow::bail!("Disk management requires Linux or macOS")
 }
 
 async fn pull(image: &str) -> Result<()> {

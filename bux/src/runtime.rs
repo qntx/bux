@@ -19,6 +19,7 @@ use tokio::sync::OnceCell;
 
 use crate::Result;
 use crate::client::{Client, ExecEvent, ExecOutput};
+use crate::disk::DiskManager;
 use crate::state::{self, StateDb, Status, VmState};
 use crate::vm::VmBuilder;
 
@@ -31,6 +32,8 @@ pub struct Runtime {
     db: Arc<StateDb>,
     /// Directory for Unix sockets (`{data_dir}/socks/`).
     socks_dir: PathBuf,
+    /// Disk image manager.
+    disk: DiskManager,
 }
 
 impl Runtime {
@@ -44,13 +47,20 @@ impl Runtime {
 
         let db_path = base.join("bux.db");
         let db = StateDb::open(db_path)?;
+        let disk = DiskManager::open(base)?;
 
         #[allow(clippy::arc_with_non_send_sync)]
         // StateDb uses rusqlite::Connection (not Sync), but Arc is needed for VmHandle sharing within a single-threaded tokio runtime.
         Ok(Self {
             db: Arc::new(db),
             socks_dir,
+            disk,
         })
+    }
+
+    /// Returns a reference to the disk image manager.
+    pub const fn disk(&self) -> &DiskManager {
+        &self.disk
     }
 
     /// Spawns a VM in a child process and returns a handle.
@@ -114,7 +124,7 @@ impl Runtime {
                 };
                 self.db.insert(&vm_state)?;
 
-                let handle = VmHandle::new(vm_state, Arc::clone(&self.db));
+                let handle = VmHandle::new(vm_state, Arc::clone(&self.db), self.disk.clone());
 
                 // Best-effort readiness wait.
                 let _ = handle.wait_ready(Duration::from_secs(5)).await;
@@ -163,7 +173,11 @@ impl Runtime {
             let _ = self.db.update_status(&state.id, Status::Stopped);
         }
 
-        Ok(VmHandle::new(state, Arc::clone(&self.db)))
+        Ok(VmHandle::new(
+            state,
+            Arc::clone(&self.db),
+            self.disk.clone(),
+        ))
     }
 
     /// Removes a stopped VM's state and socket.
@@ -179,6 +193,7 @@ impl Runtime {
         }
 
         let _ = fs::remove_file(&state.socket);
+        let _ = self.disk.remove_vm_disk(&state.id);
         self.db.delete(&state.id)?;
         Ok(())
     }
@@ -191,16 +206,19 @@ pub struct VmHandle {
     state: VmState,
     /// Shared database reference for status updates.
     db: Arc<StateDb>,
+    /// Disk image manager for auto-remove cleanup.
+    disk: DiskManager,
     /// Lazy persistent client connection.
     client: OnceCell<Client>,
 }
 
 impl VmHandle {
-    /// Creates a new handle from a state snapshot and shared database.
-    fn new(state: VmState, db: Arc<StateDb>) -> Self {
+    /// Creates a new handle from a state snapshot, shared database, and disk manager.
+    fn new(state: VmState, db: Arc<StateDb>, disk: DiskManager) -> Self {
         Self {
             state,
             db,
+            disk,
             client: OnceCell::new(),
         }
     }
@@ -264,6 +282,24 @@ impl VmHandle {
         is_pid_alive(self.state.pid)
     }
 
+    /// Sends a POSIX signal to the VM process.
+    pub fn signal(&self, sig: i32) -> Result<()> {
+        let ret = unsafe { libc::kill(self.state.pid.cast_signed(), sig) };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error().into())
+        }
+    }
+
+    /// Waits for the VM process to exit. Returns the exit status.
+    pub async fn wait(&mut self) -> Result<()> {
+        while is_pid_alive(self.state.pid) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        self.mark_stopped()
+    }
+
     /// Executes a command with stdin data piped to the process.
     pub async fn exec_with_stdin(
         &self,
@@ -322,10 +358,18 @@ impl VmHandle {
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "guest agent did not become ready"))
     }
 
-    /// Updates status to Stopped and persists.
+    /// Updates status to Stopped and persists. If `auto_remove` is set,
+    /// deletes the VM record, socket, and disk image.
     fn mark_stopped(&mut self) -> Result<()> {
         self.state.status = Status::Stopped;
-        self.db.update_status(&self.state.id, Status::Stopped)?;
+
+        if self.state.config.auto_remove {
+            let _ = fs::remove_file(&self.state.socket);
+            let _ = self.disk.remove_vm_disk(&self.state.id);
+            self.db.delete(&self.state.id)?;
+        } else {
+            self.db.update_status(&self.state.id, Status::Stopped)?;
+        }
         Ok(())
     }
 }

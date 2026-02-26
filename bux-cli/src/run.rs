@@ -7,12 +7,20 @@ use bux::{LogLevel, Vm};
 #[derive(clap::Args)]
 pub struct RunArgs {
     /// OCI image reference (e.g., ubuntu:latest). Auto-pulled if not cached.
-    #[arg(conflicts_with = "root")]
+    #[arg(conflicts_with_all = ["root", "root_disk"])]
     image: Option<String>,
 
-    /// Explicit root filesystem path (alternative to image).
-    #[arg(long)]
+    /// Explicit root filesystem directory path (alternative to image).
+    #[arg(long, conflicts_with = "root_disk")]
     root: Option<String>,
+
+    /// Root filesystem disk image path (ext4 raw image).
+    #[arg(long, conflicts_with = "root")]
+    root_disk: Option<String>,
+
+    /// Use ext4 disk image as root (auto-creates from OCI rootfs).
+    #[arg(long)]
+    disk: bool,
 
     /// Assign a name to the VM.
     #[arg(long)]
@@ -92,12 +100,23 @@ impl RunArgs {
         let name = self.name;
         let detach = self.detach;
         let auto_remove = self.rm;
+        let root_disk = self.root_disk.clone();
+        let use_disk = self.disk;
 
         let mut b = Vm::builder()
             .vcpus(self.cpus)
             .ram_mib(self.ram)
-            .root(&rootfs)
             .log_level(self.log_level);
+
+        // Root filesystem: explicit disk > --disk (auto-create) > directory.
+        if let Some(ref disk) = root_disk {
+            b = b.root_disk(disk);
+        } else if use_disk && !rootfs.is_empty() {
+            let disk_path = create_disk_from_rootfs(&rootfs)?;
+            b = b.root_disk(disk_path);
+        } else {
+            b = b.root(&rootfs);
+        }
 
         // Working directory: CLI flag > OCI config > none.
         let workdir = self
@@ -166,16 +185,18 @@ impl RunArgs {
         spawn_vm(b, image, name, detach, auto_remove).await
     }
 
-    /// Resolves rootfs path and optional OCI config from image or --root flag.
+    /// Resolves rootfs path and optional OCI config from image, --root, or --root-disk.
     async fn resolve_rootfs(&self) -> Result<(String, Option<bux_oci::ImageConfig>)> {
-        match (&self.image, &self.root) {
-            (Some(img), None) => {
+        match (&self.image, &self.root, &self.root_disk) {
+            (Some(img), None, None) => {
                 let mut oci = bux_oci::Oci::open()?;
                 let r = oci.ensure(img, |msg| eprintln!("{msg}")).await?;
                 Ok((r.rootfs.to_string_lossy().into_owned(), r.config))
             }
-            (None, Some(root)) => Ok((root.clone(), None)),
-            (None, None) => anyhow::bail!("specify an image or --root <path>"),
+            (None, Some(root), None) => Ok((root.clone(), None)),
+            // --root-disk: rootfs path is unused (VmBuilder.root_disk handles it).
+            (None, None, Some(_)) => Ok((String::new(), None)),
+            (None, None, None) => anyhow::bail!("specify an image, --root, or --root-disk"),
             _ => unreachable!("clap conflicts_with prevents this"),
         }
     }
@@ -193,17 +214,44 @@ fn oci_command(cfg: &bux_oci::ImageConfig) -> Vec<String> {
     parts
 }
 
+/// Creates an ext4 disk image from an OCI rootfs directory using `DiskManager`.
+/// Uses a hash of the rootfs path as the digest for caching.
+#[cfg(unix)]
+fn create_disk_from_rootfs(rootfs: &str) -> Result<String> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let data_dir = dirs::data_dir()
+        .ok_or_else(|| anyhow::anyhow!("no platform data directory"))?
+        .join("bux");
+    let dm = bux::DiskManager::open(&data_dir)?;
+
+    // Derive a stable digest from the rootfs path for caching.
+    let mut h = DefaultHasher::new();
+    rootfs.hash(&mut h);
+    let digest = format!("{:016x}", h.finish());
+
+    let base = dm.create_base(std::path::Path::new(rootfs), &digest)?;
+    Ok(base.to_string_lossy().into_owned())
+}
+
+/// Stub for non-unix.
+#[cfg(not(unix))]
+fn create_disk_from_rootfs(_rootfs: &str) -> Result<String> {
+    anyhow::bail!("Disk image creation requires Linux or macOS")
+}
+
 /// Spawns a VM via the runtime for managed lifecycle.
 #[cfg(unix)]
 async fn spawn_vm(
-    mut builder: bux::VmBuilder,
+    builder: bux::VmBuilder,
     image: Option<String>,
     name: Option<String>,
     detach: bool,
     auto_remove: bool,
 ) -> Result<()> {
     let rt = crate::vm::open_runtime()?;
-    let handle = rt.spawn(builder, image, name, auto_remove).await?;
+    let mut handle = rt.spawn(builder, image, name, auto_remove).await?;
 
     let id = &handle.state().id;
     if detach {
@@ -213,9 +261,7 @@ async fn spawn_vm(
 
     // Foreground: print ID and wait for VM to exit.
     eprintln!("{id}");
-    while handle.is_alive() {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
+    handle.wait().await?;
     Ok(())
 }
 

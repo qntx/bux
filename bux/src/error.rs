@@ -7,7 +7,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors returned by bux VM operations.
 #[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
 pub enum Error {
     /// libkrun returned a negative error code.
     #[error("{op}: libkrun error code {code}")]
@@ -33,6 +32,11 @@ pub enum Error {
     /// An ambiguous identifier matched multiple VMs.
     #[error("{0}")]
     Ambiguous(String),
+
+    /// Ext4 filesystem image creation error.
+    #[cfg(unix)]
+    #[error(transparent)]
+    E2fs(#[from] bux_e2fs::Error),
 
     /// SQLite database error.
     #[cfg(unix)]

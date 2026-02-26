@@ -22,7 +22,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors from OCI image operations.
 #[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
 pub enum Error {
     /// The image reference string could not be parsed.
     #[error("invalid image reference: {0}")]
@@ -51,7 +50,6 @@ pub enum Error {
 
 /// Subset of the OCI image configuration relevant to VM execution.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct ImageConfig {
     /// Default command (`CMD`).
     #[serde(default, alias = "Cmd")]
@@ -69,7 +67,6 @@ pub struct ImageConfig {
 
 /// Result of a successful image pull.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct PullResult {
     /// Canonical image reference string.
     pub reference: String,

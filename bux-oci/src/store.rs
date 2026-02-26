@@ -9,7 +9,6 @@ const IMAGES_FILE: &str = "images.json";
 
 /// Metadata for a locally stored image.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct ImageMeta {
     /// Full image reference string.
     pub reference: String,
