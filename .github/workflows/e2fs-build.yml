@@ -58,7 +58,6 @@ jobs:
           # --disable-*: strip everything we don't need.
           ./configure \
             --disable-nls \
-            --disable-threads \
             --disable-tdb \
             --disable-debugfs \
             --disable-imager \
@@ -71,7 +70,7 @@ jobs:
             --enable-libblkid
 
           # Build core libraries (produces .a files in lib/*/).
-          make -j$(nproc) libs
+          make -j$(getconf _NPROCESSORS_ONLN) libs
 
           # Build create_inode.o from misc/ — this implements populate_fs()
           # which is the core of `mke2fs -d <dir>`.
@@ -91,28 +90,34 @@ jobs:
           cp misc/libcreate_inode.a   ../dist/lib/
 
           # Collect headers for bindgen regeneration.
-          # ext2fs headers
+          # ext2fs headers (ext2fs/*.h)
           mkdir -p ../dist/include/ext2fs
-          cp lib/ext2fs/ext2fs.h      ../dist/include/ext2fs/
-          cp lib/ext2fs/ext2_fs.h     ../dist/include/ext2fs/
-          cp lib/ext2fs/ext2_types.h  ../dist/include/ext2fs/
-          cp lib/ext2fs/ext2_ext_attr.h ../dist/include/ext2fs/
-          cp lib/ext2fs/ext2_io.h     ../dist/include/ext2fs/
-          cp lib/ext2fs/ext3_extents.h ../dist/include/ext2fs/
-          cp lib/ext2fs/bitops.h      ../dist/include/ext2fs/
-          cp lib/ext2fs/hashmap.h     ../dist/include/ext2fs/
-          cp lib/ext2fs/qcow2.h       ../dist/include/ext2fs/ || true
-          # com_err header
+          for h in ext2fs.h ext2_fs.h ext2_types.h ext2_ext_attr.h \
+                   ext2_io.h ext3_extents.h bitops.h hashmap.h \
+                   ext2_err.h fiemap.h; do
+            cp "lib/ext2fs/$h" ../dist/include/ext2fs/
+          done
+          cp lib/ext2fs/qcow2.h ../dist/include/ext2fs/ 2>/dev/null || true
+
+          # com_err headers (et/com_err.h — needed by create_inode.h)
+          mkdir -p ../dist/include/et
+          cp lib/et/com_err.h         ../dist/include/et/
           cp lib/et/com_err.h         ../dist/include/
-          # e2p header
+
+          # e2p headers (e2p/e2p.h — needed by create_inode.h)
+          mkdir -p ../dist/include/e2p
+          cp lib/e2p/e2p.h            ../dist/include/e2p/
           cp lib/e2p/e2p.h            ../dist/include/
+
           # uuid header
           mkdir -p ../dist/include/uuid
           cp lib/uuid/uuid.h          ../dist/include/uuid/
-          # create_inode header
+
+          # create_inode header (misc/create_inode.h)
           cp misc/create_inode.h      ../dist/include/
-          # Generated config headers needed by ext2fs.h
-          cp config.h                 ../dist/include/
+
+          # Generated config header (lib/config.h, NOT root config.h)
+          cp lib/config.h             ../dist/include/
 
       - name: Verify build artifacts
         run: |
