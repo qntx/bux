@@ -63,6 +63,10 @@ pub struct RunArgs {
     #[arg(short = 'e', long = "env")]
     env: Vec<String>,
 
+    /// Read environment variables from a file.
+    #[arg(long)]
+    env_file: Vec<String>,
+
     /// User inside the VM (format: uid[:gid]).
     #[arg(short = 'u', long = "user")]
     user: Option<String>,
@@ -154,12 +158,17 @@ impl RunArgs {
             b = b.exec(&cmd[0], &args);
         }
 
-        // Environment: OCI defaults + CLI overrides.
+        // Environment: OCI defaults + --env-file + CLI -e overrides.
+        let mut env_file_vars = Vec::new();
+        for path in &self.env_file {
+            env_file_vars.extend(crate::vm::read_env_file(path)?);
+        }
         let merged_env: Vec<String> = oci_cfg
             .as_ref()
             .and_then(|c| c.env.clone())
             .unwrap_or_default()
             .into_iter()
+            .chain(env_file_vars)
             .chain(self.env)
             .collect();
         if !merged_env.is_empty() {

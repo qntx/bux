@@ -42,21 +42,22 @@ enum Command {
     /// Remove one or more stopped VMs.
     Rm(vm::RmArgs),
 
-    /// Display detailed information on a VM.
-    Inspect {
-        /// VM ID, name, or prefix.
-        target: String,
-    },
+    /// Display detailed information on one or more VMs.
+    Inspect(vm::InspectArgs),
 
     /// Copy files between host and a running VM.
     ///
     /// Use `<vm>:<path>` to refer to a guest path.
-    Cp {
-        /// Source (host path or `<vm>:<guest_path>`).
-        src: String,
-        /// Destination (host path or `<vm>:<guest_path>`).
-        dst: String,
-    },
+    Cp(vm::CpArgs),
+
+    /// Block until one or more VMs stop.
+    Wait(vm::WaitArgs),
+
+    /// Remove all stopped VMs.
+    Prune,
+
+    /// Rename a VM.
+    Rename(vm::RenameArgs),
 
     /// Pull an OCI image from a registry.
     Pull {
@@ -146,8 +147,11 @@ impl Cli {
             Command::Stop(args) => vm::stop(args).await,
             Command::Kill(args) => vm::kill(args),
             Command::Rm(args) => vm::rm(args),
-            Command::Inspect { target } => vm::inspect(&target),
-            Command::Cp { src, dst } => vm::cp(&src, &dst).await,
+            Command::Inspect(args) => vm::inspect(args),
+            Command::Cp(args) => vm::cp(args).await,
+            Command::Wait(args) => vm::wait(args).await,
+            Command::Prune => vm::prune(),
+            Command::Rename(args) => vm::rename(args),
             Command::Pull { image } => pull(&image).await,
             Command::Images { format } => images(format),
             Command::Rmi { images } => rmi(&images),

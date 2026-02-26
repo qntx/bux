@@ -180,6 +180,20 @@ impl Runtime {
         ))
     }
 
+    /// Renames a VM.
+    pub fn rename(&self, id_or_name: &str, new_name: &str) -> Result<()> {
+        let handle = self.get(id_or_name)?;
+        if let Some(existing) = self.db.get_by_name(new_name)?
+            && existing.id != handle.state().id
+        {
+            return Err(crate::Error::Ambiguous(format!(
+                "a VM named '{new_name}' already exists"
+            )));
+        }
+        self.db.update_name(&handle.state().id, Some(new_name))?;
+        Ok(())
+    }
+
     /// Removes a stopped VM's state and socket.
     pub fn remove(&self, id_or_name: &str) -> Result<()> {
         let handle = self.get(id_or_name)?;
@@ -249,14 +263,19 @@ impl VmHandle {
         Ok(self.client().await?.exec(req).await?)
     }
 
-    /// Graceful shutdown: sends `Shutdown` request, waits up to 5 s,
-    /// then falls back to `SIGKILL`.
+    /// Graceful shutdown with default 10 s timeout.
     pub async fn stop(&mut self) -> Result<()> {
+        self.stop_timeout(Duration::from_secs(10)).await
+    }
+
+    /// Graceful shutdown: sends `Shutdown` request, waits up to `timeout`,
+    /// then falls back to `SIGKILL`.
+    pub async fn stop_timeout(&mut self, timeout: Duration) -> Result<()> {
         if let Ok(c) = self.client().await {
             let _ = c.shutdown().await;
         }
 
-        let result = tokio::time::timeout(Duration::from_secs(5), async {
+        let result = tokio::time::timeout(timeout, async {
             while is_pid_alive(self.state.pid) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }

@@ -209,6 +209,13 @@ mod db {
             Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
         }
 
+        /// Updates the name of a VM.
+        pub fn update_name(&self, id: &str, name: Option<&str>) -> Result<()> {
+            self.conn
+                .execute("UPDATE vms SET name = ?1 WHERE id = ?2", params![name, id])?;
+            Ok(())
+        }
+
         /// Deletes a VM record by ID.
         pub fn delete(&self, id: &str) -> Result<()> {
             self.conn

@@ -1,8 +1,6 @@
 //! VM lifecycle commands: ps, stop, kill, rm, exec, inspect, cp.
 
-use anyhow::Result;
-#[cfg(unix)]
-use anyhow::Context;
+use anyhow::{Context, Result};
 
 use crate::OutputFormat;
 
@@ -19,6 +17,10 @@ pub struct ExecArgs {
     /// Set environment variables.
     #[arg(short = 'e', long = "env")]
     pub env: Vec<String>,
+
+    /// Read environment variables from a file.
+    #[arg(long)]
+    pub env_file: Vec<String>,
 
     /// Keep STDIN open even if not attached.
     #[arg(short = 'i', long)]
@@ -56,6 +58,10 @@ pub struct PsArgs {
     #[arg(short = 'q', long)]
     pub quiet: bool,
 
+    /// Filter output (e.g. status=running, name=myvm).
+    #[arg(short = 'f', long = "filter")]
+    pub filter: Vec<String>,
+
     /// Output format.
     #[arg(long, default_value = "table")]
     pub format: OutputFormat,
@@ -64,6 +70,14 @@ pub struct PsArgs {
 /// Arguments for `bux stop`.
 #[derive(clap::Args)]
 pub struct StopArgs {
+    /// Seconds to wait before killing the VM.
+    #[arg(short = 't', long = "time", default_value_t = 10)]
+    pub time: u64,
+
+    /// Signal to send to the VM.
+    #[arg(short = 's', long)]
+    pub signal: Option<String>,
+
     /// VM IDs, names, or prefixes.
     #[arg(required = true, num_args = 1..)]
     pub targets: Vec<String>,
@@ -72,6 +86,10 @@ pub struct StopArgs {
 /// Arguments for `bux kill`.
 #[derive(clap::Args)]
 pub struct KillArgs {
+    /// Signal to send (default: KILL).
+    #[arg(short = 's', long, default_value = "KILL")]
+    pub signal: String,
+
     /// VM IDs, names, or prefixes.
     #[arg(required = true, num_args = 1..)]
     pub targets: Vec<String>,
@@ -89,6 +107,50 @@ pub struct RmArgs {
     pub targets: Vec<String>,
 }
 
+/// Arguments for `bux wait`.
+#[derive(clap::Args)]
+pub struct WaitArgs {
+    /// VM IDs, names, or prefixes.
+    #[arg(required = true, num_args = 1..)]
+    pub targets: Vec<String>,
+}
+
+/// Arguments for `bux inspect`.
+#[derive(clap::Args)]
+pub struct InspectArgs {
+    /// Format output (json or Go-template-like).
+    #[arg(short = 'f', long, default_value = "json")]
+    pub format: String,
+
+    /// VM IDs, names, or prefixes.
+    #[arg(required = true, num_args = 1..)]
+    pub targets: Vec<String>,
+}
+
+/// Arguments for `bux cp`.
+#[derive(clap::Args)]
+pub struct CpArgs {
+    /// Suppress progress output.
+    #[arg(short = 'q', long)]
+    pub quiet: bool,
+
+    /// Source (host path or `<vm>:<guest_path>`).
+    pub src: String,
+
+    /// Destination (host path or `<vm>:<guest_path>`).
+    pub dst: String,
+}
+
+/// Arguments for `bux rename`.
+#[derive(clap::Args)]
+pub struct RenameArgs {
+    /// VM ID, name, or prefix.
+    pub target: String,
+
+    /// New name.
+    pub new_name: String,
+}
+
 /// Opens the bux runtime from the platform data directory.
 #[cfg(unix)]
 pub fn open_runtime() -> Result<bux::Runtime> {
@@ -104,13 +166,33 @@ pub fn ps(args: PsArgs) -> Result<()> {
     let vms = rt.list()?;
 
     // Filter: default shows only running, -a shows all.
-    let filtered: Vec<_> = if args.all {
+    let mut filtered: Vec<_> = if args.all {
         vms
     } else {
         vms.into_iter()
             .filter(|v| v.status == bux::Status::Running || v.status == bux::Status::Creating)
             .collect()
     };
+
+    // Apply --filter key=value pairs.
+    for f in &args.filter {
+        let (key, value) = f.split_once('=').unwrap_or((f, ""));
+        filtered.retain(|vm| match key {
+            "status" => {
+                let s = match vm.status {
+                    bux::Status::Creating => "creating",
+                    bux::Status::Running => "running",
+                    bux::Status::Stopped => "stopped",
+                    _ => "unknown",
+                };
+                s == value
+            }
+            "name" => vm.name.as_deref() == Some(value),
+            "id" => vm.id.starts_with(value),
+            "image" => vm.image.as_deref() == Some(value),
+            _ => true,
+        });
+    }
 
     // Quiet mode: IDs only.
     if args.quiet {
@@ -153,13 +235,21 @@ pub fn ps(args: PsArgs) -> Result<()> {
 pub async fn stop(args: StopArgs) -> Result<()> {
     let rt = open_runtime()?;
     let mut errors = Vec::new();
+    let timeout = std::time::Duration::from_secs(args.time);
 
     for target in &args.targets {
         match rt.get(target) {
-            Ok(mut h) => match h.stop().await {
-                Ok(()) => println!("{target}"),
-                Err(e) => errors.push(format!("{target}: {e}")),
-            },
+            Ok(mut h) => {
+                // Send optional signal before graceful shutdown.
+                if let Some(ref sig_name) = args.signal {
+                    let sig = parse_signal(sig_name)?;
+                    let _ = h.signal(sig);
+                }
+                match h.stop_timeout(timeout).await {
+                    Ok(()) => println!("{target}"),
+                    Err(e) => errors.push(format!("{target}: {e}")),
+                }
+            }
             Err(e) => errors.push(format!("{target}: {e}")),
         }
     }
@@ -174,11 +264,12 @@ pub async fn stop(args: StopArgs) -> Result<()> {
 #[cfg(unix)]
 pub fn kill(args: KillArgs) -> Result<()> {
     let rt = open_runtime()?;
+    let sig = parse_signal(&args.signal)?;
     let mut errors = Vec::new();
 
     for target in &args.targets {
         match rt.get(target) {
-            Ok(mut h) => match h.kill() {
+            Ok(h) => match h.signal(sig) {
                 Ok(()) => println!("{target}"),
                 Err(e) => errors.push(format!("{target}: {e}")),
             },
@@ -228,9 +319,14 @@ pub async fn exec(args: ExecArgs) -> Result<()> {
     let (cmd, cmd_args) = args.command.split_first().context("command required")?;
     let mut req = bux::ExecReq::new(cmd).args(cmd_args.to_vec());
 
-    // Apply env/workdir/user to the exec request.
-    if !args.env.is_empty() {
-        req = req.env(args.env);
+    // Merge env: --env-file first, then -e overrides.
+    let mut env_vars = Vec::new();
+    for path in &args.env_file {
+        env_vars.extend(read_env_file(path)?);
+    }
+    env_vars.extend(args.env);
+    if !env_vars.is_empty() {
+        req = req.env(env_vars);
     }
     if let Some(ref wd) = args.workdir {
         req = req.cwd(wd);
@@ -260,10 +356,19 @@ pub async fn exec(args: ExecArgs) -> Result<()> {
 }
 
 #[cfg(unix)]
-pub fn inspect(target: &str) -> Result<()> {
+pub fn inspect(args: InspectArgs) -> Result<()> {
     let rt = open_runtime()?;
-    let handle = rt.get(target)?;
-    println!("{}", serde_json::to_string_pretty(handle.state())?);
+    let states: Vec<_> = args
+        .targets
+        .iter()
+        .map(|t| rt.get(t).map(|h| h.state().clone()))
+        .collect::<std::result::Result<_, _>>()?;
+
+    if states.len() == 1 {
+        println!("{}", serde_json::to_string_pretty(&states[0])?);
+    } else {
+        println!("{}", serde_json::to_string_pretty(&states)?);
+    }
     Ok(())
 }
 
@@ -278,8 +383,9 @@ fn parse_guest_ref(s: &str) -> Option<(&str, &str)> {
 }
 
 #[cfg(unix)]
-pub async fn cp(src: &str, dst: &str) -> Result<()> {
+pub async fn cp(args: CpArgs) -> Result<()> {
     let rt = open_runtime()?;
+    let (src, dst) = (args.src.as_str(), args.dst.as_str());
 
     match (parse_guest_ref(src), parse_guest_ref(dst)) {
         // guest → host
@@ -313,6 +419,93 @@ pub async fn cp(src: &str, dst: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+pub async fn wait(args: WaitArgs) -> Result<()> {
+    let rt = open_runtime()?;
+    let mut errors = Vec::new();
+
+    for target in &args.targets {
+        match rt.get(target) {
+            Ok(mut h) => match h.wait().await {
+                Ok(()) => println!("{target}"),
+                Err(e) => errors.push(format!("{target}: {e}")),
+            },
+            Err(e) => errors.push(format!("{target}: {e}")),
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("{}", errors.join("\n"))
+    }
+}
+
+#[cfg(unix)]
+pub fn prune() -> Result<()> {
+    let rt = open_runtime()?;
+    let vms = rt.list()?;
+    let mut count = 0u32;
+
+    for vm in &vms {
+        if vm.status == bux::Status::Stopped {
+            match rt.remove(&vm.id) {
+                Ok(()) => {
+                    println!("{}", vm.id);
+                    count += 1;
+                }
+                Err(e) => eprintln!("warning: {}: {e}", vm.id),
+            }
+        }
+    }
+    eprintln!("Total reclaimed VMs: {count}");
+    Ok(())
+}
+
+#[cfg(unix)]
+pub fn rename(args: RenameArgs) -> Result<()> {
+    let rt = open_runtime()?;
+    rt.rename(&args.target, &args.new_name)?;
+    Ok(())
+}
+
+/// Parses a signal name (e.g. "KILL", "TERM", "9") into a signal number.
+#[cfg(unix)]
+fn parse_signal(name: &str) -> Result<i32> {
+    // Try numeric first.
+    if let Ok(n) = name.parse::<i32>() {
+        return Ok(n);
+    }
+    // Strip optional "SIG" prefix.
+    let upper = name.to_ascii_uppercase();
+    let key = upper.strip_prefix("SIG").unwrap_or(&upper);
+    match key {
+        "HUP" => Ok(1),
+        "INT" => Ok(2),
+        "QUIT" => Ok(3),
+        "KILL" => Ok(9),
+        "USR1" => Ok(10),
+        "USR2" => Ok(12),
+        "TERM" => Ok(15),
+        "CONT" => Ok(18),
+        "STOP" => Ok(19),
+        _ => anyhow::bail!("unknown signal: {name}"),
+    }
+}
+
+/// Reads environment variables from a file (one `KEY=VALUE` per line).
+/// Blank lines and lines starting with `#` are skipped.
+pub fn read_env_file(path: &str) -> Result<Vec<String>> {
+    let content =
+        std::fs::read_to_string(path).with_context(|| format!("cannot read env file: {path}"))?;
+    Ok(content
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(String::from)
+        .collect())
+}
+
 #[cfg(not(unix))]
 macro_rules! unix_only_stub {
     (sync: $($name:ident($($arg:ident: $ty:ty),*));+ $(;)?) => {
@@ -337,7 +530,9 @@ unix_only_stub! {
     ps(args: PsArgs);
     kill(args: KillArgs);
     rm(args: RmArgs);
-    inspect(target: &str);
+    inspect(args: InspectArgs);
+    prune();
+    rename(args: RenameArgs);
 }
 
 #[cfg(not(unix))]
@@ -345,5 +540,6 @@ unix_only_stub! {
     async:
     stop(args: StopArgs);
     exec(args: ExecArgs);
-    cp(src: &str, dst: &str);
+    cp(args: CpArgs);
+    wait(args: WaitArgs);
 }
