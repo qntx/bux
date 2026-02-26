@@ -1,4 +1,4 @@
-# bux-sys
+# bux-krun
 
 Raw FFI bindings to [`libkrun`](https://github.com/containers/libkrun) — a lightweight VM engine for sandboxed code execution.
 
@@ -10,7 +10,7 @@ Raw FFI bindings to [`libkrun`](https://github.com/containers/libkrun) — a lig
 Pre-generated `bindgen` bindings are committed in `src/bindings.rs` so end
 users do **not** need `libclang` installed. At build time the build script:
 
-1. Downloads the pre-built dynamic library from [GitHub Releases](https://github.com/pyroth/bux/releases) (or uses `BUX_DEPS_DIR`).
+1. Downloads the pre-built dynamic library from [GitHub Releases](https://github.com/qntx/bux/releases) (or uses `BUX_DEPS_DIR`).
 2. Configures the linker for dynamic linking and exports `DEP_KRUN_LIB_DIR`.
 
 ### Regenerating bindings
@@ -20,7 +20,7 @@ To update bindings from the pinned [qntx/libkrun](https://github.com/qntx/libkru
 ```sh
 make regenerate-bindings
 # or manually:
-BUX_UPDATE_BINDINGS=1 cargo check -p bux-sys --features regenerate
+BUX_UPDATE_BINDINGS=1 cargo check -p bux-krun --features regenerate
 ```
 
 ## Environment variables

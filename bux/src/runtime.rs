@@ -64,13 +64,12 @@ impl Runtime {
         name: Option<String>,
     ) -> Result<VmHandle> {
         // Validate name uniqueness via DB index.
-        if let Some(ref n) = name {
-            if self.db.get_by_name(n)?.is_some() {
+        if let Some(ref n) = name
+            && self.db.get_by_name(n)?.is_some() {
                 return Err(crate::Error::Ambiguous(format!(
                     "a VM named '{n}' already exists"
                 )));
             }
-        }
 
         let id = state::gen_id();
         let socket = self.socks_dir.join(format!("{id}.sock"));
@@ -88,7 +87,7 @@ impl Runtime {
             -1 => Err(io::Error::last_os_error().into()),
             0 => {
                 // Child — build and start the VM (never returns on success).
-                match builder.build().and_then(|vm| vm.start()) {
+                match builder.build().and_then(super::vm::Vm::start) {
                     Ok(()) => unreachable!(),
                     Err(e) => {
                         eprintln!("[bux] child VM start failed: {e}");
@@ -188,7 +187,7 @@ impl VmHandle {
     }
 
     /// Returns the current state snapshot.
-    pub fn state(&self) -> &VmState {
+    pub const fn state(&self) -> &VmState {
         &self.state
     }
 
@@ -204,11 +203,7 @@ impl VmHandle {
     }
 
     /// Executes a command, streaming output via callback. Returns exit code.
-    pub async fn exec_stream(
-        &self,
-        req: ExecReq,
-        on: impl FnMut(ExecEvent),
-    ) -> Result<i32> {
+    pub async fn exec_stream(&self, req: ExecReq, on: impl FnMut(ExecEvent)) -> Result<i32> {
         Ok(self.client().await?.exec_stream(req, on).await?)
     }
 
@@ -271,11 +266,10 @@ impl VmHandle {
             loop {
                 if Client::connect(&self.state.socket).await.is_ok() {
                     // Don't store this probe connection; let client() create the real one.
-                    if let Ok(c) = Client::connect(&self.state.socket).await {
-                        if c.ping().await.is_ok() {
+                    if let Ok(c) = Client::connect(&self.state.socket).await
+                        && c.ping().await.is_ok() {
                             return;
                         }
-                    }
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }

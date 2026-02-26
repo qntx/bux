@@ -1,0 +1,158 @@
+name: Build e2fsprogs Libraries
+
+# Triggered by pushing an e2fs version tag, or manually.
+on:
+  push:
+    tags: ["e2fs-v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pin e2fsprogs version — keep in sync with bux-e2fs/build.rs.
+  E2FSPROGS_VERSION: "1.47.1"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install automake autoconf libtool pkg-config
+
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      - name: Download e2fsprogs source
+        run: |
+          curl -fsSL \
+            "https://mirrors.edge.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v${E2FSPROGS_VERSION}/e2fsprogs-${E2FSPROGS_VERSION}.tar.gz" \
+            | tar xz
+
+      - name: Build static libraries
+        run: |
+          cd "e2fsprogs-${E2FSPROGS_VERSION}"
+
+          # Configure for static-only, minimal feature set.
+          # --enable-libuuid: use bundled libuuid (avoids system util-linux dep).
+          # --disable-*: strip everything we don't need.
+          ./configure \
+            --disable-nls \
+            --disable-threads \
+            --disable-tdb \
+            --disable-debugfs \
+            --disable-imager \
+            --disable-resizer \
+            --disable-defrag \
+            --disable-fsck \
+            --disable-e2initrd-helper \
+            --disable-fuse2fs \
+            --enable-libuuid \
+            --enable-libblkid
+
+          # Build core libraries (produces .a files in lib/*/).
+          make -j$(nproc) libs
+
+          # Build create_inode.o from misc/ — this implements populate_fs()
+          # which is the core of `mke2fs -d <dir>`.
+          cd misc
+          make create_inode.o
+          ar rcs libcreate_inode.a create_inode.o
+          cd ..
+
+          # Collect static libraries into dist/lib/.
+          mkdir -p ../dist/lib ../dist/include
+
+          cp lib/ext2fs/libext2fs.a   ../dist/lib/
+          cp lib/et/libcom_err.a      ../dist/lib/
+          cp lib/e2p/libe2p.a         ../dist/lib/
+          # Rename to avoid conflict with system libuuid.
+          cp lib/uuid/libuuid.a       ../dist/lib/libuuid_e2fs.a
+          cp misc/libcreate_inode.a   ../dist/lib/
+
+          # Collect headers for bindgen regeneration.
+          # ext2fs headers
+          mkdir -p ../dist/include/ext2fs
+          cp lib/ext2fs/ext2fs.h      ../dist/include/ext2fs/
+          cp lib/ext2fs/ext2_fs.h     ../dist/include/ext2fs/
+          cp lib/ext2fs/ext2_types.h  ../dist/include/ext2fs/
+          cp lib/ext2fs/ext2_ext_attr.h ../dist/include/ext2fs/
+          cp lib/ext2fs/ext2_io.h     ../dist/include/ext2fs/
+          cp lib/ext2fs/ext3_extents.h ../dist/include/ext2fs/
+          cp lib/ext2fs/bitops.h      ../dist/include/ext2fs/
+          cp lib/ext2fs/hashmap.h     ../dist/include/ext2fs/
+          cp lib/ext2fs/qcow2.h       ../dist/include/ext2fs/ || true
+          # com_err header
+          cp lib/et/com_err.h         ../dist/include/
+          # e2p header
+          cp lib/e2p/e2p.h            ../dist/include/
+          # uuid header
+          mkdir -p ../dist/include/uuid
+          cp lib/uuid/uuid.h          ../dist/include/uuid/
+          # create_inode header
+          cp misc/create_inode.h      ../dist/include/
+          # Generated config headers needed by ext2fs.h
+          cp config.h                 ../dist/include/
+
+      - name: Verify build artifacts
+        run: |
+          echo "=== Static libraries ==="
+          ls -la dist/lib/
+          echo ""
+          echo "=== Headers ==="
+          find dist/include -type f | sort
+
+      - name: Package
+        run: |
+          tar -czf "bux-e2fs-${{ matrix.target }}.tar.gz" -C dist .
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: bux-e2fs-${{ matrix.target }}
+          path: bux-e2fs-${{ matrix.target }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/e2fs-v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: bux-e2fs-*.tar.gz
+          generate_release_notes: true
+
+  publish-e2fs:
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/e2fs-v')
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish -p bux-e2fs
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

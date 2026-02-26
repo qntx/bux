@@ -77,6 +77,7 @@ pub fn rm(id: &str) -> Result<()> {
 #[cfg(unix)]
 pub async fn exec(id: &str, command: Vec<String>) -> Result<()> {
     use std::io::Write;
+
     use anyhow::Context;
 
     let rt = open_runtime()?;

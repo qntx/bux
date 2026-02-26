@@ -85,10 +85,7 @@ mod agent {
     }
 
     /// Spawns a child process and streams stdout/stderr via `tokio::select!`.
-    async fn exec_cmd(
-        w: &mut (impl AsyncWrite + Unpin),
-        req: ExecReq,
-    ) -> io::Result<()> {
+    async fn exec_cmd(w: &mut (impl AsyncWrite + Unpin), req: ExecReq) -> io::Result<()> {
         let mut cmd = Command::new(&req.cmd);
         cmd.args(&req.args)
             .stdout(Stdio::piped())

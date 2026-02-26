@@ -85,7 +85,7 @@ mod inner {
                     Response::Stderr(d) => on(ExecEvent::Stderr(d)),
                     Response::Exit(code) => return Ok(code),
                     Response::Error(e) => {
-                        return Err(io::Error::new(io::ErrorKind::Other, e));
+                        return Err(io::Error::other(e));
                     }
                     _ => {
                         return Err(io::Error::new(
@@ -126,7 +126,7 @@ mod inner {
             .await?;
             match bux_proto::recv::<Response>(&mut *stream).await? {
                 Response::FileData(data) => Ok(data),
-                Response::Error(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+                Response::Error(e) => Err(io::Error::other(e)),
                 _ => Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "unexpected response",
@@ -159,7 +159,7 @@ mod inner {
             if ok(&resp) {
                 Ok(())
             } else if let Response::Error(e) = resp {
-                Err(io::Error::new(io::ErrorKind::Other, e))
+                Err(io::Error::other(e))
             } else {
                 Err(io::Error::new(
                     io::ErrorKind::InvalidData,

@@ -177,8 +177,8 @@ checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
 name = "bux"
 version = "0.6.0"
 dependencies = [
+ "bux-krun",
  "bux-proto",
- "bux-sys",
  "libc",
  "rusqlite",
  "serde",
@@ -202,6 +202,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bux-e2fs"
+version = "0.1.0"
+dependencies = [
+ "bindgen",
+ "flate2",
+ "tar",
+ "thiserror 2.0.18",
+ "ureq",
+]
+
+[[package]]
 name = "bux-guest"
 version = "0.6.0"
 dependencies = [
@@ -209,6 +220,16 @@ dependencies = [
  "libc",
  "tokio",
  "tokio-vsock",
+]
+
+[[package]]
+name = "bux-krun"
+version = "0.1.3"
+dependencies = [
+ "bindgen",
+ "flate2",
+ "tar",
+ "ureq",
 ]
 
 [[package]]
@@ -232,16 +253,6 @@ dependencies = [
  "postcard",
  "serde",
  "tokio",
-]
-
-[[package]]
-name = "bux-sys"
-version = "0.1.3"
-dependencies = [
- "bindgen",
- "flate2",
- "tar",
- "ureq",
 ]
 
 [[package]]

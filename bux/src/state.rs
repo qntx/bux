@@ -61,7 +61,7 @@ pub struct VmState {
 
 /// Generates a 12-character hex VM identifier.
 #[cfg(unix)]
-pub(crate) fn gen_id() -> String {
+pub fn gen_id() -> String {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
     use std::time::UNIX_EPOCH;
@@ -84,7 +84,7 @@ mod db {
 
     use rusqlite::{Connection, params};
 
-    use super::{Status, VmConfig, VmState};
+    use super::{Status, VmState};
     use crate::error::{Error, Result};
 
     const SCHEMA: &str = "
@@ -147,9 +147,7 @@ mod db {
 
         /// Finds a VM by exact name.
         pub fn get_by_name(&self, name: &str) -> Result<Option<VmState>> {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT * FROM vms WHERE name = ?1")?;
+            let mut stmt = self.conn.prepare("SELECT * FROM vms WHERE name = ?1")?;
             let mut rows = stmt.query_map(params![name], row_to_state)?;
             rows.next().transpose().map_err(Into::into)
         }
@@ -157,9 +155,7 @@ mod db {
         /// Finds a VM by exact ID or unique ID prefix.
         pub fn get_by_id_prefix(&self, prefix: &str) -> Result<VmState> {
             // Try exact match first.
-            let mut stmt = self
-                .conn
-                .prepare("SELECT * FROM vms WHERE id = ?1")?;
+            let mut stmt = self.conn.prepare("SELECT * FROM vms WHERE id = ?1")?;
             let mut rows = stmt.query_map(params![prefix], row_to_state)?;
             if let Some(row) = rows.next() {
                 return Ok(row?);
@@ -169,9 +165,7 @@ mod db {
 
             // Prefix search (id LIKE 'prefix%').
             let pattern = format!("{prefix}%");
-            let mut stmt = self
-                .conn
-                .prepare("SELECT * FROM vms WHERE id LIKE ?1")?;
+            let mut stmt = self.conn.prepare("SELECT * FROM vms WHERE id LIKE ?1")?;
             let matches: Vec<VmState> = stmt
                 .query_map(params![pattern], row_to_state)?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -222,7 +216,7 @@ mod db {
         })
     }
 
-    fn status_str(s: Status) -> &'static str {
+    const fn status_str(s: Status) -> &'static str {
         match s {
             Status::Running => "running",
             Status::Stopped => "stopped",

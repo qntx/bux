@@ -25,9 +25,7 @@ pub async fn send(w: &mut (impl AsyncWrite + Unpin), msg: &impl Serialize) -> io
 }
 
 /// Receives and deserializes a length-prefixed postcard message.
-pub async fn recv<T: for<'de> Deserialize<'de>>(
-    r: &mut (impl AsyncRead + Unpin),
-) -> io::Result<T> {
+pub async fn recv<T: for<'de> Deserialize<'de>>(r: &mut (impl AsyncRead + Unpin)) -> io::Result<T> {
     let mut hdr = [0u8; 4];
     r.read_exact(&mut hdr).await?;
     let len = u32::from_be_bytes(hdr);

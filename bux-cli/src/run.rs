@@ -201,10 +201,7 @@ async fn spawn_vm(
 
     let id = &handle.state().id;
     if detach {
-        println!(
-            "{}",
-            handle.state().name.as_deref().unwrap_or(id)
-        );
+        println!("{}", handle.state().name.as_deref().unwrap_or(id));
         return Ok(());
     }
 

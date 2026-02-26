@@ -1,4 +1,4 @@
-//! Safe wrappers around [`bux_sys`] FFI functions.
+//! Safe wrappers around [`bux_krun`] FFI functions.
 //!
 //! Every public function corresponds 1:1 to a non-deprecated `krun_*` call.
 //! All `unsafe` code in the crate is confined to this module.
@@ -133,7 +133,7 @@ impl CStringArray {
 
 /// Creates a new VM configuration context. Returns the context ID.
 pub fn create_ctx() -> Result<u32> {
-    let ret = unsafe { bux_sys::krun_create_ctx() };
+    let ret = unsafe { bux_krun::krun_create_ctx() };
     if ret < 0 {
         return Err(Error::Krun {
             op: "create_ctx",
@@ -146,7 +146,7 @@ pub fn create_ctx() -> Result<u32> {
 
 /// Frees an existing configuration context.
 pub fn free_ctx(ctx: u32) -> Result<()> {
-    check("free_ctx", unsafe { bux_sys::krun_free_ctx(ctx) })
+    check("free_ctx", unsafe { bux_krun::krun_free_ctx(ctx) })
 }
 
 /// Starts the microVM and takes over the current process.
@@ -154,13 +154,13 @@ pub fn free_ctx(ctx: u32) -> Result<()> {
 /// On success this function **never returns** — libkrun calls `exit()` when
 /// the VM shuts down. Only returns on pre-start configuration errors.
 pub fn start_enter(ctx: u32) -> Result<()> {
-    check("start_enter", unsafe { bux_sys::krun_start_enter(ctx) })
+    check("start_enter", unsafe { bux_krun::krun_start_enter(ctx) })
 }
 
 /// Sets the global log level.
 pub fn set_log_level(level: u32) -> Result<()> {
     check("set_log_level", unsafe {
-        bux_sys::krun_set_log_level(level)
+        bux_krun::krun_set_log_level(level)
     })
 }
 
@@ -170,14 +170,14 @@ pub fn set_log_level(level: u32) -> Result<()> {
 /// `options` to prevent environment variable overrides.
 pub fn init_log(target_fd: i32, level: u32, style: LogStyle, options: u32) -> Result<()> {
     check("init_log", unsafe {
-        bux_sys::krun_init_log(target_fd, level, style as u32, options)
+        bux_krun::krun_init_log(target_fd, level, style as u32, options)
     })
 }
 
 /// Sets basic VM parameters: vCPU count and RAM size.
 pub fn set_vm_config(ctx: u32, vcpus: u8, ram_mib: u32) -> Result<()> {
     check("set_vm_config", unsafe {
-        bux_sys::krun_set_vm_config(ctx, vcpus, ram_mib)
+        bux_krun::krun_set_vm_config(ctx, vcpus, ram_mib)
     })
 }
 
@@ -185,7 +185,7 @@ pub fn set_vm_config(ctx: u32, vcpus: u8, ram_mib: u32) -> Result<()> {
 pub fn set_root(ctx: u32, path: &str) -> Result<()> {
     let c = CString::new(path)?;
     check("set_root", unsafe {
-        bux_sys::krun_set_root(ctx, c.as_ptr())
+        bux_krun::krun_set_root(ctx, c.as_ptr())
     })
 }
 
@@ -193,7 +193,7 @@ pub fn set_root(ctx: u32, path: &str) -> Result<()> {
 pub fn set_workdir(ctx: u32, path: &str) -> Result<()> {
     let c = CString::new(path)?;
     check("set_workdir", unsafe {
-        bux_sys::krun_set_workdir(ctx, c.as_ptr())
+        bux_krun::krun_set_workdir(ctx, c.as_ptr())
     })
 }
 
@@ -208,7 +208,7 @@ pub fn set_exec(ctx: u32, path: &str, args: &[String], env: Option<&[String]>) -
         .as_ref()
         .map_or(std::ptr::null(), CStringArray::as_ptr);
     check("set_exec", unsafe {
-        bux_sys::krun_set_exec(ctx, c_path.as_ptr(), argv.as_ptr(), envp_ptr)
+        bux_krun::krun_set_exec(ctx, c_path.as_ptr(), argv.as_ptr(), envp_ptr)
     })
 }
 
@@ -216,7 +216,7 @@ pub fn set_exec(ctx: u32, path: &str, args: &[String], env: Option<&[String]>) -
 pub fn set_env(ctx: u32, env: &[String]) -> Result<()> {
     let array = CStringArray::new(env)?;
     check("set_env", unsafe {
-        bux_sys::krun_set_env(ctx, array.as_ptr())
+        bux_krun::krun_set_env(ctx, array.as_ptr())
     })
 }
 
@@ -225,7 +225,7 @@ pub fn add_virtiofs(ctx: u32, tag: &str, host_path: &str) -> Result<()> {
     let c_tag = CString::new(tag)?;
     let c_path = CString::new(host_path)?;
     check("add_virtiofs", unsafe {
-        bux_sys::krun_add_virtiofs(ctx, c_tag.as_ptr(), c_path.as_ptr())
+        bux_krun::krun_add_virtiofs(ctx, c_tag.as_ptr(), c_path.as_ptr())
     })
 }
 
@@ -234,7 +234,7 @@ pub fn add_virtiofs2(ctx: u32, tag: &str, host_path: &str, shm_size: u64) -> Res
     let c_tag = CString::new(tag)?;
     let c_path = CString::new(host_path)?;
     check("add_virtiofs2", unsafe {
-        bux_sys::krun_add_virtiofs2(ctx, c_tag.as_ptr(), c_path.as_ptr(), shm_size)
+        bux_krun::krun_add_virtiofs2(ctx, c_tag.as_ptr(), c_path.as_ptr(), shm_size)
     })
 }
 
@@ -243,7 +243,7 @@ pub fn add_disk(ctx: u32, block_id: &str, disk_path: &str, read_only: bool) -> R
     let c_id = CString::new(block_id)?;
     let c_path = CString::new(disk_path)?;
     check("add_disk", unsafe {
-        bux_sys::krun_add_disk(ctx, c_id.as_ptr(), c_path.as_ptr(), read_only)
+        bux_krun::krun_add_disk(ctx, c_id.as_ptr(), c_path.as_ptr(), read_only)
     })
 }
 
@@ -258,7 +258,7 @@ pub fn add_disk2(
     let c_id = CString::new(block_id)?;
     let c_path = CString::new(disk_path)?;
     check("add_disk2", unsafe {
-        bux_sys::krun_add_disk2(
+        bux_krun::krun_add_disk2(
             ctx,
             c_id.as_ptr(),
             c_path.as_ptr(),
@@ -281,7 +281,7 @@ pub fn add_disk3(
     let c_id = CString::new(block_id)?;
     let c_path = CString::new(disk_path)?;
     check("add_disk3", unsafe {
-        bux_sys::krun_add_disk3(
+        bux_krun::krun_add_disk3(
             ctx,
             c_id.as_ptr(),
             c_path.as_ptr(),
@@ -304,7 +304,7 @@ pub fn set_root_disk_remount(
     let c_fs = fstype.map(CString::new).transpose()?;
     let c_opts = options.map(CString::new).transpose()?;
     check("set_root_disk_remount", unsafe {
-        bux_sys::krun_set_root_disk_remount(
+        bux_krun::krun_set_root_disk_remount(
             ctx,
             c_dev.as_ptr(),
             c_fs.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
@@ -319,7 +319,7 @@ pub fn set_root_disk_remount(
 pub fn set_port_map(ctx: u32, ports: &[String]) -> Result<()> {
     let array = CStringArray::new(ports)?;
     check("set_port_map", unsafe {
-        bux_sys::krun_set_port_map(ctx, array.as_ptr())
+        bux_krun::krun_set_port_map(ctx, array.as_ptr())
     })
 }
 
@@ -337,7 +337,7 @@ pub fn add_net_unixstream(
 ) -> Result<()> {
     let c_path = path.map(CString::new).transpose()?;
     check("add_net_unixstream", unsafe {
-        bux_sys::krun_add_net_unixstream(
+        bux_krun::krun_add_net_unixstream(
             ctx,
             c_path.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
             fd,
@@ -359,7 +359,7 @@ pub fn add_net_unixgram(
 ) -> Result<()> {
     let c_path = path.map(CString::new).transpose()?;
     check("add_net_unixgram", unsafe {
-        bux_sys::krun_add_net_unixgram(
+        bux_krun::krun_add_net_unixgram(
             ctx,
             c_path.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
             fd,
@@ -380,7 +380,7 @@ pub fn add_net_tap(
 ) -> Result<()> {
     let c = CString::new(tap_name)?;
     check("add_net_tap", unsafe {
-        bux_sys::krun_add_net_tap(
+        bux_krun::krun_add_net_tap(
             ctx,
             c.as_ptr().cast_mut(),
             mac.as_ptr().cast_mut(),
@@ -393,7 +393,7 @@ pub fn add_net_tap(
 /// Sets the MAC address for the virtio-net device.
 pub fn set_net_mac(ctx: u32, mac: &[u8; 6]) -> Result<()> {
     check("set_net_mac", unsafe {
-        bux_sys::krun_set_net_mac(ctx, mac.as_ptr().cast_mut())
+        bux_krun::krun_set_net_mac(ctx, mac.as_ptr().cast_mut())
     })
 }
 
@@ -401,7 +401,7 @@ pub fn set_net_mac(ctx: u32, mac: &[u8; 6]) -> Result<()> {
 pub fn add_vsock_port(ctx: u32, port: u32, path: &str) -> Result<()> {
     let c = CString::new(path)?;
     check("add_vsock_port", unsafe {
-        bux_sys::krun_add_vsock_port(ctx, port, c.as_ptr())
+        bux_krun::krun_add_vsock_port(ctx, port, c.as_ptr())
     })
 }
 
@@ -409,7 +409,7 @@ pub fn add_vsock_port(ctx: u32, port: u32, path: &str) -> Result<()> {
 pub fn add_vsock_port2(ctx: u32, port: u32, path: &str, listen: bool) -> Result<()> {
     let c = CString::new(path)?;
     check("add_vsock_port2", unsafe {
-        bux_sys::krun_add_vsock_port2(ctx, port, c.as_ptr(), listen)
+        bux_krun::krun_add_vsock_port2(ctx, port, c.as_ptr(), listen)
     })
 }
 
@@ -419,34 +419,34 @@ pub fn add_vsock_port2(ctx: u32, port: u32, path: &str, listen: bool) -> Result<
 /// and/or `KRUN_TSI_HIJACK_UNIX` (2) as bitmask values, or 0 for none.
 pub fn add_vsock(ctx: u32, tsi_features: u32) -> Result<()> {
     check("add_vsock", unsafe {
-        bux_sys::krun_add_vsock(ctx, tsi_features)
+        bux_krun::krun_add_vsock(ctx, tsi_features)
     })
 }
 
 /// Disables the implicit vsock device created by default.
 pub fn disable_implicit_vsock(ctx: u32) -> Result<()> {
     check("disable_implicit_vsock", unsafe {
-        bux_sys::krun_disable_implicit_vsock(ctx)
+        bux_krun::krun_disable_implicit_vsock(ctx)
     })
 }
 
 /// Enables a virtio-gpu device with virglrenderer flags.
 pub fn set_gpu_options(ctx: u32, virgl_flags: u32) -> Result<()> {
     check("set_gpu_options", unsafe {
-        bux_sys::krun_set_gpu_options(ctx, virgl_flags)
+        bux_krun::krun_set_gpu_options(ctx, virgl_flags)
     })
 }
 
 /// Enables a virtio-gpu device with virglrenderer flags and SHM window size.
 pub fn set_gpu_options2(ctx: u32, virgl_flags: u32, shm_size: u64) -> Result<()> {
     check("set_gpu_options2", unsafe {
-        bux_sys::krun_set_gpu_options2(ctx, virgl_flags, shm_size)
+        bux_krun::krun_set_gpu_options2(ctx, virgl_flags, shm_size)
     })
 }
 
 /// Adds a display output. Returns the display ID (0..`KRUN_MAX_DISPLAYS`).
 pub fn add_display(ctx: u32, width: u32, height: u32) -> Result<u32> {
-    let ret = unsafe { bux_sys::krun_add_display(ctx, width, height) };
+    let ret = unsafe { bux_krun::krun_add_display(ctx, width, height) };
     if ret < 0 {
         return Err(Error::Krun {
             op: "add_display",
@@ -460,42 +460,42 @@ pub fn add_display(ctx: u32, width: u32, height: u32) -> Result<u32> {
 /// Sets a custom EDID blob for a display.
 pub fn display_set_edid(ctx: u32, display_id: u32, edid: &[u8]) -> Result<()> {
     check("display_set_edid", unsafe {
-        bux_sys::krun_display_set_edid(ctx, display_id, edid.as_ptr(), edid.len())
+        bux_krun::krun_display_set_edid(ctx, display_id, edid.as_ptr(), edid.len())
     })
 }
 
 /// Sets DPI for a display.
 pub fn display_set_dpi(ctx: u32, display_id: u32, dpi: u32) -> Result<()> {
     check("display_set_dpi", unsafe {
-        bux_sys::krun_display_set_dpi(ctx, display_id, dpi)
+        bux_krun::krun_display_set_dpi(ctx, display_id, dpi)
     })
 }
 
 /// Sets the physical size of a display in millimeters.
 pub fn display_set_physical_size(ctx: u32, display_id: u32, w_mm: u16, h_mm: u16) -> Result<()> {
     check("display_set_physical_size", unsafe {
-        bux_sys::krun_display_set_physical_size(ctx, display_id, w_mm, h_mm)
+        bux_krun::krun_display_set_physical_size(ctx, display_id, w_mm, h_mm)
     })
 }
 
 /// Sets the refresh rate for a display in Hz.
 pub fn display_set_refresh_rate(ctx: u32, display_id: u32, hz: u32) -> Result<()> {
     check("display_set_refresh_rate", unsafe {
-        bux_sys::krun_display_set_refresh_rate(ctx, display_id, hz)
+        bux_krun::krun_display_set_refresh_rate(ctx, display_id, hz)
     })
 }
 
 /// Adds a host input device by file descriptor (`/dev/input/*`).
 pub fn add_input_device_fd(ctx: u32, fd: i32) -> Result<()> {
     check("add_input_device_fd", unsafe {
-        bux_sys::krun_add_input_device_fd(ctx, fd)
+        bux_krun::krun_add_input_device_fd(ctx, fd)
     })
 }
 
 /// Enables or disables a virtio-snd audio device.
 pub fn set_snd_device(ctx: u32, enable: bool) -> Result<()> {
     check("set_snd_device", unsafe {
-        bux_sys::krun_set_snd_device(ctx, enable)
+        bux_krun::krun_set_snd_device(ctx, enable)
     })
 }
 
@@ -503,7 +503,7 @@ pub fn set_snd_device(ctx: u32, enable: bool) -> Result<()> {
 pub fn set_rlimits(ctx: u32, rlimits: &[String]) -> Result<()> {
     let array = CStringArray::new(rlimits)?;
     check("set_rlimits", unsafe {
-        bux_sys::krun_set_rlimits(ctx, array.as_ptr())
+        bux_krun::krun_set_rlimits(ctx, array.as_ptr())
     })
 }
 
@@ -511,30 +511,30 @@ pub fn set_rlimits(ctx: u32, rlimits: &[String]) -> Result<()> {
 pub fn set_smbios_oem_strings(ctx: u32, strings: &[String]) -> Result<()> {
     let array = CStringArray::new(strings)?;
     check("set_smbios_oem_strings", unsafe {
-        bux_sys::krun_set_smbios_oem_strings(ctx, array.as_ptr())
+        bux_krun::krun_set_smbios_oem_strings(ctx, array.as_ptr())
     })
 }
 
 /// Sets the UID before the microVM starts.
 pub fn setuid(ctx: u32, uid: u32) -> Result<()> {
-    check("setuid", unsafe { bux_sys::krun_setuid(ctx, uid) })
+    check("setuid", unsafe { bux_krun::krun_setuid(ctx, uid) })
 }
 
 /// Sets the GID before the microVM starts.
 pub fn setgid(ctx: u32, gid: u32) -> Result<()> {
-    check("setgid", unsafe { bux_sys::krun_setgid(ctx, gid) })
+    check("setgid", unsafe { bux_krun::krun_setgid(ctx, gid) })
 }
 
 /// Enables or disables nested virtualization (macOS only).
 pub fn set_nested_virt(ctx: u32, enable: bool) -> Result<()> {
     check("set_nested_virt", unsafe {
-        bux_sys::krun_set_nested_virt(ctx, enable)
+        bux_krun::krun_set_nested_virt(ctx, enable)
     })
 }
 
 /// Checks if nested virtualization is supported (macOS only).
 pub fn check_nested_virt() -> Result<bool> {
-    let ret = unsafe { bux_sys::krun_check_nested_virt() };
+    let ret = unsafe { bux_krun::krun_check_nested_virt() };
     if ret < 0 {
         return Err(Error::Krun {
             op: "check_nested_virt",
@@ -548,7 +548,7 @@ pub fn check_nested_virt() -> Result<bool> {
 pub fn set_tee_config_file(ctx: u32, path: &str) -> Result<()> {
     let c = CString::new(path)?;
     check("set_tee_config_file", unsafe {
-        bux_sys::krun_set_tee_config_file(ctx, c.as_ptr())
+        bux_krun::krun_set_tee_config_file(ctx, c.as_ptr())
     })
 }
 
@@ -556,7 +556,7 @@ pub fn set_tee_config_file(ctx: u32, path: &str) -> Result<()> {
 pub fn set_firmware(ctx: u32, path: &str) -> Result<()> {
     let c = CString::new(path)?;
     check("set_firmware", unsafe {
-        bux_sys::krun_set_firmware(ctx, c.as_ptr())
+        bux_krun::krun_set_firmware(ctx, c.as_ptr())
     })
 }
 
@@ -572,7 +572,7 @@ pub fn set_kernel(
     let c_initrd = initramfs.map(CString::new).transpose()?;
     let c_cmd = cmdline.map(CString::new).transpose()?;
     check("set_kernel", unsafe {
-        bux_sys::krun_set_kernel(
+        bux_krun::krun_set_kernel(
             ctx,
             c_kernel.as_ptr(),
             format as u32,
@@ -586,14 +586,14 @@ pub fn set_kernel(
 pub fn set_console_output(ctx: u32, path: &str) -> Result<()> {
     let c = CString::new(path)?;
     check("set_console_output", unsafe {
-        bux_sys::krun_set_console_output(ctx, c.as_ptr())
+        bux_krun::krun_set_console_output(ctx, c.as_ptr())
     })
 }
 
 /// Disables the implicit console device.
 pub fn disable_implicit_console(ctx: u32) -> Result<()> {
     check("disable_implicit_console", unsafe {
-        bux_sys::krun_disable_implicit_console(ctx)
+        bux_krun::krun_disable_implicit_console(ctx)
     })
 }
 
@@ -605,20 +605,20 @@ pub fn add_virtio_console_default(
     err_fd: i32,
 ) -> Result<()> {
     check("add_virtio_console_default", unsafe {
-        bux_sys::krun_add_virtio_console_default(ctx, input_fd, output_fd, err_fd)
+        bux_krun::krun_add_virtio_console_default(ctx, input_fd, output_fd, err_fd)
     })
 }
 
 /// Adds a default serial console with explicit file descriptors.
 pub fn add_serial_console_default(ctx: u32, input_fd: i32, output_fd: i32) -> Result<()> {
     check("add_serial_console_default", unsafe {
-        bux_sys::krun_add_serial_console_default(ctx, input_fd, output_fd)
+        bux_krun::krun_add_serial_console_default(ctx, input_fd, output_fd)
     })
 }
 
 /// Creates a virtio console multiport device. Returns the console ID.
 pub fn add_virtio_console_multiport(ctx: u32) -> Result<u32> {
-    let ret = unsafe { bux_sys::krun_add_virtio_console_multiport(ctx) };
+    let ret = unsafe { bux_krun::krun_add_virtio_console_multiport(ctx) };
     if ret < 0 {
         return Err(Error::Krun {
             op: "add_virtio_console_multiport",
@@ -633,7 +633,7 @@ pub fn add_virtio_console_multiport(ctx: u32) -> Result<u32> {
 pub fn add_console_port_tty(ctx: u32, console_id: u32, name: &str, tty_fd: i32) -> Result<()> {
     let c = CString::new(name)?;
     check("add_console_port_tty", unsafe {
-        bux_sys::krun_add_console_port_tty(ctx, console_id, c.as_ptr(), tty_fd)
+        bux_krun::krun_add_console_port_tty(ctx, console_id, c.as_ptr(), tty_fd)
     })
 }
 
@@ -647,7 +647,7 @@ pub fn add_console_port_inout(
 ) -> Result<()> {
     let c = CString::new(name)?;
     check("add_console_port_inout", unsafe {
-        bux_sys::krun_add_console_port_inout(ctx, console_id, c.as_ptr(), input_fd, output_fd)
+        bux_krun::krun_add_console_port_inout(ctx, console_id, c.as_ptr(), input_fd, output_fd)
     })
 }
 
@@ -655,13 +655,13 @@ pub fn add_console_port_inout(
 pub fn set_kernel_console(ctx: u32, console_id: &str) -> Result<()> {
     let c = CString::new(console_id)?;
     check("set_kernel_console", unsafe {
-        bux_sys::krun_set_kernel_console(ctx, c.as_ptr())
+        bux_krun::krun_set_kernel_console(ctx, c.as_ptr())
     })
 }
 
 /// Returns the maximum number of vCPUs supported by the hypervisor.
 pub fn get_max_vcpus() -> Result<u32> {
-    let ret = unsafe { bux_sys::krun_get_max_vcpus() };
+    let ret = unsafe { bux_krun::krun_get_max_vcpus() };
     if ret < 0 {
         return Err(Error::Krun {
             op: "get_max_vcpus",
@@ -674,7 +674,7 @@ pub fn get_max_vcpus() -> Result<u32> {
 
 /// Checks if a build-time feature is enabled in this libkrun build.
 pub fn has_feature(feature: Feature) -> Result<bool> {
-    let ret = unsafe { bux_sys::krun_has_feature(feature as u64) };
+    let ret = unsafe { bux_krun::krun_has_feature(feature as u64) };
     if ret < 0 {
         return Err(Error::Krun {
             op: "has_feature",
@@ -686,7 +686,7 @@ pub fn has_feature(feature: Feature) -> Result<bool> {
 
 /// Returns the eventfd to signal guest shutdown (libkrun-EFI only).
 pub fn get_shutdown_eventfd(ctx: u32) -> Result<i32> {
-    let ret = unsafe { bux_sys::krun_get_shutdown_eventfd(ctx) };
+    let ret = unsafe { bux_krun::krun_get_shutdown_eventfd(ctx) };
     if ret < 0 {
         return Err(Error::Krun {
             op: "get_shutdown_eventfd",
@@ -699,6 +699,6 @@ pub fn get_shutdown_eventfd(ctx: u32) -> Result<i32> {
 /// Enables or disables split IRQCHIP between host and guest.
 pub fn split_irqchip(ctx: u32, enable: bool) -> Result<()> {
     check("split_irqchip", unsafe {
-        bux_sys::krun_split_irqchip(ctx, enable)
+        bux_krun::krun_split_irqchip(ctx, enable)
     })
 }

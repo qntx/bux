@@ -13,7 +13,6 @@ use anyhow::Result;
 use bux::{Feature, Vm};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
-
 use run::RunArgs;
 
 #[derive(Parser)]

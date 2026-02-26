@@ -1,0 +1,33 @@
+[package]
+name = "bux-e2fs"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Ext4 filesystem image creation via libext2fs — static FFI bindings and safe Rust API"
+readme = "README.md"
+links = "ext2fs"
+categories = ["api-bindings", "filesystem"]
+keywords = ["ext4", "e2fsprogs", "libext2fs", "ffi", "sandbox"]
+rust-version = "1.85"
+
+[features]
+## Re-generate bindings from e2fsprogs headers at build time (requires libclang).
+## Without this feature, pre-generated bindings committed in `src/bindings.rs` are used.
+regenerate = ["dep:bindgen"]
+
+[dependencies]
+thiserror.workspace = true
+
+[build-dependencies]
+bindgen = { workspace = true, optional = true }
+flate2.workspace = true
+tar.workspace = true
+ureq.workspace = true
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
+
+# Auto-generated sys bindings: suppress all clippy lints in that module.
+[lints]
+workspace = true

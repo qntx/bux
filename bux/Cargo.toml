@@ -11,7 +11,7 @@ categories = ["virtualization", "api-bindings"]
 
 [dependencies]
 bux-proto.workspace = true
-bux-sys.workspace = true
+bux-krun.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

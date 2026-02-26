@@ -1,5 +1,5 @@
 [workspace]
-members = ["bux", "bux-cli", "bux-guest", "bux-oci", "bux-proto", "bux-sys"]
+members = ["bux", "bux-cli", "bux-e2fs", "bux-guest", "bux-krun", "bux-oci", "bux-proto"]
 default-members = ["bux"]
 resolver = "3"
 
@@ -11,9 +11,10 @@ repository = "https://github.com/qntx/bux"
 
 [workspace.dependencies]
 bux = { version = "0.6", path = "bux" }
+bux-e2fs = { version = "0.1", path = "bux-e2fs" }
 bux-oci = { version = "0.6", path = "bux-oci" }
 bux-proto = { version = "0.6", path = "bux-proto" }
-bux-sys = { version = "0.1", path = "bux-sys" }
+bux-krun = { version = "0.1", path = "bux-krun" }
 
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }

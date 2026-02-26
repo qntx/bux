@@ -1,4 +1,4 @@
-//! Build script for bux-sys.
+//! Build script for bux-krun.
 //!
 //! 1. Locates or downloads the pre-built `libkrun` dynamic library.
 //! 2. Optionally runs `bindgen` to regenerate Rust bindings (feature `regenerate`).
@@ -72,7 +72,7 @@ fn download_header(out_dir: &Path) -> PathBuf {
     }
 
     let url = format!("{HEADER_URL_BASE}/v{LIBKRUN_VERSION}/include/libkrun.h");
-    eprintln!("bux-sys: downloading header from {url}");
+    eprintln!("bux-krun: downloading header from {url}");
     let resp = ureq::get(&url)
         .call()
         .unwrap_or_else(|e| panic!("Failed to download libkrun.h: {e}"));
@@ -124,7 +124,7 @@ fn generate_bindings(header: &Path, out_dir: &Path) {
 /// Obtain the pre-built dynamic library — local directory or GitHub Releases.
 fn obtain_libraries(target: &str, out_dir: &Path) -> PathBuf {
     if let Ok(dir) = env::var("BUX_DEPS_DIR") {
-        eprintln!("bux-sys: using local deps: {dir}");
+        eprintln!("bux-krun: using local deps: {dir}");
         return PathBuf::from(dir);
     }
 
@@ -155,9 +155,9 @@ fn lib_filename(target: &str) -> &'static str {
 
 fn download_libs(version: &str, target: &str, dest: &Path) {
     let url = format!(
-        "https://github.com/{GITHUB_REPO}/releases/download/deps-v{version}/bux-deps-{target}.tar.gz"
+        "https://github.com/{GITHUB_REPO}/releases/download/krun-v{version}/bux-deps-{target}.tar.gz"
     );
-    eprintln!("bux-sys: downloading {url}");
+    eprintln!("bux-krun: downloading {url}");
 
     let resp = ureq::get(&url)
         .call()
@@ -170,7 +170,7 @@ fn download_libs(version: &str, target: &str, dest: &Path) {
 
     assert!(
         dest.join(lib_filename(target)).exists(),
-        "Library not found after extraction. Check GitHub Release deps-v{version}."
+        "Library not found after extraction. Check GitHub Release krun-v{version}."
     );
 
     // libkrun loads libkrunfw via dlopen with a versioned soname.
@@ -207,7 +207,7 @@ fn create_versioned_symlinks(dir: &Path, target: &str) {
             #[cfg(unix)]
             {
                 std::os::unix::fs::symlink(src, &link_path).unwrap_or_else(|e| {
-                    eprintln!("bux-sys: warning: failed to create symlink {link}: {e}");
+                    eprintln!("bux-krun: warning: failed to create symlink {link}: {e}");
                 });
             }
             #[cfg(not(unix))]
