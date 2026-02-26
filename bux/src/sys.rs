@@ -11,6 +11,7 @@ use crate::error::{Error, Result};
 
 /// Disk image format for [`add_disk2`] and [`add_disk3`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 #[repr(u32)]
 pub enum DiskFormat {
     /// Raw disk image.
@@ -23,6 +24,7 @@ pub enum DiskFormat {
 
 /// Block device sync mode for [`add_disk3`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 #[repr(u32)]
 pub enum SyncMode {
     /// No sync.
@@ -36,6 +38,7 @@ pub enum SyncMode {
 
 /// Log output style (terminal escape sequences).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 #[repr(u32)]
 pub enum LogStyle {
     /// Auto-detect based on terminal.
@@ -49,6 +52,7 @@ pub enum LogStyle {
 
 /// Kernel image format for [`set_kernel`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 #[repr(u32)]
 pub enum KernelFormat {
     /// Raw binary.
@@ -67,6 +71,7 @@ pub enum KernelFormat {
 
 /// Build-time feature flag for [`has_feature`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 #[repr(u64)]
 pub enum Feature {
     /// Networking (TSI).

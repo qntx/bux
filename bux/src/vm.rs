@@ -7,6 +7,7 @@ use crate::sys::{self, DiskFormat, Feature, KernelFormat, LogStyle, SyncMode};
 
 /// Log verbosity level for libkrun.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 #[repr(u32)]
 pub enum LogLevel {
     /// Logging disabled.

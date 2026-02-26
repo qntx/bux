@@ -17,6 +17,7 @@ mod inner {
 
     /// Event emitted during streaming command execution.
     #[derive(Debug)]
+    #[non_exhaustive]
     pub enum ExecEvent {
         /// Process spawned with the given PID.
         Started {
@@ -31,6 +32,7 @@ mod inner {
 
     /// Output captured from a command executed inside the guest.
     #[derive(Debug)]
+    #[non_exhaustive]
     pub struct ExecOutput {
         /// Child process ID inside the guest.
         pub pid: u32,
@@ -162,13 +164,13 @@ mod inner {
             };
 
             // Send stdin and read output concurrently.
-            let stdin_data = stdin_data.to_vec();
+            let stdin_buf = stdin_data.to_vec();
             let write_stdin = async {
                 let _ = bux_proto::send(
                     &mut w,
                     &Request::Stdin {
                         pid,
-                        data: stdin_data,
+                        data: stdin_buf,
                     },
                 )
                 .await;

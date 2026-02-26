@@ -99,9 +99,8 @@ impl DiskManager {
     /// Lists all base image digests.
     pub fn list_bases(&self) -> io::Result<Vec<String>> {
         let mut digests = Vec::new();
-        for entry in fs::read_dir(&self.bases_dir)? {
-            let entry = entry?;
-            let name = entry.file_name();
+        for dir_entry in fs::read_dir(&self.bases_dir)? {
+            let name = dir_entry?.file_name();
             if let Some(s) = name.to_str()
                 && let Some(digest) = s.strip_suffix(".raw") {
                     digests.push(digest.to_owned());

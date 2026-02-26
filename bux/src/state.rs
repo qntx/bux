@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// VM lifecycle status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Status {
     /// VM is being prepared (disk creation, etc.).
     Creating,
@@ -18,6 +19,7 @@ pub enum Status {
 
 /// Serializable snapshot of a VM's configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct VmConfig {
     /// Number of virtual CPUs.
     pub vcpus: u8,
@@ -43,6 +45,7 @@ pub struct VmConfig {
 
 /// Persisted state of a managed VM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct VmState {
     /// Short hex identifier.
     pub id: String,
