@@ -66,7 +66,7 @@ impl DiskManager {
 
         // Write to a temporary file first, then rename for atomicity.
         let tmp = self.bases_dir.join(format!("{digest}.raw.tmp"));
-        bux_e2fs::Ext4Builder::new().create_from_dir(rootfs, &tmp, size)?;
+        bux_e2fs::create_from_dir(rootfs, &tmp, size)?;
         fs::rename(&tmp, &path)?;
 
         Ok(path)
