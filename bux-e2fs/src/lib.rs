@@ -30,5 +30,6 @@ mod ext4;
 
 pub use error::{Error, Result};
 pub use ext4::{
-    BlockSize, CreateOptions, Filesystem, create_from_dir, estimate_image_size, inject_file,
+    BlockSize, CreateOptions, FileType, Filesystem, create_from_dir, estimate_image_size,
+    inject_file,
 };

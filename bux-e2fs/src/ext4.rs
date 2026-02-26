@@ -23,6 +23,7 @@ use crate::sys;
 
 /// Block size for an ext4 filesystem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
 pub enum BlockSize {
     /// 1024 bytes.
     B1024 = 0,
@@ -62,6 +63,28 @@ impl Default for CreateOptions {
     }
 }
 
+/// File type for directory entries (maps to `EXT2_FT_*` constants).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum FileType {
+    /// Unknown or unspecified file type.
+    Unknown = 0,
+    /// Regular file.
+    RegularFile = 1,
+    /// Directory.
+    Directory = 2,
+    /// Character device.
+    CharDevice = 3,
+    /// Block device.
+    BlockDevice = 4,
+    /// Named pipe (FIFO).
+    Fifo = 5,
+    /// Unix domain socket.
+    Socket = 6,
+    /// Symbolic link.
+    Symlink = 7,
+}
+
 /// RAII wrapper around an `ext2_filsys` handle.
 ///
 /// [`Drop`] flushes and closes the filesystem, preventing resource leaks
@@ -86,15 +109,23 @@ pub struct Filesystem {
     inner: sys::ext2_filsys,
 }
 
+impl std::fmt::Debug for Filesystem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Filesystem")
+            .field("open", &!self.inner.is_null())
+            .finish()
+    }
+}
+
 impl Drop for Filesystem {
     fn drop(&mut self) {
         if !self.inner.is_null() {
+            // ext2fs operations (populate_fs, add_journal, etc.) set EXT2_FLAG_DIRTY
+            // internally. ext2fs_close checks the flag and flushes if set.
+            // We do NOT force-dirty here to avoid flushing partially-initialized images.
             unsafe {
-                // Mark dirty so ext2fs_close flushes all changes.
-                (*self.inner).flags |= (sys::EXT2_FLAG_DIRTY | sys::EXT2_FLAG_CHANGED) as i32;
                 let _ = sys::ext2fs_close(self.inner);
             }
-            self.inner = std::ptr::null_mut();
         }
     }
 }
@@ -128,9 +159,13 @@ impl Filesystem {
                 ),
             )?;
 
-            check("ext2fs_allocate_tables", sys::ext2fs_allocate_tables(fs))?;
-
-            Ok(Self { inner: fs })
+            // Wrap immediately — Drop guarantees cleanup if allocate_tables fails.
+            let this = Self { inner: fs };
+            check(
+                "ext2fs_allocate_tables",
+                sys::ext2fs_allocate_tables(this.inner),
+            )?;
+            Ok(this)
         }
     }
 
@@ -174,12 +209,17 @@ impl Filesystem {
         }
     }
 
+    /// Flushes all pending changes to disk without closing the filesystem.
+    pub fn flush(&mut self) -> Result<()> {
+        unsafe { check("ext2fs_flush", sys::ext2fs_flush(self.inner)) }
+    }
+
     /// Writes a single host file into the filesystem image.
     ///
     /// Equivalent to `debugfs -w -R "write <host_path> <guest_path>"`.
     pub fn write_file(&mut self, host_path: &Path, guest_path: &str) -> Result<()> {
         let c_host = to_cstring(host_path)?;
-        let c_guest = CString::new(guest_path).map_err(|e| Error::InvalidPath(e.to_string()))?;
+        let c_guest = str_to_cstring(guest_path)?;
         unsafe {
             check(
                 "do_write_internal",
@@ -196,7 +236,7 @@ impl Filesystem {
 
     /// Creates a directory inside the filesystem image.
     pub fn mkdir(&mut self, name: &str) -> Result<()> {
-        let c_name = CString::new(name).map_err(|e| Error::InvalidPath(e.to_string()))?;
+        let c_name = str_to_cstring(name)?;
         unsafe {
             check(
                 "do_mkdir_internal",
@@ -212,8 +252,8 @@ impl Filesystem {
 
     /// Creates a symlink inside the filesystem image.
     pub fn symlink(&mut self, name: &str, target: &str) -> Result<()> {
-        let c_name = CString::new(name).map_err(|e| Error::InvalidPath(e.to_string()))?;
-        let c_target = CString::new(target).map_err(|e| Error::InvalidPath(e.to_string()))?;
+        let c_name = str_to_cstring(name)?;
+        let c_target = str_to_cstring(target)?;
         unsafe {
             check(
                 "do_symlink_internal",
@@ -221,7 +261,7 @@ impl Filesystem {
                     self.inner,
                     sys::EXT2_ROOT_INO,
                     c_name.as_ptr(),
-                    c_target.as_ptr() as *mut _,
+                    c_target.as_ptr().cast_mut(),
                     sys::EXT2_ROOT_INO,
                 ),
             )
@@ -235,6 +275,86 @@ impl Filesystem {
                 "ext2fs_add_journal_inode",
                 sys::ext2fs_add_journal_inode(self.inner, 0, 0),
             )
+        }
+    }
+
+    /// Creates a directory entry linking `name` to inode `ino` in directory `dir`.
+    pub fn link(&mut self, dir: u32, name: &str, ino: u32, file_type: FileType) -> Result<()> {
+        let c_name = str_to_cstring(name)?;
+        unsafe {
+            check(
+                "ext2fs_link",
+                sys::ext2fs_link(self.inner, dir, c_name.as_ptr(), ino, file_type as i32),
+            )
+        }
+    }
+
+    /// Reads the on-disk inode structure for the given inode number.
+    pub fn read_inode(&self, ino: u32) -> Result<sys::ext2_inode> {
+        unsafe {
+            let mut inode: sys::ext2_inode = std::mem::zeroed();
+            check(
+                "ext2fs_read_inode",
+                sys::ext2fs_read_inode(self.inner, ino, &mut inode),
+            )?;
+            Ok(inode)
+        }
+    }
+
+    /// Writes the inode structure back to the filesystem.
+    pub fn write_inode(&mut self, ino: u32, inode: &sys::ext2_inode) -> Result<()> {
+        unsafe {
+            let mut copy = *inode;
+            check(
+                "ext2fs_write_inode",
+                sys::ext2fs_write_inode(self.inner, ino, &mut copy),
+            )
+        }
+    }
+
+    /// Writes a freshly allocated inode (initializes the on-disk slot).
+    pub fn write_new_inode(&mut self, ino: u32, inode: &sys::ext2_inode) -> Result<()> {
+        unsafe {
+            let mut copy = *inode;
+            check(
+                "ext2fs_write_new_inode",
+                sys::ext2fs_write_new_inode(self.inner, ino, &mut copy),
+            )
+        }
+    }
+
+    /// Allocates a new inode number near `dir` with the given POSIX `mode`.
+    ///
+    /// Updates the inode bitmap and allocation statistics automatically.
+    /// Requires bitmaps to be loaded (always true after [`create`](Self::create)).
+    pub fn alloc_inode(&mut self, dir: u32, mode: u16) -> Result<u32> {
+        unsafe {
+            let mut ino: sys::ext2_ino_t = 0;
+            let map = (*self.inner).inode_map;
+            check(
+                "ext2fs_new_inode",
+                sys::ext2fs_new_inode(self.inner, dir, i32::from(mode), map, &mut ino),
+            )?;
+            let is_dir = i32::from(mode & 0o040000 != 0);
+            sys::ext2fs_inode_alloc_stats2(self.inner, ino, 1, is_dir);
+            Ok(ino)
+        }
+    }
+
+    /// Allocates a new block near `goal`.
+    ///
+    /// Updates the block bitmap and allocation statistics automatically.
+    /// Requires bitmaps to be loaded (always true after [`create`](Self::create)).
+    pub fn alloc_block(&mut self, goal: u64) -> Result<u64> {
+        unsafe {
+            let mut blk: sys::blk64_t = 0;
+            let map = (*self.inner).block_map;
+            check(
+                "ext2fs_new_block2",
+                sys::ext2fs_new_block2(self.inner, goal, map, &mut blk),
+            )?;
+            sys::ext2fs_block_alloc_stats2(self.inner, blk, 1);
+            Ok(blk)
         }
     }
 }
@@ -312,13 +432,18 @@ fn to_cstring(path: &Path) -> Result<CString> {
     CString::new(s).map_err(|e| Error::InvalidPath(e.to_string()))
 }
 
+/// Converts a `&str` to a [`CString`].
+fn str_to_cstring(s: &str) -> Result<CString> {
+    CString::new(s).map_err(|e| Error::InvalidPath(e.to_string()))
+}
+
 /// Walks a directory tree, calling `f` for each entry's metadata.
 /// Uses `symlink_metadata` to avoid following symlinks.
-fn walk(dir: &Path, f: &mut impl FnMut(std::fs::Metadata)) -> Result<()> {
+fn walk(dir: &Path, f: &mut impl FnMut(&std::fs::Metadata)) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
         if let Ok(meta) = path.symlink_metadata() {
-            f(meta.clone());
+            f(&meta);
             if meta.is_dir() {
                 walk(&path, f)?;
             }
