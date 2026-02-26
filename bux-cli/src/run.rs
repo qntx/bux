@@ -1,24 +1,29 @@
-//! `bux run` — spawn a micro-VM from an OCI image or rootfs.
+//! `bux run` — create and run a command in a new micro-VM.
+//!
+//! Follows the Docker CLI convention: `bux run [OPTIONS] IMAGE [COMMAND] [ARG...]`
 
 use anyhow::{Context, Result};
 use bux::{LogLevel, Vm};
 
-/// Arguments for the `bux run` subcommand.
+/// Arguments for `bux run`.
+///
+/// Usage: `bux run [OPTIONS] IMAGE [COMMAND] [ARG...]`
 #[derive(clap::Args)]
+#[command(trailing_var_arg = true)]
 pub struct RunArgs {
-    /// OCI image reference (e.g., ubuntu:latest). Auto-pulled if not cached.
-    #[arg(conflicts_with_all = ["root", "root_disk"])]
+    /// OCI image reference (e.g., ubuntu:latest). Conflicts with --root/--root-disk.
+    #[arg(conflicts_with_all = ["root", "root_disk"], required_unless_present_any = ["root", "root_disk"])]
     image: Option<String>,
 
-    /// Explicit root filesystem directory path (alternative to image).
+    /// Explicit root filesystem directory path.
     #[arg(long, conflicts_with = "root_disk")]
     root: Option<String>,
 
-    /// Root filesystem disk image path (ext4 raw image).
+    /// Root filesystem disk image path (ext4 raw).
     #[arg(long, conflicts_with = "root")]
     root_disk: Option<String>,
 
-    /// Use ext4 disk image as root (auto-creates from OCI rootfs).
+    /// Auto-create ext4 disk image from OCI rootfs.
     #[arg(long)]
     disk: bool,
 
@@ -27,7 +32,7 @@ pub struct RunArgs {
     name: Option<String>,
 
     /// Run in background and print VM ID.
-    #[arg(long, short = 'd')]
+    #[arg(short = 'd', long)]
     detach: bool,
 
     /// Automatically remove the VM when it stops.
@@ -38,35 +43,31 @@ pub struct RunArgs {
     #[arg(long, default_value_t = 1)]
     cpus: u8,
 
-    /// RAM size in MiB.
-    #[arg(long, default_value_t = 512)]
-    ram: u32,
+    /// Memory in MiB.
+    #[arg(long, short = 'm', default_value_t = 512)]
+    memory: u32,
 
     /// Working directory inside the VM.
-    #[arg(long)]
+    #[arg(short = 'w', long)]
     workdir: Option<String>,
 
-    /// TCP port mapping (host:guest). Repeatable.
-    #[arg(long = "port", short = 'p')]
-    ports: Vec<String>,
+    /// Publish a port (format: hostPort:guestPort[/tcp|udp]).
+    #[arg(short = 'p', long = "publish")]
+    publish: Vec<String>,
 
-    /// Share a host directory via virtio-fs (tag:host_path). Repeatable.
-    #[arg(long = "volume", short = 'v')]
-    volumes: Vec<String>,
+    /// Bind mount a volume (format: hostPath:guestPath[:ro]).
+    #[arg(short = 'v', long = "volume")]
+    volume: Vec<String>,
 
-    /// Environment variable (KEY=VALUE). Repeatable.
-    #[arg(long = "env", short = 'e')]
-    envs: Vec<String>,
+    /// Set environment variables.
+    #[arg(short = 'e', long = "env")]
+    env: Vec<String>,
 
-    /// Set UID inside the VM.
-    #[arg(long)]
-    uid: Option<u32>,
+    /// User inside the VM (format: uid[:gid]).
+    #[arg(short = 'u', long = "user")]
+    user: Option<String>,
 
-    /// Set GID inside the VM.
-    #[arg(long)]
-    gid: Option<u32>,
-
-    /// Resource limit (RESOURCE=RLIM_CUR:RLIM_MAX). Repeatable.
+    /// Resource limit (RESOURCE=SOFT:HARD).
     #[arg(long)]
     rlimit: Vec<String>,
 
@@ -86,16 +87,15 @@ pub struct RunArgs {
     #[arg(long, default_value = "info")]
     log_level: LogLevel,
 
-    /// Command and arguments to run inside the VM (after --).
-    #[arg(last = true)]
+    /// Command and arguments to run inside the VM.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     command: Vec<String>,
 }
 
 impl RunArgs {
     pub async fn run(self) -> Result<()> {
-        let (rootfs, cfg) = self.resolve_rootfs().await?;
+        let (rootfs, oci_cfg) = self.resolve_rootfs().await?;
 
-        // Save fields needed after partial moves below.
         let image = self.image.clone();
         let name = self.name;
         let detach = self.detach;
@@ -105,7 +105,7 @@ impl RunArgs {
 
         let mut b = Vm::builder()
             .vcpus(self.cpus)
-            .ram_mib(self.ram)
+            .ram_mib(self.memory)
             .log_level(self.log_level);
 
         // Root filesystem: explicit disk > --disk (auto-create) > directory.
@@ -119,17 +119,17 @@ impl RunArgs {
         }
 
         // Working directory: CLI flag > OCI config > none.
-        let workdir = self
+        if let Some(ref wd) = self
             .workdir
-            .or_else(|| cfg.as_ref()?.working_dir.clone())
-            .filter(|w| !w.is_empty());
-        if let Some(ref wd) = workdir {
+            .or_else(|| oci_cfg.as_ref()?.working_dir.clone())
+            .filter(|w| !w.is_empty())
+        {
             b = b.workdir(wd);
         }
 
-        // Command: CLI args > OCI ENTRYPOINT+CMD > none.
+        // Command: CLI args > OCI ENTRYPOINT+CMD.
         let cmd = if self.command.is_empty() {
-            cfg.as_ref().map(oci_command).unwrap_or_default()
+            oci_cfg.as_ref().map(oci_command).unwrap_or_default()
         } else {
             self.command
         };
@@ -139,39 +139,45 @@ impl RunArgs {
         }
 
         // Environment: OCI defaults + CLI overrides.
-        let env: Vec<String> = cfg
+        let merged_env: Vec<String> = oci_cfg
             .as_ref()
             .and_then(|c| c.env.clone())
             .unwrap_or_default()
             .into_iter()
-            .chain(self.envs)
+            .chain(self.env)
             .collect();
-        if !env.is_empty() {
-            let refs: Vec<&str> = env.iter().map(String::as_str).collect();
+        if !merged_env.is_empty() {
+            let refs: Vec<&str> = merged_env.iter().map(String::as_str).collect();
             b = b.env(&refs);
         }
 
-        // Ports, volumes, resource limits.
-        for p in self.ports {
-            b = b.port(p);
+        // Ports: -p hostPort:guestPort[/proto]
+        for spec in &self.publish {
+            let port_part = spec.split('/').next().unwrap_or(spec);
+            b = b.port(port_part);
         }
-        for vol in &self.volumes {
-            let (tag, path) = vol
-                .split_once(':')
-                .context("volume must be in TAG:HOST_PATH format")?;
-            b = b.virtiofs(tag, path);
+
+        // Volumes: -v hostPath:guestPath[:ro]  →  auto-generate virtiofs tag.
+        for (idx, spec) in self.volume.iter().enumerate() {
+            let (host, _guest, _ro) = parse_volume(spec)?;
+            let tag = format!("vol{idx}");
+            b = b.virtiofs(&tag, &host);
         }
+
+        // Resource limits.
         for rl in self.rlimit {
             b = b.rlimit(rl);
         }
 
-        // Optional overrides.
-        if let Some(uid) = self.uid {
+        // User: --user uid[:gid]
+        if let Some(ref user_spec) = self.user {
+            let (uid, gid) = parse_user(user_spec)?;
             b = b.uid(uid);
+            if let Some(g) = gid {
+                b = b.gid(g);
+            }
         }
-        if let Some(gid) = self.gid {
-            b = b.gid(gid);
-        }
+
         if self.nested_virt {
             b = b.nested_virt(true);
         }
@@ -185,7 +191,7 @@ impl RunArgs {
         spawn_vm(b, image, name, detach, auto_remove).await
     }
 
-    /// Resolves rootfs path and optional OCI config from image, --root, or --root-disk.
+    /// Resolves rootfs path and optional OCI config.
     async fn resolve_rootfs(&self) -> Result<(String, Option<bux_oci::ImageConfig>)> {
         match (&self.image, &self.root, &self.root_disk) {
             (Some(img), None, None) => {
@@ -194,10 +200,8 @@ impl RunArgs {
                 Ok((r.rootfs.to_string_lossy().into_owned(), r.config))
             }
             (None, Some(root), None) => Ok((root.clone(), None)),
-            // --root-disk: rootfs path is unused (VmBuilder.root_disk handles it).
             (None, None, Some(_)) => Ok((String::new(), None)),
-            (None, None, None) => anyhow::bail!("specify an image, --root, or --root-disk"),
-            _ => unreachable!("clap conflicts_with prevents this"),
+            _ => unreachable!("clap validation"),
         }
     }
 }
@@ -214,8 +218,32 @@ fn oci_command(cfg: &bux_oci::ImageConfig) -> Vec<String> {
     parts
 }
 
-/// Creates an ext4 disk image from an OCI rootfs directory using `DiskManager`.
-/// Uses a hash of the rootfs path as the digest for caching.
+/// Parses Docker-style volume spec: `hostPath:guestPath[:ro]`.
+fn parse_volume(spec: &str) -> Result<(String, String, bool)> {
+    let parts: Vec<&str> = spec.splitn(3, ':').collect();
+    match parts.as_slice() {
+        [host, guest] => Ok((host.to_string(), guest.to_string(), false)),
+        [host, guest, opts] => {
+            let ro = opts.split(',').any(|o| o.eq_ignore_ascii_case("ro"));
+            Ok((host.to_string(), guest.to_string(), ro))
+        }
+        _ => anyhow::bail!("invalid volume spec {spec:?}; use hostPath:guestPath[:ro]"),
+    }
+}
+
+/// Parses `uid[:gid]` user spec.
+pub fn parse_user(spec: &str) -> Result<(u32, Option<u32>)> {
+    if let Some((u, g)) = spec.split_once(':') {
+        let uid = u.parse().context("invalid UID")?;
+        let gid = g.parse().context("invalid GID")?;
+        Ok((uid, Some(gid)))
+    } else {
+        let uid = spec.parse().context("invalid UID")?;
+        Ok((uid, None))
+    }
+}
+
+/// Creates an ext4 disk image from an OCI rootfs directory.
 #[cfg(unix)]
 fn create_disk_from_rootfs(rootfs: &str) -> Result<String> {
     use std::collections::hash_map::DefaultHasher;
@@ -226,7 +254,6 @@ fn create_disk_from_rootfs(rootfs: &str) -> Result<String> {
         .join("bux");
     let dm = bux::DiskManager::open(&data_dir)?;
 
-    // Derive a stable digest from the rootfs path for caching.
     let mut h = DefaultHasher::new();
     rootfs.hash(&mut h);
     let digest = format!("{:016x}", h.finish());
@@ -235,13 +262,11 @@ fn create_disk_from_rootfs(rootfs: &str) -> Result<String> {
     Ok(base.to_string_lossy().into_owned())
 }
 
-/// Stub for non-unix.
 #[cfg(not(unix))]
 fn create_disk_from_rootfs(_rootfs: &str) -> Result<String> {
     anyhow::bail!("Disk image creation requires Linux or macOS")
 }
 
-/// Spawns a VM via the runtime for managed lifecycle.
 #[cfg(unix)]
 async fn spawn_vm(
     builder: bux::VmBuilder,
@@ -259,13 +284,11 @@ async fn spawn_vm(
         return Ok(());
     }
 
-    // Foreground: print ID and wait for VM to exit.
     eprintln!("{id}");
     handle.wait().await?;
     Ok(())
 }
 
-/// Spawns a VM (non-unix stub).
 #[cfg(not(unix))]
 #[allow(clippy::unused_async)]
 async fn spawn_vm(

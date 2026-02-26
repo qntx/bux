@@ -4,10 +4,80 @@ use anyhow::Result;
 
 use crate::OutputFormat;
 
+/// Arguments for `bux exec`.
+///
+/// Usage: `bux exec [OPTIONS] CONTAINER COMMAND [ARG...]`
+#[derive(clap::Args)]
+#[command(trailing_var_arg = true)]
+pub struct ExecArgs {
+    /// Set environment variables.
+    #[arg(short = 'e', long = "env")]
+    pub env: Vec<String>,
+
+    /// Working directory inside the VM.
+    #[arg(short = 'w', long)]
+    pub workdir: Option<String>,
+
+    /// User (format: uid[:gid]).
+    #[arg(short = 'u', long = "user")]
+    pub user: Option<String>,
+
+    /// VM ID, name, or prefix.
+    #[arg(required = true)]
+    pub target: String,
+
+    /// Command and arguments.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+    pub command: Vec<String>,
+}
+
+/// Arguments for `bux ps`.
+#[derive(clap::Args)]
+pub struct PsArgs {
+    /// Show all VMs (default: only running).
+    #[arg(short = 'a', long)]
+    pub all: bool,
+
+    /// Only display VM IDs.
+    #[arg(short = 'q', long)]
+    pub quiet: bool,
+
+    /// Output format.
+    #[arg(long, default_value = "table")]
+    pub format: OutputFormat,
+}
+
+/// Arguments for `bux stop`.
+#[derive(clap::Args)]
+pub struct StopArgs {
+    /// VM IDs, names, or prefixes.
+    #[arg(required = true, num_args = 1..)]
+    pub targets: Vec<String>,
+}
+
+/// Arguments for `bux kill`.
+#[derive(clap::Args)]
+pub struct KillArgs {
+    /// VM IDs, names, or prefixes.
+    #[arg(required = true, num_args = 1..)]
+    pub targets: Vec<String>,
+}
+
+/// Arguments for `bux rm`.
+#[derive(clap::Args)]
+pub struct RmArgs {
+    /// Force removal of running VMs.
+    #[arg(short = 'f', long)]
+    pub force: bool,
+
+    /// VM IDs, names, or prefixes.
+    #[arg(required = true, num_args = 1..)]
+    pub targets: Vec<String>,
+}
+
 /// Opens the bux runtime from the platform data directory.
 #[cfg(unix)]
 pub fn open_runtime() -> Result<bux::Runtime> {
-    use anyhow::Context;
     let data_dir = dirs::data_dir()
         .context("no platform data directory")?
         .join("bux");
@@ -15,30 +85,47 @@ pub fn open_runtime() -> Result<bux::Runtime> {
 }
 
 #[cfg(unix)]
-pub fn ps(format: OutputFormat) -> Result<()> {
+pub fn ps(args: PsArgs) -> Result<()> {
     let rt = open_runtime()?;
     let vms = rt.list()?;
 
-    if matches!(format, OutputFormat::Json) {
-        println!("{}", serde_json::to_string_pretty(&vms)?);
+    // Filter: default shows only running, -a shows all.
+    let filtered: Vec<_> = if args.all {
+        vms
+    } else {
+        vms.into_iter()
+            .filter(|v| v.status == bux::Status::Running || v.status == bux::Status::Creating)
+            .collect()
+    };
+
+    // Quiet mode: IDs only.
+    if args.quiet {
+        for vm in &filtered {
+            println!("{}", vm.id);
+        }
         return Ok(());
     }
 
-    if vms.is_empty() {
-        println!("No VMs.");
+    if matches!(args.format, OutputFormat::Json) {
+        println!("{}", serde_json::to_string_pretty(&filtered)?);
+        return Ok(());
+    }
+
+    if filtered.is_empty() {
         return Ok(());
     }
     println!(
         "{:<14} {:<16} {:<8} {:<10} {}",
         "ID", "NAME", "PID", "STATUS", "IMAGE"
     );
-    for vm in &vms {
+    for vm in &filtered {
         let name = vm.name.as_deref().unwrap_or("-");
         let image = vm.image.as_deref().unwrap_or("-");
         let status = match vm.status {
             bux::Status::Creating => "creating",
             bux::Status::Running => "running",
             bux::Status::Stopped => "stopped",
+            _ => "unknown",
         };
         println!(
             "{:<14} {:<16} {:<8} {:<10} {}",
@@ -49,42 +136,97 @@ pub fn ps(format: OutputFormat) -> Result<()> {
 }
 
 #[cfg(unix)]
-pub async fn stop(id: &str) -> Result<()> {
+pub async fn stop(args: StopArgs) -> Result<()> {
     let rt = open_runtime()?;
-    let mut handle = rt.get(id)?;
-    handle.stop().await?;
-    eprintln!("Stopped: {}", handle.state().id);
-    Ok(())
+    let mut errors = Vec::new();
+
+    for target in &args.targets {
+        match rt.get(target) {
+            Ok(mut h) => match h.stop().await {
+                Ok(()) => println!("{target}"),
+                Err(e) => errors.push(format!("{target}: {e}")),
+            },
+            Err(e) => errors.push(format!("{target}: {e}")),
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("{}", errors.join("\n"))
+    }
 }
 
 #[cfg(unix)]
-pub fn kill(id: &str) -> Result<()> {
+pub fn kill(args: KillArgs) -> Result<()> {
     let rt = open_runtime()?;
-    let mut handle = rt.get(id)?;
-    handle.kill()?;
-    eprintln!("Killed: {}", handle.state().id);
-    Ok(())
+    let mut errors = Vec::new();
+
+    for target in &args.targets {
+        match rt.get(target) {
+            Ok(mut h) => match h.kill() {
+                Ok(()) => println!("{target}"),
+                Err(e) => errors.push(format!("{target}: {e}")),
+            },
+            Err(e) => errors.push(format!("{target}: {e}")),
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("{}", errors.join("\n"))
+    }
 }
 
 #[cfg(unix)]
-pub fn rm(id: &str) -> Result<()> {
+pub fn rm(args: RmArgs) -> Result<()> {
     let rt = open_runtime()?;
-    rt.remove(id)?;
-    eprintln!("Removed: {id}");
-    Ok(())
+    let mut errors = Vec::new();
+
+    for target in &args.targets {
+        // Force mode: kill before removing.
+        if args.force {
+            if let Ok(mut h) = rt.get(target) {
+                let _ = h.kill();
+            }
+        }
+        match rt.remove(target) {
+            Ok(()) => println!("{target}"),
+            Err(e) => errors.push(format!("{target}: {e}")),
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("{}", errors.join("\n"))
+    }
 }
 
 #[cfg(unix)]
-pub async fn exec(id: &str, command: Vec<String>) -> Result<()> {
+pub async fn exec(args: ExecArgs) -> Result<()> {
     use std::io::Write;
 
     use anyhow::Context;
 
     let rt = open_runtime()?;
-    let handle = rt.get(id)?;
+    let handle = rt.get(&args.target)?;
 
-    let (cmd, args) = command.split_first().context("exec requires a command")?;
-    let req = bux::ExecReq::new(cmd).args(args.to_vec());
+    let (cmd, cmd_args) = args.command.split_first().context("command required")?;
+    let mut req = bux::ExecReq::new(cmd).args(cmd_args.to_vec());
+
+    // Apply env/workdir/user to the exec request.
+    if !args.env.is_empty() {
+        req = req.env(args.env);
+    }
+    if let Some(ref wd) = args.workdir {
+        req = req.cwd(wd);
+    }
+    if let Some(ref user_spec) = args.user {
+        let (uid, gid) = crate::run::parse_user(user_spec)?;
+        req = req.user(uid, gid.unwrap_or(uid));
+    }
 
     let code = handle
         .exec_stream(req, |event| match event {
@@ -105,14 +247,14 @@ pub async fn exec(id: &str, command: Vec<String>) -> Result<()> {
 }
 
 #[cfg(unix)]
-pub fn inspect(id: &str) -> Result<()> {
+pub fn inspect(target: &str) -> Result<()> {
     let rt = open_runtime()?;
-    let handle = rt.get(id)?;
+    let handle = rt.get(target)?;
     println!("{}", serde_json::to_string_pretty(handle.state())?);
     Ok(())
 }
 
-/// Parses `id:path` guest reference. Returns `(id, guest_path)`.
+/// Parses `vm:path` guest reference. Returns `(vm, guest_path)`.
 #[cfg(unix)]
 fn parse_guest_ref(s: &str) -> Option<(&str, &str)> {
     let colon = s.find(':')?;
@@ -127,7 +269,7 @@ pub async fn cp(src: &str, dst: &str) -> Result<()> {
     let rt = open_runtime()?;
 
     match (parse_guest_ref(src), parse_guest_ref(dst)) {
-        // guest → host: download as tar, unpack locally.
+        // guest → host
         (Some((id, guest_path)), None) => {
             let handle = rt.get(id)?;
             let tar_data = handle.copy_out(guest_path).await?;
@@ -136,7 +278,7 @@ pub async fn cp(src: &str, dst: &str) -> Result<()> {
             let mut archive = tar::Archive::new(cursor);
             archive.unpack(dst)?;
         }
-        // host → guest: pack as tar, upload.
+        // host → guest
         (None, Some((id, guest_path))) => {
             let handle = rt.get(id)?;
             let meta = std::fs::metadata(src)?;
@@ -153,12 +295,11 @@ pub async fn cp(src: &str, dst: &str) -> Result<()> {
                 handle.write_file(guest_path, &data, 0o644).await?;
             }
         }
-        _ => anyhow::bail!("exactly one of src/dst must use <id>:<path> format"),
+        _ => anyhow::bail!("exactly one of src/dst must use <vm>:<path> format"),
     }
     Ok(())
 }
 
-// Non-unix stubs — VM commands require libkrun (Linux/macOS).
 #[cfg(not(unix))]
 macro_rules! unix_only_stub {
     (sync: $($name:ident($($arg:ident: $ty:ty),*));+ $(;)?) => {
@@ -180,16 +321,16 @@ macro_rules! unix_only_stub {
 #[cfg(not(unix))]
 unix_only_stub! {
     sync:
-    ps(format: OutputFormat);
-    kill(id: &str);
-    rm(id: &str);
-    inspect(id: &str);
+    ps(args: PsArgs);
+    kill(args: KillArgs);
+    rm(args: RmArgs);
+    inspect(target: &str);
 }
 
 #[cfg(not(unix))]
 unix_only_stub! {
     async:
-    stop(id: &str);
-    exec(id: &str, command: Vec<String>);
+    stop(args: StopArgs);
+    exec(args: ExecArgs);
     cp(src: &str, dst: &str);
 }

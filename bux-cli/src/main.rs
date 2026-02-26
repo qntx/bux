@@ -13,7 +13,6 @@ use anyhow::Result;
 use bux::{Feature, Vm};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
-use run::RunArgs;
 
 #[derive(Parser)]
 #[command(name = "bux", version, about = "Micro-VM sandbox powered by libkrun")]
@@ -24,89 +23,86 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run a command in an isolated micro-VM.
-    Run(Box<RunArgs>),
+    /// Create and run a command in a new micro-VM.
+    Run(Box<run::RunArgs>),
+
+    /// Execute a command in a running VM.
+    Exec(vm::ExecArgs),
+
+    /// List VMs.
+    #[command(visible_alias = "ls")]
+    Ps(vm::PsArgs),
+
+    /// Stop one or more running VMs.
+    Stop(vm::StopArgs),
+
+    /// Force-kill one or more running VMs.
+    Kill(vm::KillArgs),
+
+    /// Remove one or more stopped VMs.
+    Rm(vm::RmArgs),
+
+    /// Display detailed information on a VM.
+    Inspect {
+        /// VM ID, name, or prefix.
+        target: String,
+    },
+
+    /// Copy files between host and a running VM.
+    ///
+    /// Use `<vm>:<path>` to refer to a guest path.
+    Cp {
+        /// Source (host path or `<vm>:<guest_path>`).
+        src: String,
+        /// Destination (host path or `<vm>:<guest_path>`).
+        dst: String,
+    },
+
     /// Pull an OCI image from a registry.
     Pull {
-        /// Image reference (e.g., ubuntu:latest, ghcr.io/org/app:v1).
+        /// Image reference (e.g., ubuntu:latest).
         image: String,
     },
+
     /// List locally stored images.
     Images {
         /// Output format.
         #[arg(long, default_value = "table")]
         format: OutputFormat,
     },
-    /// Remove a locally stored image.
+
+    /// Remove one or more locally stored images.
     Rmi {
-        /// Image reference to remove.
-        image: String,
+        /// Image references to remove.
+        #[arg(required = true, num_args = 1..)]
+        images: Vec<String>,
     },
+
     /// Display system capabilities and libkrun feature support.
     Info {
         /// Output format.
         #[arg(long, default_value = "table")]
         format: OutputFormat,
     },
-    /// Generate shell completion scripts.
-    Completion {
-        /// Target shell.
-        shell: Shell,
-    },
-    /// List managed VMs.
-    Ps {
-        /// Output format.
-        #[arg(long, default_value = "table")]
-        format: OutputFormat,
-    },
-    /// Stop a running VM (graceful shutdown).
-    Stop {
-        /// VM ID or prefix.
-        id: String,
-    },
-    /// Force-kill a running VM.
-    Kill {
-        /// VM ID or prefix.
-        id: String,
-    },
-    /// Remove a stopped VM.
-    Rm {
-        /// VM ID or prefix.
-        id: String,
-    },
-    /// Execute a command inside a running VM.
-    Exec {
-        /// VM ID or prefix.
-        id: String,
-        /// Command and arguments (after --).
-        #[arg(last = true, required = true)]
-        command: Vec<String>,
-    },
-    /// Show detailed information about a VM.
-    Inspect {
-        /// VM ID or prefix.
-        id: String,
-    },
-    /// Copy files between host and a running VM.
-    ///
-    /// Use `<id>:<path>` to refer to a guest path.
-    Cp {
-        /// Source (host path or `<id>:<guest_path>`).
-        src: String,
-        /// Destination (host path or `<id>:<guest_path>`).
-        dst: String,
-    },
+
     /// Manage ext4 disk images.
     Disk {
         #[command(subcommand)]
         action: DiskAction,
+    },
+
+    /// Generate shell completion scripts.
+    #[command(hide = true)]
+    Completion {
+        /// Target shell.
+        shell: Shell,
     },
 }
 
 /// Subcommands for `bux disk`.
 #[derive(Subcommand)]
 enum DiskAction {
-    /// Create a base ext4 image from an OCI rootfs directory.
+    /// Create a base ext4 image from a rootfs directory.
     Create {
         /// Path to the rootfs directory.
         rootfs: String,
@@ -114,10 +110,11 @@ enum DiskAction {
         digest: String,
     },
     /// List all base disk images.
+    #[command(visible_alias = "ls")]
     List,
     /// Remove a base disk image by digest.
     Rm {
-        /// Digest identifier of the base image to remove.
+        /// Digest identifier to remove.
         digest: String,
     },
 }
@@ -144,61 +141,24 @@ impl Cli {
     async fn dispatch(self) -> Result<()> {
         match self.command {
             Command::Run(args) => args.run().await,
+            Command::Exec(args) => vm::exec(args).await,
+            Command::Ps(args) => vm::ps(args),
+            Command::Stop(args) => vm::stop(args).await,
+            Command::Kill(args) => vm::kill(args),
+            Command::Rm(args) => vm::rm(args),
+            Command::Inspect { target } => vm::inspect(&target),
+            Command::Cp { src, dst } => vm::cp(&src, &dst).await,
             Command::Pull { image } => pull(&image).await,
             Command::Images { format } => images(format),
-            Command::Rmi { image } => rmi(&image),
+            Command::Rmi { images } => rmi(&images),
             Command::Info { format } => info(format),
+            Command::Disk { action } => disk_cmd(action),
             Command::Completion { shell } => {
                 clap_complete::generate(shell, &mut Self::command(), "bux", &mut std::io::stdout());
                 Ok(())
             }
-            Command::Ps { format } => vm::ps(format),
-            Command::Stop { id } => vm::stop(&id).await,
-            Command::Kill { id } => vm::kill(&id),
-            Command::Rm { id } => vm::rm(&id),
-            Command::Exec { id, command } => vm::exec(&id, command).await,
-            Command::Inspect { id } => vm::inspect(&id),
-            Command::Cp { src, dst } => vm::cp(&src, &dst).await,
-            Command::Disk { action } => disk_cmd(action),
         }
     }
-}
-
-#[cfg(unix)]
-fn disk_cmd(action: DiskAction) -> Result<()> {
-    let data_dir = dirs::data_dir()
-        .ok_or_else(|| anyhow::anyhow!("no platform data directory"))?
-        .join("bux");
-    let dm = bux::DiskManager::open(&data_dir)?;
-
-    match action {
-        DiskAction::Create { rootfs, digest } => {
-            let path = dm.create_base(std::path::Path::new(&rootfs), &digest)?;
-            println!("{}", path.display());
-        }
-        DiskAction::List => {
-            let bases = dm.list_bases()?;
-            if bases.is_empty() {
-                println!("No disk images.");
-            } else {
-                for d in &bases {
-                    let path = dm.base_path(d);
-                    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                    println!("{:<40} {:>10}", d, human_size(size));
-                }
-            }
-        }
-        DiskAction::Rm { digest } => {
-            dm.remove_base(&digest)?;
-            eprintln!("Removed: {digest}");
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn disk_cmd(_action: DiskAction) -> Result<()> {
-    anyhow::bail!("Disk management requires Linux or macOS")
 }
 
 async fn pull(image: &str) -> Result<()> {
@@ -223,21 +183,23 @@ fn images(format: OutputFormat) -> Result<()> {
     }
     println!("{:<50} {:<20} {:>10}", "REFERENCE", "DIGEST", "SIZE");
     for img in &list {
-        let short_digest = &img.digest[..std::cmp::min(19, img.digest.len())];
+        let short = &img.digest[..img.digest.len().min(19)];
         println!(
             "{:<50} {:<20} {:>10}",
             img.reference,
-            short_digest,
+            short,
             human_size(img.size)
         );
     }
     Ok(())
 }
 
-fn rmi(image: &str) -> Result<()> {
+fn rmi(refs: &[String]) -> Result<()> {
     let oci = bux_oci::Oci::open()?;
-    oci.remove(image)?;
-    eprintln!("Removed: {image}");
+    for r in refs {
+        oci.remove(r)?;
+        println!("{r}");
+    }
     Ok(())
 }
 
@@ -286,8 +248,44 @@ fn info(format: OutputFormat) -> Result<()> {
         Some(false) => println!("nested:    not supported"),
         None => {}
     }
-
     Ok(())
+}
+
+#[cfg(unix)]
+fn disk_cmd(action: DiskAction) -> Result<()> {
+    let data_dir = dirs::data_dir()
+        .ok_or_else(|| anyhow::anyhow!("no platform data directory"))?
+        .join("bux");
+    let dm = bux::DiskManager::open(&data_dir)?;
+
+    match action {
+        DiskAction::Create { rootfs, digest } => {
+            let path = dm.create_base(std::path::Path::new(&rootfs), &digest)?;
+            println!("{}", path.display());
+        }
+        DiskAction::List => {
+            let bases = dm.list_bases()?;
+            if bases.is_empty() {
+                println!("No disk images.");
+            } else {
+                for d in &bases {
+                    let path = dm.base_path(d);
+                    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    println!("{:<40} {:>10}", d, human_size(size));
+                }
+            }
+        }
+        DiskAction::Rm { digest } => {
+            dm.remove_base(&digest)?;
+            println!("{digest}");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn disk_cmd(_action: DiskAction) -> Result<()> {
+    anyhow::bail!("Disk management requires Linux or macOS")
 }
 
 /// Formats bytes into a human-readable size string.
