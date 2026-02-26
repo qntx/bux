@@ -149,7 +149,7 @@ impl RunArgs {
             parts.extend(self.command);
             parts
         } else if self.command.is_empty() {
-            oci_cfg.as_ref().map(oci_command).unwrap_or_default()
+            oci_cfg.as_ref().map(|c| c.command()).unwrap_or_default()
         } else {
             self.command
         };
@@ -220,7 +220,7 @@ impl RunArgs {
     async fn resolve_rootfs(&self) -> Result<(String, Option<bux_oci::ImageConfig>)> {
         match (&self.image, &self.root, &self.root_disk) {
             (Some(img), None, None) => {
-                let mut oci = bux_oci::Oci::open()?;
+                let oci = bux_oci::Oci::open()?;
                 let r = oci.ensure(img, |msg| eprintln!("{msg}")).await?;
                 Ok((r.rootfs.to_string_lossy().into_owned(), r.config))
             }
@@ -229,18 +229,6 @@ impl RunArgs {
             _ => unreachable!("clap validation"),
         }
     }
-}
-
-/// Resolves ENTRYPOINT + CMD from an OCI image config.
-fn oci_command(cfg: &bux_oci::ImageConfig) -> Vec<String> {
-    let mut parts = Vec::new();
-    if let Some(ref ep) = cfg.entrypoint {
-        parts.extend(ep.iter().cloned());
-    }
-    if let Some(ref cmd) = cfg.cmd {
-        parts.extend(cmd.iter().cloned());
-    }
-    parts
 }
 
 /// Parses Docker-style volume spec: `hostPath:guestPath[:ro]`.

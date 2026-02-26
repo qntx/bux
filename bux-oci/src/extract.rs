@@ -1,26 +1,54 @@
 //! OCI layer extraction with whiteout handling.
+//!
+//! Supports both file-based (streaming from disk) and in-memory layer extraction.
+//! Handles all standard OCI/Docker layer media types:
+//! - `application/vnd.oci.image.layer.v1.tar+gzip`
+//! - `application/vnd.docker.image.rootfs.diff.tar.gzip`
+//! - Uncompressed tar fallback
 
-use std::fs;
-use std::io::Read;
+use std::fs::{self, File};
+use std::io::{self, BufReader, Read};
 use std::path::Path;
 
 use flate2::read::GzDecoder;
 
-/// Extracts in-memory gzip-compressed tar layers in order into a rootfs directory.
+/// Media types recognized as gzip-compressed layers.
+const GZIP_MEDIA_TYPES: &[&str] = &[
+    "application/vnd.oci.image.layer.v1.tar+gzip",
+    "application/vnd.docker.image.rootfs.diff.tar.gzip",
+];
+
+/// Returns `true` if the media type indicates gzip compression.
+fn is_gzip(media_type: &str) -> bool {
+    GZIP_MEDIA_TYPES.contains(&media_type) || media_type.ends_with("+gzip")
+}
+
+/// Extracts layer tarballs from disk into a rootfs directory (streaming, low memory).
 ///
-/// Handles OCI whiteout files:
-/// - `.wh.<name>` — deletes the named entry from a lower layer.
-/// - `.wh..wh..opq` — marks the directory as opaque (clears inherited contents).
-pub fn extract_layers(layers: &[Vec<u8>], rootfs: &Path) -> crate::Result<()> {
+/// Each `(path, media_type)` pair is a layer tarball on disk. Layers are applied
+/// in order with full OCI whiteout semantics.
+pub fn extract_layer_files(
+    layers: &[(impl AsRef<Path>, impl AsRef<str>)],
+    rootfs: &Path,
+) -> crate::Result<()> {
     fs::create_dir_all(rootfs)?;
-    for data in layers {
-        extract_layer(GzDecoder::new(data.as_slice()), rootfs)?;
+    for (path, media_type) in layers {
+        let file = BufReader::new(File::open(path.as_ref())?);
+        if is_gzip(media_type.as_ref()) {
+            apply_tar(GzDecoder::new(file), rootfs)?;
+        } else {
+            apply_tar(file, rootfs)?;
+        }
     }
     Ok(())
 }
 
-/// Extracts a single tar stream into `rootfs`, processing whiteout entries.
-fn extract_layer(reader: impl Read, rootfs: &Path) -> crate::Result<()> {
+/// Applies a single tar stream to `rootfs` with OCI whiteout processing.
+///
+/// Whiteout semantics (OCI Image Spec v1.1):
+/// - `.wh.<name>` — removes the named sibling entry from a lower layer.
+/// - `.wh..wh..opq` — marks the directory as opaque (clears inherited contents).
+fn apply_tar(reader: impl Read, rootfs: &Path) -> crate::Result<()> {
     let mut archive = tar::Archive::new(reader);
     archive.set_preserve_permissions(true);
     archive.set_overwrite(true);
@@ -39,7 +67,7 @@ fn extract_layer(reader: impl Read, rootfs: &Path) -> crate::Result<()> {
             if let Some(parent) = rel.parent() {
                 let target = rootfs.join(parent);
                 if target.exists() {
-                    clear_directory(&target)?;
+                    clear_dir(&target)?;
                 }
             }
             continue;
@@ -66,7 +94,7 @@ fn extract_layer(reader: impl Read, rootfs: &Path) -> crate::Result<()> {
 }
 
 /// Removes all contents of a directory without removing the directory itself.
-fn clear_directory(dir: &Path) -> std::io::Result<()> {
+fn clear_dir(dir: &Path) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
         if path.is_dir() {

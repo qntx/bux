@@ -1,21 +1,37 @@
 //! OCI image management for the bux micro-VM sandbox.
 //!
-//! Pulls, stores, and extracts OCI container images for use as
-//! rootfs directories with libkrun micro-VMs. Powered by [`oci_client`].
+//! Pulls, caches, and extracts OCI container images for use as rootfs
+//! directories with libkrun micro-VMs. Powered by [`oci_client`].
+//!
+//! # Architecture
+//!
+//! ```text
+//! Oci (public API)
+//!  ├── Store (SQLite index + content-addressed blob storage)
+//!  │    ├── layers/   — sha256-addressed layer tarballs
+//!  │    ├── configs/  — sha256-addressed config blobs
+//!  │    └── rootfs/   — extracted rootfs directories
+//!  └── oci_client::Client (registry communication)
+//! ```
 
 #![allow(clippy::missing_docs_in_private_items)]
 
 mod extract;
 mod store;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use oci_client::Reference;
-use oci_client::client::{ClientConfig, ClientProtocol};
-use oci_client::manifest::IMAGE_LAYER_GZIP_MEDIA_TYPE;
+use oci_client::client::ClientConfig;
 use oci_client::secrets::RegistryAuth;
 pub use store::ImageMeta;
 use store::Store;
+
+/// Accepted layer media types (OCI + Docker).
+const ACCEPTED_MEDIA_TYPES: &[&str] = &[
+    "application/vnd.oci.image.layer.v1.tar+gzip",
+    "application/vnd.docker.image.rootfs.diff.tar.gzip",
+];
 
 /// Result type for bux-oci operations.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -31,9 +47,9 @@ pub enum Error {
     #[error("image not found: {0}")]
     NotFound(String),
 
-    /// Local store error.
-    #[error("store: {0}")]
-    Store(String),
+    /// Local store / database error.
+    #[error("db: {0}")]
+    Db(String),
 
     /// OCI registry protocol error.
     #[error("registry: {0}")]
@@ -46,6 +62,25 @@ pub enum Error {
     /// JSON parsing error.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+}
+
+/// Configuration for initializing [`Oci`].
+#[derive(Debug, Clone)]
+pub struct OciConfig {
+    /// Root directory for the image store. Defaults to `<platform_data_dir>/bux`.
+    pub store_dir: PathBuf,
+    /// Registry authentication. Defaults to anonymous.
+    pub auth: RegistryAuth,
+}
+
+impl Default for OciConfig {
+    fn default() -> Self {
+        let store_dir = dirs_default_store();
+        Self {
+            store_dir,
+            auth: RegistryAuth::Anonymous,
+        }
+    }
 }
 
 /// Subset of the OCI image configuration relevant to VM execution.
@@ -63,6 +98,26 @@ pub struct ImageConfig {
     /// Default working directory.
     #[serde(default, alias = "WorkingDir")]
     pub working_dir: Option<String>,
+    /// Default user (from `USER` directive).
+    #[serde(default, alias = "User")]
+    pub user: Option<String>,
+    /// Exposed ports (from `EXPOSE` directive).
+    #[serde(default, alias = "ExposedPorts")]
+    pub exposed_ports: Option<serde_json::Value>,
+}
+
+impl ImageConfig {
+    /// Returns the combined entrypoint + cmd as the final execution command.
+    pub fn command(&self) -> Vec<String> {
+        let mut parts = Vec::new();
+        if let Some(ref ep) = self.entrypoint {
+            parts.extend(ep.iter().cloned());
+        }
+        if let Some(ref cmd) = self.cmd {
+            parts.extend(cmd.iter().cloned());
+        }
+        parts
+    }
 }
 
 /// Result of a successful image pull.
@@ -70,102 +125,159 @@ pub struct ImageConfig {
 pub struct PullResult {
     /// Canonical image reference string.
     pub reference: String,
+    /// Manifest content digest.
+    pub digest: String,
     /// Path to the extracted rootfs directory.
     pub rootfs: PathBuf,
     /// Image configuration (Cmd, Env, WorkingDir, etc.).
     pub config: Option<ImageConfig>,
 }
 
-/// OCI image manager backed by a local rootfs store.
-#[allow(missing_debug_implementations)]
+/// OCI image manager backed by a content-addressed store.
+///
+/// All methods take `&self` — the underlying store uses SQLite (which serializes
+/// writes internally) and content-addressed blobs (immutable files).
 pub struct Oci {
     store: Store,
     client: oci_client::Client,
+    auth: RegistryAuth,
+}
+
+impl std::fmt::Debug for Oci {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Oci").field("store", &self.store).finish()
+    }
 }
 
 impl Oci {
-    /// Opens the OCI manager with the default storage location.
+    /// Opens the OCI manager with default configuration.
     pub fn open() -> Result<Self> {
-        let config = ClientConfig {
-            protocol: ClientProtocol::Https,
-            ..Default::default()
-        };
+        Self::open_with(OciConfig::default())
+    }
+
+    /// Opens the OCI manager with explicit configuration.
+    pub fn open_with(config: OciConfig) -> Result<Self> {
+        let store = Store::open(&config.store_dir)?;
+        let client = oci_client::Client::new(ClientConfig::default());
         Ok(Self {
-            store: Store::open()?,
-            client: oci_client::Client::new(config),
+            store,
+            client,
+            auth: config.auth,
         })
     }
 
-    /// Pulls an image from a registry, extracts its rootfs, and returns the result.
+    /// Opens the OCI manager rooted at a specific directory.
+    pub fn open_at(store_dir: &Path) -> Result<Self> {
+        Self::open_with(OciConfig {
+            store_dir: store_dir.to_path_buf(),
+            ..Default::default()
+        })
+    }
+
+    /// Pulls an image from a registry, caches layers, extracts rootfs.
     ///
-    /// `on_status` is called with human-readable progress messages.
-    pub async fn pull(&mut self, image: &str, on_status: impl Fn(&str)) -> Result<PullResult> {
+    /// Layers are stored individually by digest — shared layers between images
+    /// are downloaded only once. `on_status` receives human-readable progress.
+    pub async fn pull(&self, image: &str, on_status: impl Fn(&str)) -> Result<PullResult> {
         let reference = parse_reference(image)?;
         let ref_str = reference.to_string();
-        let key = storage_key(&reference);
 
-        // 1. Pull all layers via oci-client.
-        on_status("Pulling image...");
+        // 1. Pull manifest + layers from registry.
+        on_status(&format!("Pulling {ref_str}..."));
         let image_data = self
             .client
-            .pull(
-                &reference,
-                &RegistryAuth::Anonymous,
-                vec![IMAGE_LAYER_GZIP_MEDIA_TYPE],
-            )
+            .pull(&reference, &self.auth, ACCEPTED_MEDIA_TYPES.to_vec())
             .await
             .map_err(|e| Error::Registry(e.to_string()))?;
 
-        // 2. Extract rootfs from in-memory layers.
-        let rootfs = self.store.rootfs_path(&key);
-        if rootfs.exists() {
-            std::fs::remove_dir_all(&rootfs)?;
-        }
-        on_status("Extracting rootfs...");
-        let layers: Vec<Vec<u8>> = image_data
-            .layers
-            .into_iter()
-            .map(|l| l.data.to_vec())
-            .collect();
-        extract::extract_layers(&layers, &rootfs)?;
+        let manifest_digest = image_data.digest.clone().unwrap_or_default();
 
-        // 3. Parse and persist image config.
+        // 2. Save each layer to content-addressed blob store (dedup).
+        //    `save_layer` is idempotent — if the blob already exists on disk it skips the write.
+        let mut layer_digests = Vec::with_capacity(image_data.layers.len());
+        let mut total_size: u64 = 0;
+        for (i, layer) in image_data.layers.iter().enumerate() {
+            let media_type = if layer.media_type.is_empty() {
+                "application/vnd.oci.image.layer.v1.tar+gzip"
+            } else {
+                &layer.media_type
+            };
+            on_status(&format!(
+                "Caching layer {}/{} ({} bytes)...",
+                i + 1,
+                image_data.layers.len(),
+                layer.data.len()
+            ));
+            let digest = self.store.save_layer(&layer.data, media_type)?;
+            layer_digests.push(digest);
+            total_size += layer.data.len() as u64;
+        }
+
+        // 3. Save config blob.
+        let config_digest = self.store.save_config(&image_data.config.data)?;
         let config = parse_image_config(&image_data.config.data);
-        if let Some(ref cfg) = config {
-            self.store.save_image_config(&key, cfg)?;
+
+        // 4. Extract rootfs from cached layer files (streaming from disk).
+        let rootfs = self.store.rootfs_path(&manifest_digest);
+        if !rootfs.is_dir() {
+            on_status("Extracting rootfs...");
+            let layer_files: Vec<(PathBuf, String)> = layer_digests
+                .iter()
+                .map(|d| {
+                    let media_type = "application/vnd.oci.image.layer.v1.tar+gzip".to_string();
+                    (self.store.layer_path(d), media_type)
+                })
+                .collect();
+
+            // Run extraction in a blocking task (CPU-bound tar I/O).
+            let rootfs_clone = rootfs.clone();
+            tokio::task::spawn_blocking(move || {
+                extract::extract_layer_files(&layer_files, &rootfs_clone)
+            })
+            .await
+            .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
         }
 
-        // 4. Persist image metadata.
-        let digest = image_data.digest.unwrap_or_default();
-        let size = layers.iter().map(|l| l.len() as u64).sum();
-        self.store.upsert_image(ImageMeta {
-            reference: ref_str.clone(),
-            digest,
-            size,
-        })?;
+        // 5. Update SQLite index.
+        self.store.upsert_image(
+            &ref_str,
+            &manifest_digest,
+            total_size,
+            &config_digest,
+            &layer_digests,
+        )?;
 
         on_status("Done.");
         Ok(PullResult {
             reference: ref_str,
+            digest: manifest_digest,
             rootfs,
             config,
         })
     }
 
-    /// Returns a cached [`PullResult`] if the image is already present, otherwise pulls it.
+    /// Returns a cached [`PullResult`] if already present, otherwise pulls.
     ///
-    /// This is the preferred entry point for `bux run <image>` — fast when cached.
-    pub async fn ensure(&mut self, image: &str, on_status: impl Fn(&str)) -> Result<PullResult> {
+    /// This is the preferred entry point for `bux run <image>` — instant when cached.
+    pub async fn ensure(&self, image: &str, on_status: impl Fn(&str)) -> Result<PullResult> {
         let reference = parse_reference(image)?;
-        let key = storage_key(&reference);
+        let ref_str = reference.to_string();
 
-        if self.store.has_rootfs(&key) {
-            let config = self.store.load_image_config(&key)?;
-            return Ok(PullResult {
-                reference: reference.to_string(),
-                rootfs: self.store.rootfs_path(&key),
-                config,
-            });
+        // Check if we have a cached rootfs for this reference.
+        if let Some(digest) = self.store.get_digest(&ref_str)? {
+            let rootfs = self.store.rootfs_path(&digest);
+            if rootfs.is_dir() {
+                let config = self
+                    .store
+                    .load_image_config(&ref_str)?
+                    .and_then(|json| serde_json::from_str(&json).ok());
+                return Ok(PullResult {
+                    reference: ref_str,
+                    digest,
+                    rootfs,
+                    config,
+                });
+            }
         }
 
         self.pull(image, on_status).await
@@ -173,14 +285,15 @@ impl Oci {
 
     /// Lists all locally stored images.
     pub fn images(&self) -> Result<Vec<ImageMeta>> {
-        self.store.load_images()
+        self.store.list_images()
     }
 
     /// Removes a locally stored image and its extracted rootfs.
+    ///
+    /// Layer blobs are ref-counted; only orphaned blobs are deleted.
     pub fn remove(&self, image: &str) -> Result<()> {
         let reference = parse_reference(image)?;
-        self.store
-            .remove_image(&reference.to_string(), &storage_key(&reference))
+        self.store.remove_image(&reference.to_string())
     }
 }
 
@@ -191,19 +304,43 @@ fn parse_reference(image: &str) -> Result<Reference> {
         .map_err(|e: oci_client::ParseError| Error::InvalidReference(e.to_string()))
 }
 
-/// Converts a reference into a filesystem-safe storage key.
-fn storage_key(reference: &Reference) -> String {
-    reference.to_string().replace(['/', ':', '@'], "_")
-}
-
 /// Deserializes the raw OCI config JSON blob into our minimal [`ImageConfig`].
 ///
-/// The config blob wraps the config under a top-level `"config"` key with PascalCase fields.
-/// [`ImageConfig`] uses `serde(alias)` to accept both PascalCase and lowercase keys.
+/// The config blob wraps the actual config under a top-level `"config"` key.
 fn parse_image_config(data: &[u8]) -> Option<ImageConfig> {
     #[derive(serde::Deserialize)]
     struct TopLevel {
         config: Option<ImageConfig>,
     }
     serde_json::from_slice::<TopLevel>(data).ok()?.config
+}
+
+/// Returns the default store directory: `$BUX_HOME` or `<platform_data_dir>/bux`.
+fn dirs_default_store() -> PathBuf {
+    if let Ok(home) = std::env::var("BUX_HOME") {
+        return PathBuf::from(home);
+    }
+    // Use dirs crate logic inline to avoid adding the dependency.
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+            return PathBuf::from(xdg).join("bux");
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(".local/share/bux");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join("Library/Application Support/bux");
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = std::env::var("LOCALAPPDATA") {
+            return PathBuf::from(appdata).join("bux");
+        }
+    }
+    PathBuf::from("bux")
 }
