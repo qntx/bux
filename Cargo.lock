@@ -239,11 +239,12 @@ dependencies = [
 name = "bux-oci"
 version = "0.6.1"
 dependencies = [
- "dirs",
  "flate2",
  "oci-client",
+ "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tar",
  "thiserror 2.0.18",
  "tokio",

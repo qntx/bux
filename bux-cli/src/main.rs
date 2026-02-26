@@ -166,7 +166,7 @@ impl Cli {
 }
 
 async fn pull(image: &str) -> Result<()> {
-    let mut oci = bux_oci::Oci::open()?;
+    let oci = bux_oci::Oci::open()?;
     let result = oci.pull(image, |msg| eprintln!("{msg}")).await?;
     println!("{}", result.reference);
     Ok(())
