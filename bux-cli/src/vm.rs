@@ -1,6 +1,8 @@
 //! VM lifecycle commands: ps, stop, kill, rm, exec, inspect, cp.
 
 use anyhow::Result;
+#[cfg(unix)]
+use anyhow::Context;
 
 use crate::OutputFormat;
 
@@ -10,9 +12,21 @@ use crate::OutputFormat;
 #[derive(clap::Args)]
 #[command(trailing_var_arg = true)]
 pub struct ExecArgs {
+    /// Detached mode: run command in the background.
+    #[arg(short = 'd', long)]
+    pub detach: bool,
+
     /// Set environment variables.
     #[arg(short = 'e', long = "env")]
     pub env: Vec<String>,
+
+    /// Keep STDIN open even if not attached.
+    #[arg(short = 'i', long)]
+    pub interactive: bool,
+
+    /// Allocate a pseudo-TTY.
+    #[arg(short = 't', long)]
+    pub tty: bool,
 
     /// Working directory inside the VM.
     #[arg(short = 'w', long)]
@@ -208,8 +222,6 @@ pub fn rm(args: RmArgs) -> Result<()> {
 pub async fn exec(args: ExecArgs) -> Result<()> {
     use std::io::Write;
 
-    use anyhow::Context;
-
     let rt = open_runtime()?;
     let handle = rt.get(&args.target)?;
 
@@ -237,6 +249,7 @@ pub async fn exec(args: ExecArgs) -> Result<()> {
             bux::ExecEvent::Stderr(d) => {
                 let _ = std::io::stderr().write_all(&d);
             }
+            _ => {}
         })
         .await?;
 

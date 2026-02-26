@@ -67,9 +67,21 @@ pub struct RunArgs {
     #[arg(short = 'u', long = "user")]
     user: Option<String>,
 
-    /// Resource limit (RESOURCE=SOFT:HARD).
+    /// Keep STDIN open even if not attached.
+    #[arg(short = 'i', long)]
+    interactive: bool,
+
+    /// Allocate a pseudo-TTY.
+    #[arg(short = 't', long)]
+    tty: bool,
+
+    /// Override the default ENTRYPOINT of the image.
     #[arg(long)]
-    rlimit: Vec<String>,
+    entrypoint: Option<String>,
+
+    /// Set ulimits (format: type=soft:hard).
+    #[arg(long)]
+    ulimit: Vec<String>,
 
     /// Enable nested virtualization (macOS only).
     #[arg(long)]
@@ -127,8 +139,12 @@ impl RunArgs {
             b = b.workdir(wd);
         }
 
-        // Command: CLI args > OCI ENTRYPOINT+CMD.
-        let cmd = if self.command.is_empty() {
+        // Command: --entrypoint override > CLI args > OCI ENTRYPOINT+CMD.
+        let cmd = if let Some(ep) = self.entrypoint {
+            let mut parts = vec![ep];
+            parts.extend(self.command);
+            parts
+        } else if self.command.is_empty() {
             oci_cfg.as_ref().map(oci_command).unwrap_or_default()
         } else {
             self.command
@@ -164,9 +180,9 @@ impl RunArgs {
             b = b.virtiofs(&tag, &host);
         }
 
-        // Resource limits.
-        for rl in self.rlimit {
-            b = b.rlimit(rl);
+        // Ulimits.
+        for ul in self.ulimit {
+            b = b.rlimit(ul);
         }
 
         // User: --user uid[:gid]
