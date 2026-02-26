@@ -4,17 +4,18 @@ default-members = ["bux"]
 resolver = "3"
 
 [workspace.package]
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/qntx/bux"
 
 [workspace.dependencies]
 bux = { version = "0.6", path = "bux" }
-bux-e2fs = { version = "0.1", path = "bux-e2fs" }
 bux-oci = { version = "0.6", path = "bux-oci" }
 bux-proto = { version = "0.6", path = "bux-proto" }
+
 bux-krun = { version = "0.1", path = "bux-krun" }
+bux-e2fs = { version = "0.1", path = "bux-e2fs" }
 
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }

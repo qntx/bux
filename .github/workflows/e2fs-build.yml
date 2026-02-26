@@ -74,9 +74,19 @@ jobs:
 
           # Build create_inode.o from misc/ — this implements populate_fs()
           # which is the core of `mke2fs -d <dir>`.
+          #
+          # create_inode.c references two external symbols:
+          #   - no_copy_xattrs: global int, normally defined in mke2fs.c
+          #   - __populate_fs_from_tar: only when HAVE_ARCHIVE_H is defined
+          #
+          # We force-undefine HAVE_ARCHIVE_H to eliminate the tar dependency,
+          # and compile a minimal stub providing no_copy_xattrs so the
+          # resulting libcreate_inode.a is fully self-contained.
           cd misc
-          make create_inode.o
-          ar rcs libcreate_inode.a create_inode.o
+          make CFLAGS="$CFLAGS -UHAVE_ARCHIVE_H" create_inode.o
+          printf 'int no_copy_xattrs = 1;\n' > e2fs_stubs.c
+          ${CC:-cc} $CFLAGS -c -o e2fs_stubs.o e2fs_stubs.c
+          ar rcs libcreate_inode.a create_inode.o e2fs_stubs.o
           cd ..
 
           # Collect static libraries into dist/lib/.
