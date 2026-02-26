@@ -78,6 +78,7 @@ pub fn gen_id() -> String {
 }
 
 #[cfg(unix)]
+/// SQLite persistence layer for VM state.
 mod db {
     use std::path::Path;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -87,6 +88,7 @@ mod db {
     use super::{Status, VmState};
     use crate::error::{Error, Result};
 
+    /// SQL schema for the `vms` table.
     const SCHEMA: &str = "
         CREATE TABLE IF NOT EXISTS vms (
             id         TEXT PRIMARY KEY NOT NULL,
@@ -103,6 +105,7 @@ mod db {
     /// SQLite-backed VM state database.
     #[derive(Debug)]
     pub struct StateDb {
+        /// Underlying SQLite connection.
         conn: Connection,
     }
 
@@ -165,14 +168,16 @@ mod db {
 
             // Prefix search (id LIKE 'prefix%').
             let pattern = format!("{prefix}%");
-            let mut stmt = self.conn.prepare("SELECT * FROM vms WHERE id LIKE ?1")?;
-            let matches: Vec<VmState> = stmt
+            let mut prefix_stmt = self.conn.prepare("SELECT * FROM vms WHERE id LIKE ?1")?;
+            let matches: Vec<VmState> = prefix_stmt
                 .query_map(params![pattern], row_to_state)?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
 
             match matches.len() {
                 0 => Err(Error::NotFound(format!("no VM matching '{prefix}'"))),
-                1 => Ok(matches.into_iter().next().unwrap()),
+                // SAFETY: len() == 1 guarantees next() returns Some.
+                #[allow(clippy::expect_used)]
+                1 => Ok(matches.into_iter().next().expect("len==1 guarantees Some")),
                 n => Err(Error::Ambiguous(format!(
                     "prefix '{prefix}' matches {n} VMs"
                 ))),
@@ -210,12 +215,18 @@ mod db {
             image: row.get("image")?,
             socket: socket_str.into(),
             status: parse_status(&status_text),
-            config: serde_json::from_str(&config_json)
-                .unwrap_or_else(|_| panic!("corrupt config JSON for VM")),
+            config: serde_json::from_str(&config_json).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
             created_at: f64_to_system_time(ts),
         })
     }
 
+    /// Converts a [`Status`] to its database string representation.
     const fn status_str(s: Status) -> &'static str {
         match s {
             Status::Running => "running",
@@ -223,6 +234,7 @@ mod db {
         }
     }
 
+    /// Parses a database string into a [`Status`].
     fn parse_status(s: &str) -> Status {
         match s {
             "running" => Status::Running,
@@ -230,12 +242,14 @@ mod db {
         }
     }
 
+    /// Converts a [`SystemTime`] to seconds since UNIX epoch as `f64`.
     fn system_time_to_f64(t: SystemTime) -> f64 {
         t.duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs_f64()
     }
 
+    /// Converts seconds since UNIX epoch (`f64`) back to a [`SystemTime`].
     fn f64_to_system_time(secs: f64) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs_f64(secs)
     }

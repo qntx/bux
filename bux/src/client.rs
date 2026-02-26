@@ -5,6 +5,7 @@
 //! so all methods take `&self`.
 
 #[cfg(unix)]
+/// Platform-specific implementation (Unix only).
 mod inner {
     use std::io;
     use std::path::Path;
@@ -14,6 +15,7 @@ mod inner {
     use tokio::sync::Mutex;
 
     /// Event emitted during streaming command execution.
+    #[non_exhaustive]
     #[derive(Debug)]
     pub enum ExecEvent {
         /// A chunk of stdout data.
@@ -23,6 +25,7 @@ mod inner {
     }
 
     /// Output captured from a command executed inside the guest.
+    #[non_exhaustive]
     #[derive(Debug)]
     pub struct ExecOutput {
         /// Stdout bytes.
@@ -39,6 +42,7 @@ mod inner {
     /// thanks to an internal `Mutex`.
     #[derive(Debug)]
     pub struct Client {
+        /// Persistent connection to the guest agent.
         stream: Mutex<UnixStream>,
     }
 

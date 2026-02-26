@@ -3,6 +3,12 @@
 //! All `unsafe` interactions with [`libext2fs`](crate::sys) are confined to this module.
 
 #![allow(unsafe_code)]
+// FFI boundary casts (u32 ↔ i32 for C flags) are inherently safe here.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 
 use std::ffi::CString;
 use std::path::Path;
@@ -11,12 +17,9 @@ use crate::error::{Error, Result};
 use crate::sys;
 
 /// Checks a libext2fs `errcode_t`, converting non-zero values to [`Error::Ext2fs`].
-fn check(op: &'static str, code: sys::errcode_t) -> Result<()> {
+const fn check(op: &'static str, code: sys::errcode_t) -> Result<()> {
     if code != 0 {
-        Err(Error::Ext2fs {
-            op,
-            code: code as i64,
-        })
+        Err(Error::Ext2fs { op, code })
     } else {
         Ok(())
     }
@@ -46,7 +49,7 @@ fn path_to_cstring(path: &Path) -> Result<CString> {
 ///     )
 ///     .expect("failed to create ext4 image");
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Ext4Builder {
     /// Block size in bytes (must be 1024, 2048, or 4096).
     block_size: u32,
@@ -130,9 +133,9 @@ impl Ext4Builder {
                 sys::ext2fs_initialize(
                     c_output.as_ptr(),
                     sys::EXT2_FLAG_EXCLUSIVE as i32,
-                    &mut param,
+                    std::ptr::from_mut(&mut param),
                     sys::unix_io_manager,
-                    &mut fs,
+                    std::ptr::from_mut(&mut fs),
                 ),
             )?;
 
@@ -154,7 +157,8 @@ impl Ext4Builder {
             check("add_journal_inode", sys::ext2fs_add_journal_inode(fs, 0, 0))?;
 
             // 5. Mark dirty and close.
-            sys::ext2fs_mark_super_dirty(fs);
+            // ext2fs_mark_super_dirty is a C macro; replicate it here.
+            (*fs).flags |= (sys::EXT2_FLAG_DIRTY | sys::EXT2_FLAG_CHANGED) as i32;
             check("ext2fs_close", sys::ext2fs_close(fs))?;
         }
 
@@ -183,7 +187,7 @@ impl Ext4Builder {
                     0,
                     0,
                     sys::unix_io_manager,
-                    &mut fs,
+                    std::ptr::from_mut(&mut fs),
                 ),
             )?;
 
@@ -195,7 +199,6 @@ impl Ext4Builder {
                     sys::EXT2_ROOT_INO,
                     c_host.as_ptr(),
                     c_guest.as_ptr(),
-                    0,
                     sys::EXT2_ROOT_INO,
                 ),
             )?;
@@ -216,9 +219,9 @@ pub fn estimate_image_size(dir: &Path) -> Result<u64> {
     let mut total_bytes: u64 = 0;
     let mut entry_count: u64 = 0;
 
-    for entry in walkdir(dir)? {
+    for path in walkdir(dir)? {
         entry_count += 1;
-        if let Ok(meta) = std::fs::metadata(&entry) {
+        if let Ok(meta) = std::fs::metadata(&path) {
             if meta.is_file() {
                 // Round up to 4KB blocks.
                 total_bytes += (meta.len() + 4095) & !4095;
@@ -248,14 +251,11 @@ fn walkdir(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
 
 /// Recursive helper for [`walkdir`].
 fn walkdir_inner(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
+    for result in std::fs::read_dir(dir)? {
+        let dir_entry = result?;
+        let path = dir_entry.path();
         // Use symlink_metadata to avoid following symlinks into loops.
-        let is_real_dir = path
-            .symlink_metadata()
-            .map(|m| m.is_dir())
-            .unwrap_or(false);
+        let is_real_dir = path.symlink_metadata().map(|m| m.is_dir()).unwrap_or(false);
         out.push(path.clone());
         if is_real_dir {
             walkdir_inner(&path, out)?;

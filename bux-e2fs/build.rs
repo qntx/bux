@@ -17,6 +17,16 @@
 //!   freshly generated `bindings.rs` is copied back to `src/bindings.rs` so it
 //!   can be committed to the repository.
 
+// Build scripts legitimately use stderr for diagnostics, expect/panic for
+// unrecoverable failures, and have internal-only helpers.
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::print_stderr,
+    clippy::unwrap_used,
+    missing_docs
+)]
+
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -210,6 +220,7 @@ fn obtain_libraries(target: &str, out_dir: &Path) -> PathBuf {
     lib_dir
 }
 
+/// Returns `true` if the target triple is a supported build platform.
 fn is_supported_target(target: &str) -> bool {
     let linux =
         target.contains("linux") && (target.contains("x86_64") || target.contains("aarch64"));
@@ -217,6 +228,7 @@ fn is_supported_target(target: &str) -> bool {
     linux || macos
 }
 
+/// Downloads pre-built static libraries from GitHub Releases.
 fn download_libs(version: &str, target: &str, out_dir: &Path) {
     let url = format!(
         "https://github.com/{GITHUB_REPO}/releases/download/e2fs-v{version}/bux-e2fs-{target}.tar.gz"

@@ -45,6 +45,8 @@ impl Runtime {
         let db_path = base.join("bux.db");
         let db = StateDb::open(db_path)?;
 
+        #[allow(clippy::arc_with_non_send_sync)]
+        // StateDb uses rusqlite::Connection (not Sync), but Arc is needed for VmHandle sharing within a single-threaded tokio runtime.
         Ok(Self {
             db: Arc::new(db),
             socks_dir,
@@ -65,11 +67,12 @@ impl Runtime {
     ) -> Result<VmHandle> {
         // Validate name uniqueness via DB index.
         if let Some(ref n) = name
-            && self.db.get_by_name(n)?.is_some() {
-                return Err(crate::Error::Ambiguous(format!(
-                    "a VM named '{n}' already exists"
-                )));
-            }
+            && self.db.get_by_name(n)?.is_some()
+        {
+            return Err(crate::Error::Ambiguous(format!(
+                "a VM named '{n}' already exists"
+            )));
+        }
 
         let id = state::gen_id();
         let socket = self.socks_dir.join(format!("{id}.sock"));
@@ -79,7 +82,7 @@ impl Runtime {
 
         // Add vsock port so guest agent is reachable via Unix socket.
         let socket_str = socket.to_string_lossy().into_owned();
-        let builder = builder.vsock_port(AGENT_PORT, &socket_str, true);
+        let configured = builder.vsock_port(AGENT_PORT, &socket_str, true);
 
         // Fork: child becomes the VM, parent manages state.
         let pid = unsafe { libc::fork() };
@@ -87,8 +90,9 @@ impl Runtime {
             -1 => Err(io::Error::last_os_error().into()),
             0 => {
                 // Child — build and start the VM (never returns on success).
-                match builder.build().and_then(super::vm::Vm::start) {
+                match configured.build().and_then(super::vm::Vm::start) {
                     Ok(()) => unreachable!(),
+                    #[allow(clippy::print_stderr)] // Only way to report errors in forked child.
                     Err(e) => {
                         eprintln!("[bux] child VM start failed: {e}");
                         unsafe { libc::_exit(1) }
@@ -99,7 +103,7 @@ impl Runtime {
                 let vm_state = VmState {
                     id,
                     name,
-                    pid: child_pid as u32,
+                    pid: child_pid.cast_unsigned(),
                     image,
                     socket,
                     status: Status::Running,
@@ -178,6 +182,7 @@ pub struct VmHandle {
 }
 
 impl VmHandle {
+    /// Creates a new handle from a state snapshot and shared database.
     fn new(state: VmState, db: Arc<StateDb>) -> Self {
         Self {
             state,
@@ -235,7 +240,7 @@ impl VmHandle {
     /// Sends `SIGKILL` to the VM process.
     pub fn kill(&mut self) -> Result<()> {
         unsafe {
-            libc::kill(self.state.pid as i32, libc::SIGKILL);
+            libc::kill(self.state.pid.cast_signed(), libc::SIGKILL);
         }
         self.mark_stopped()
     }
@@ -267,9 +272,10 @@ impl VmHandle {
                 if Client::connect(&self.state.socket).await.is_ok() {
                     // Don't store this probe connection; let client() create the real one.
                     if let Ok(c) = Client::connect(&self.state.socket).await
-                        && c.ping().await.is_ok() {
-                            return;
-                        }
+                        && c.ping().await.is_ok()
+                    {
+                        return;
+                    }
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -288,5 +294,5 @@ impl VmHandle {
 
 /// Checks if a process is alive via `kill(pid, 0)`.
 fn is_pid_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 }
+    unsafe { libc::kill(pid.cast_signed(), 0) == 0 }
 }
