@@ -177,6 +177,7 @@ checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
 name = "bux"
 version = "0.6.1"
 dependencies = [
+ "bux-bwrap",
  "bux-e2fs",
  "bux-krun",
  "bux-proto",
@@ -186,6 +187,15 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "bux-bwrap"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "tar",
+ "ureq",
 ]
 
 [[package]]
