@@ -363,10 +363,10 @@ impl VmHandle {
     async fn wait_ready(&self, timeout: Duration) -> io::Result<()> {
         tokio::time::timeout(timeout, async {
             loop {
-                if let Ok(c) = Client::connect(&self.state.socket).await {
-                    if c.handshake().await.is_ok() {
-                        return;
-                    }
+                if let Ok(c) = Client::connect(&self.state.socket).await
+                    && c.handshake().await.is_ok()
+                {
+                    return;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }

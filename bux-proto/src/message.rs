@@ -20,6 +20,7 @@ pub const MAX_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
 pub const AGENT_PORT: u32 = 1024;
 
 /// Request sent from host to guest.
+#[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
     /// Version handshake — must be the first message on every connection.
@@ -89,6 +90,7 @@ pub enum Request {
 }
 
 /// Command execution request.
+#[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExecReq {
     /// Executable path or name.
@@ -145,7 +147,7 @@ impl ExecReq {
 
     /// Sets the UID and GID for execution.
     #[must_use]
-    pub fn user(mut self, uid: u32, gid: u32) -> Self {
+    pub const fn user(mut self, uid: u32, gid: u32) -> Self {
         self.uid = Some(uid);
         self.gid = Some(gid);
         self
@@ -153,7 +155,7 @@ impl ExecReq {
 
     /// Enables stdin piping from the host.
     #[must_use]
-    pub fn with_stdin(mut self) -> Self {
+    pub const fn with_stdin(mut self) -> Self {
         self.stdin = true;
         self
     }
@@ -163,6 +165,7 @@ impl ExecReq {
 ///
 /// For [`Request::Exec`], the guest sends [`Response::Started`], then streams
 /// [`Response::Stdout`] / [`Response::Stderr`] chunks, then one [`Response::Exit`].
+#[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
     /// Handshake reply with the agent's protocol version.

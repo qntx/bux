@@ -20,6 +20,7 @@ async fn main() {
     }
 }
 
+/// Guest agent implementation (Linux-only).
 #[cfg(target_os = "linux")]
 mod agent {
     use std::io;
@@ -88,8 +89,12 @@ mod agent {
     fn mount_essential_tmpfs() {
         for path in ["/tmp", "/run"] {
             let _ = std::fs::create_dir_all(path);
-            let target = std::ffi::CString::new(path).unwrap();
-            let fstype = std::ffi::CString::new("tmpfs").unwrap();
+            let Ok(target) = std::ffi::CString::new(path) else {
+                continue;
+            };
+            let Ok(fstype) = std::ffi::CString::new("tmpfs") else {
+                continue;
+            };
             unsafe {
                 libc::mount(
                     std::ptr::null(),
@@ -148,6 +153,9 @@ mod agent {
                 // Stdin/StdinClose outside of an exec session are no-ops.
                 Request::Stdin { .. } | Request::StdinClose { .. } => {
                     bux_proto::send(&mut w, &Response::Ok).await?;
+                }
+                _ => {
+                    bux_proto::send(&mut w, &Response::Error("unknown request".into())).await?;
                 }
             }
         }
@@ -216,8 +224,12 @@ mod agent {
 
         let mut child_stdin = child.stdin.take();
         // SAFETY: stdout/stderr were set to Stdio::piped() above, so take() always succeeds.
-        let Some(mut stdout) = child.stdout.take() else { unreachable!() };
-        let Some(mut stderr) = child.stderr.take() else { unreachable!() };
+        let Some(mut stdout) = child.stdout.take() else {
+            unreachable!()
+        };
+        let Some(mut stderr) = child.stderr.take() else {
+            unreachable!()
+        };
         let mut stdout_done = false;
         let mut stderr_done = false;
         let mut stdout_buf = [0u8; 4096];
@@ -317,9 +329,9 @@ mod agent {
                     total += data.len() as u64;
                     if total > MAX_UPLOAD_BYTES {
                         let _ = tokio::fs::remove_file(&temp_path).await;
-                        return Err(io::Error::other(
-                            format!("upload exceeds {MAX_UPLOAD_BYTES} byte limit"),
-                        ));
+                        return Err(io::Error::other(format!(
+                            "upload exceeds {MAX_UPLOAD_BYTES} byte limit"
+                        )));
                     }
                     file.write_all(&data).await?;
                 }
@@ -404,12 +416,13 @@ mod agent {
                 let target = canonical_dest.join(&path);
                 // Resolve symlinks in prefix only, not the final component.
                 if let Ok(resolved) = target.parent().unwrap_or(&canonical_dest).canonicalize()
-                    && !resolved.starts_with(&canonical_dest) {
-                        return Err(io::Error::new(
-                            io::ErrorKind::PermissionDenied,
-                            format!("path traversal blocked: {}", path.display()),
-                        ));
-                    }
+                    && !resolved.starts_with(&canonical_dest)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!("path traversal blocked: {}", path.display()),
+                    ));
+                }
                 entry.unpack_in(&canonical_dest)?;
             }
             Ok(())
