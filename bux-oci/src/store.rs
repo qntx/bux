@@ -16,6 +16,17 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 
+/// Extension trait to convert `rusqlite::Result` into `crate::Result`.
+trait DbResultExt<T> {
+    fn db(self) -> crate::Result<T>;
+}
+
+impl<T> DbResultExt<T> for rusqlite::Result<T> {
+    fn db(self) -> crate::Result<T> {
+        self.map_err(|e| crate::Error::Db(e.to_string()))
+    }
+}
+
 /// Metadata for a locally stored image.
 #[non_exhaustive]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -26,6 +37,8 @@ pub struct ImageMeta {
     pub digest: String,
     /// Total compressed layer size in bytes.
     pub size: u64,
+    /// ISO 8601 timestamp when the image was cached.
+    pub created_at: String,
 }
 
 /// Content-addressed OCI image store with SQLite indexing.
@@ -78,11 +91,10 @@ impl Store {
         fs::create_dir_all(root.join("rootfs"))?;
 
         let db_path = root.join("images.db");
-        let db = Connection::open(&db_path).map_err(|e| crate::Error::Db(e.to_string()))?;
+        let db = Connection::open(&db_path).db()?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
-            .map_err(|e| crate::Error::Db(e.to_string()))?;
-        db.execute_batch(SCHEMA)
-            .map_err(|e| crate::Error::Db(e.to_string()))?;
+            .db()?;
+        db.execute_batch(SCHEMA).db()?;
 
         Ok(Self {
             root: root.to_path_buf(),
@@ -96,33 +108,54 @@ impl Store {
         self.root.join("layers").join(format!("{filename}.tar.gz"))
     }
 
-    /// Saves layer data to disk with SHA256 verification.
+    /// Returns a staging path for streaming a layer download.
     ///
-    /// Returns the verified digest string (`sha256:{hex}`). If a layer with the
-    /// same digest already exists, this is a no-op (content-addressed dedup).
-    pub fn save_layer(&self, data: &[u8], media_type: &str) -> crate::Result<String> {
-        let digest = format!("sha256:{:x}", Sha256::digest(data));
-        let path = self.layer_path(&digest);
+    /// The caller writes to this path, then calls [`commit_layer`] to
+    /// atomically move it into place.
+    pub fn layer_staging_path(&self, digest: &str) -> PathBuf {
+        let filename = digest.replace(':', "-");
+        self.root
+            .join("layers")
+            .join(format!("{filename}.tar.gz.tmp"))
+    }
 
-        if !path.exists() {
-            atomic_write(&path, data)?;
-        }
+    /// Returns `true` if a layer blob already exists on disk.
+    pub fn has_layer(&self, digest: &str) -> bool {
+        self.layer_path(digest).exists()
+    }
 
-        // Upsert layer metadata; increment ref_count on conflict.
+    /// Commits a streamed layer: atomic rename from staging path + DB upsert.
+    ///
+    /// The caller must have already written the layer data to the path
+    /// returned by [`layer_staging_path`].
+    pub fn commit_layer(&self, digest: &str, media_type: &str, size: u64) -> crate::Result<()> {
+        let staging = self.layer_staging_path(digest);
+        let final_path = self.layer_path(digest);
+        fs::rename(&staging, &final_path)?;
+
         self.db
             .execute(
                 "INSERT INTO layers (digest, media_type, size)
                  VALUES (?1, ?2, ?3)
                  ON CONFLICT(digest) DO UPDATE SET ref_count = ref_count + 1",
-                params![
-                    digest,
-                    media_type,
-                    i64::try_from(data.len()).unwrap_or(i64::MAX)
-                ],
+                params![digest, media_type, i64::try_from(size).unwrap_or(i64::MAX)],
             )
-            .map_err(|e| crate::Error::Db(e.to_string()))?;
+            .db()?;
 
-        Ok(digest)
+        Ok(())
+    }
+
+    /// Verifies layer integrity by recomputing SHA256.
+    ///
+    /// Returns `Ok(true)` if the hash matches, `Ok(false)` if it doesn't,
+    /// and `Err` on I/O failure. Not used internally — `oci-client` verifies
+    /// digests during download. Exposed for external callers.
+    #[allow(dead_code)]
+    pub fn verify_layer(&self, digest: &str) -> crate::Result<bool> {
+        let path = self.layer_path(digest);
+        let data = fs::read(&path)?;
+        let computed = format!("sha256:{:x}", Sha256::digest(&data));
+        Ok(computed == digest)
     }
 
     /// Path to a config blob on disk.
@@ -131,20 +164,49 @@ impl Store {
         self.root.join("configs").join(format!("{filename}.json"))
     }
 
-    /// Saves an image config blob and returns its digest.
-    pub fn save_config(&self, data: &[u8]) -> crate::Result<String> {
-        let digest = format!("sha256:{:x}", Sha256::digest(data));
-        let path = self.config_path(&digest);
+    /// Saves an image config blob with a pre-computed digest.
+    pub fn save_config(&self, digest: &str, data: &str) -> crate::Result<()> {
+        let path = self.config_path(digest);
         if !path.exists() {
-            atomic_write(&path, data)?;
+            atomic_write(&path, data.as_bytes())?;
         }
-        Ok(digest)
+        Ok(())
     }
 
     /// Path to an extracted rootfs directory (keyed by manifest digest).
     pub fn rootfs_path(&self, manifest_digest: &str) -> PathBuf {
         let dirname = manifest_digest.replace(':', "-");
         self.root.join("rootfs").join(dirname)
+    }
+
+    /// Returns a staging path for rootfs extraction.
+    pub fn rootfs_staging_path(&self, manifest_digest: &str) -> PathBuf {
+        let dirname = manifest_digest.replace(':', "-");
+        self.root.join("rootfs").join(format!("{dirname}.tmp"))
+    }
+
+    /// Returns `true` if an extracted rootfs is complete and valid.
+    pub fn rootfs_complete(&self, manifest_digest: &str) -> bool {
+        self.rootfs_path(manifest_digest).is_dir()
+    }
+
+    /// Atomically installs a staged rootfs extraction.
+    ///
+    /// Removes any stale staging directory first, then renames the staging
+    /// path into its final location. If the final path already exists
+    /// (e.g. from a concurrent extraction), the staging directory is removed.
+    pub fn commit_rootfs(&self, manifest_digest: &str) -> crate::Result<()> {
+        let staging = self.rootfs_staging_path(manifest_digest);
+        let final_path = self.rootfs_path(manifest_digest);
+
+        if final_path.is_dir() {
+            // Another call already completed — discard our staging dir.
+            fs::remove_dir_all(&staging).ok();
+            return Ok(());
+        }
+
+        fs::rename(&staging, &final_path)?;
+        Ok(())
     }
 
     /// Inserts or updates an image record and its layer associations.
@@ -156,10 +218,7 @@ impl Store {
         config_digest: &str,
         layer_digests: &[String],
     ) -> crate::Result<()> {
-        let tx = self
-            .db
-            .unchecked_transaction()
-            .map_err(|e| crate::Error::Db(e.to_string()))?;
+        let tx = self.db.unchecked_transaction().db()?;
 
         // Load config JSON from blob store for embedding in the DB.
         let config_json = fs::read_to_string(self.config_path(config_digest)).ok();
@@ -179,14 +238,14 @@ impl Store {
                 config_json
             ],
         )
-        .map_err(|e| crate::Error::Db(e.to_string()))?;
+        .db()?;
 
         // Clear old layer associations, then insert new ones.
         tx.execute(
             "DELETE FROM image_layers WHERE image_ref = ?1",
             params![reference],
         )
-        .map_err(|e| crate::Error::Db(e.to_string()))?;
+        .db()?;
 
         for (pos, layer_digest) in layer_digests.iter().enumerate() {
             tx.execute(
@@ -198,10 +257,10 @@ impl Store {
                     i64::try_from(pos).unwrap_or(i64::MAX)
                 ],
             )
-            .map_err(|e| crate::Error::Db(e.to_string()))?;
+            .db()?;
         }
 
-        tx.commit().map_err(|e| crate::Error::Db(e.to_string()))?;
+        tx.commit().db()?;
         Ok(())
     }
 
@@ -209,8 +268,8 @@ impl Store {
     pub fn list_images(&self) -> crate::Result<Vec<ImageMeta>> {
         let mut stmt = self
             .db
-            .prepare("SELECT reference, digest, size FROM images ORDER BY created DESC")
-            .map_err(|e| crate::Error::Db(e.to_string()))?;
+            .prepare("SELECT reference, digest, size, created FROM images ORDER BY created DESC")
+            .db()?;
 
         let rows = stmt
             .query_map([], |row| {
@@ -218,25 +277,25 @@ impl Store {
                     reference: row.get(0)?,
                     digest: row.get(1)?,
                     size: u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+                    created_at: row.get::<_, String>(3).unwrap_or_default(),
                 })
             })
-            .map_err(|e| crate::Error::Db(e.to_string()))?;
+            .db()?;
 
         let mut images = Vec::new();
         for row in rows {
-            images.push(row.map_err(|e| crate::Error::Db(e.to_string()))?);
+            images.push(row.db()?);
         }
         Ok(images)
     }
 
     /// Loads the stored image config JSON for a reference.
     pub fn load_image_config(&self, reference: &str) -> crate::Result<Option<String>> {
-        let result: rusqlite::Result<String> = self.db.query_row(
+        match self.db.query_row(
             "SELECT config FROM images WHERE reference = ?1",
             params![reference],
             |row| row.get(0),
-        );
-        match result {
+        ) {
             Ok(json) => Ok(Some(json)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(crate::Error::Db(e.to_string())),
@@ -268,24 +327,19 @@ impl Store {
             let mut stmt = self
                 .db
                 .prepare("SELECT layer_digest FROM image_layers WHERE image_ref = ?1")
-                .map_err(|e| crate::Error::Db(e.to_string()))?;
-            let rows = stmt
-                .query_map(params![reference], |row| row.get(0))
-                .map_err(|e| crate::Error::Db(e.to_string()))?;
+                .db()?;
+            let rows = stmt.query_map(params![reference], |row| row.get(0)).db()?;
             rows.filter_map(Result::ok).collect()
         };
 
-        let tx = self
-            .db
-            .unchecked_transaction()
-            .map_err(|e| crate::Error::Db(e.to_string()))?;
+        let tx = self.db.unchecked_transaction().db()?;
 
         for ld in &layer_digests {
             tx.execute(
                 "UPDATE layers SET ref_count = ref_count - 1 WHERE digest = ?1",
                 params![ld],
             )
-            .map_err(|e| crate::Error::Db(e.to_string()))?;
+            .db()?;
         }
 
         // Delete the image (CASCADE deletes image_layers).
@@ -293,25 +347,23 @@ impl Store {
             "DELETE FROM images WHERE reference = ?1",
             params![reference],
         )
-        .map_err(|e| crate::Error::Db(e.to_string()))?;
+        .db()?;
 
         // Remove orphaned layer blobs (ref_count <= 0).
         let orphans: Vec<String> = {
             let mut stmt = tx
                 .prepare("SELECT digest FROM layers WHERE ref_count <= 0")
-                .map_err(|e| crate::Error::Db(e.to_string()))?;
-            let rows = stmt
-                .query_map([], |row| row.get(0))
-                .map_err(|e| crate::Error::Db(e.to_string()))?;
+                .db()?;
+            let rows = stmt.query_map([], |row| row.get(0)).db()?;
             rows.filter_map(Result::ok).collect()
         };
         for orphan in &orphans {
             tx.execute("DELETE FROM layers WHERE digest = ?1", params![orphan])
-                .map_err(|e| crate::Error::Db(e.to_string()))?;
+                .db()?;
             fs::remove_file(self.layer_path(orphan)).ok();
         }
 
-        tx.commit().map_err(|e| crate::Error::Db(e.to_string()))?;
+        tx.commit().db()?;
 
         // Remove rootfs directory.
         if let Some(ref d) = digest {

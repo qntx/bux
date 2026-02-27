@@ -27,12 +27,6 @@ use oci_client::secrets::RegistryAuth;
 pub use store::ImageMeta;
 use store::Store;
 
-/// Accepted layer media types (OCI + Docker).
-const ACCEPTED_MEDIA_TYPES: &[&str] = &[
-    "application/vnd.oci.image.layer.v1.tar+gzip",
-    "application/vnd.docker.image.rootfs.diff.tar.gzip",
-];
-
 /// Result type for bux-oci operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -107,6 +101,9 @@ pub struct ImageConfig {
     /// Exposed ports (from `EXPOSE` directive).
     #[serde(default, alias = "ExposedPorts")]
     pub exposed_ports: Option<serde_json::Value>,
+    /// Image labels (from `LABEL` directive).
+    #[serde(default, alias = "Labels")]
+    pub labels: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl ImageConfig {
@@ -185,74 +182,86 @@ impl Oci {
 
     /// Pulls an image from a registry, caches layers, extracts rootfs.
     ///
-    /// Layers are stored individually by digest — shared layers between images
-    /// are downloaded only once. `on_status` receives human-readable progress.
+    /// Uses streaming downloads — each layer is written directly to disk
+    /// via `pull_blob`, keeping memory usage at O(chunk_size) instead of
+    /// O(total_image_size). `on_status` receives human-readable progress.
     pub async fn pull(&self, image: &str, on_status: impl Fn(&str)) -> Result<PullResult> {
         let reference = parse_reference(image)?;
         let ref_str = reference.to_string();
 
-        // 1. Pull manifest + layers from registry.
+        // 1. Pull manifest + config (small, OK in memory).
         on_status(&format!("Pulling {ref_str}..."));
-        let image_data = self
+        let (manifest, manifest_digest, config_json) = self
             .client
-            .pull(&reference, &self.auth, ACCEPTED_MEDIA_TYPES.to_vec())
+            .pull_manifest_and_config(&reference, &self.auth)
             .await
             .map_err(|e| Error::Registry(e.to_string()))?;
 
-        let manifest_digest = image_data.digest.clone().unwrap_or_default();
-
-        // 2. Save each layer to content-addressed blob store (dedup).
-        //    `save_layer` is idempotent — if the blob already exists on disk it skips the write.
-        let mut layer_digests = Vec::with_capacity(image_data.layers.len());
+        // 2. Stream each layer to disk — O(chunk) memory per layer.
+        let layer_count = manifest.layers.len();
         let mut total_size: u64 = 0;
-        for (i, layer) in image_data.layers.iter().enumerate() {
-            let media_type = if layer.media_type.is_empty() {
-                "application/vnd.oci.image.layer.v1.tar+gzip"
+        for (i, layer) in manifest.layers.iter().enumerate() {
+            let digest = &layer.digest;
+            let size = u64::try_from(layer.size).unwrap_or(0);
+
+            if self.store.has_layer(digest) {
+                on_status(&format!("Layer {}/{} cached", i + 1, layer_count));
             } else {
-                &layer.media_type
-            };
-            on_status(&format!(
-                "Caching layer {}/{} ({} bytes)...",
-                i + 1,
-                image_data.layers.len(),
-                layer.data.len()
-            ));
-            let digest = self.store.save_layer(&layer.data, media_type)?;
-            layer_digests.push(digest);
-            total_size += layer.data.len() as u64;
+                on_status(&format!(
+                    "Downloading layer {}/{} ({size} bytes)...",
+                    i + 1,
+                    layer_count
+                ));
+                let staging = self.store.layer_staging_path(digest);
+                let mut file = tokio::fs::File::create(&staging).await?;
+                self.client
+                    .pull_blob(&reference, layer, &mut file)
+                    .await
+                    .map_err(|e| Error::Registry(e.to_string()))?;
+                self.store.commit_layer(digest, &layer.media_type, size)?;
+            }
+            total_size += size;
         }
 
         // 3. Save config blob.
-        let config_digest = self.store.save_config(&image_data.config.data)?;
-        let config = parse_image_config(&image_data.config.data);
+        let config_digest = &manifest.config.digest;
+        self.store.save_config(config_digest, &config_json)?;
+        let config = parse_image_config(&config_json);
 
-        // 4. Extract rootfs from cached layer files (streaming from disk).
+        // 4. Extract rootfs atomically (staging dir → rename).
         let rootfs = self.store.rootfs_path(&manifest_digest);
-        if !rootfs.is_dir() {
+        if !self.store.rootfs_complete(&manifest_digest) {
             on_status("Extracting rootfs...");
-            let layer_files: Vec<(PathBuf, String)> = layer_digests
+            let layer_files: Vec<(PathBuf, String)> = manifest
+                .layers
                 .iter()
-                .map(|d| {
-                    let media_type = "application/vnd.oci.image.layer.v1.tar+gzip".to_string();
-                    (self.store.layer_path(d), media_type)
-                })
+                .map(|l| (self.store.layer_path(&l.digest), l.media_type.clone()))
                 .collect();
 
+            // Clean up any stale staging dir from a previous interrupted run.
+            let staging = self.store.rootfs_staging_path(&manifest_digest);
+            if staging.exists() {
+                std::fs::remove_dir_all(&staging)?;
+            }
+
             // Run extraction in a blocking task (CPU-bound tar I/O).
-            let rootfs_clone = rootfs.clone();
+            let staging_clone = staging.clone();
             tokio::task::spawn_blocking(move || {
-                extract::extract_layer_files(&layer_files, &rootfs_clone)
+                extract::extract_layer_files(&layer_files, &staging_clone)
             })
             .await
             .map_err(|e| Error::Io(std::io::Error::other(e)))??;
+
+            self.store.commit_rootfs(&manifest_digest)?;
         }
 
         // 5. Update SQLite index.
+        let layer_digests: Vec<String> = manifest.layers.iter().map(|l| l.digest.clone()).collect();
         self.store.upsert_image(
             &ref_str,
             &manifest_digest,
             total_size,
-            &config_digest,
+            config_digest,
             &layer_digests,
         )?;
 
@@ -267,26 +276,28 @@ impl Oci {
 
     /// Returns a cached [`PullResult`] if already present, otherwise pulls.
     ///
-    /// This is the preferred entry point for `bux run <image>` — instant when cached.
+    /// This is the preferred entry point for `bux run <image>` — instant when
+    /// cached. Uses [`rootfs_complete`](Store::rootfs_complete) to verify the
+    /// extraction finished successfully (crash-safe).
     pub async fn ensure(&self, image: &str, on_status: impl Fn(&str)) -> Result<PullResult> {
         let reference = parse_reference(image)?;
         let ref_str = reference.to_string();
 
-        // Check if we have a cached rootfs for this reference.
-        if let Some(digest) = self.store.get_digest(&ref_str)? {
+        // Check if we have a complete cached rootfs for this reference.
+        if let Some(digest) = self.store.get_digest(&ref_str)?
+            && self.store.rootfs_complete(&digest)
+        {
             let rootfs = self.store.rootfs_path(&digest);
-            if rootfs.is_dir() {
-                let config = self
-                    .store
-                    .load_image_config(&ref_str)?
-                    .and_then(|json| serde_json::from_str(&json).ok());
-                return Ok(PullResult {
-                    reference: ref_str,
-                    digest,
-                    rootfs,
-                    config,
-                });
-            }
+            let config = self
+                .store
+                .load_image_config(&ref_str)?
+                .and_then(|json| serde_json::from_str(&json).ok());
+            return Ok(PullResult {
+                reference: ref_str,
+                digest,
+                rootfs,
+                config,
+            });
         }
 
         self.pull(image, on_status).await
@@ -316,12 +327,12 @@ fn parse_reference(image: &str) -> Result<Reference> {
 /// Deserializes the raw OCI config JSON blob into our minimal [`ImageConfig`].
 ///
 /// The config blob wraps the actual config under a top-level `"config"` key.
-fn parse_image_config(data: &[u8]) -> Option<ImageConfig> {
+fn parse_image_config(data: &str) -> Option<ImageConfig> {
     #[derive(serde::Deserialize)]
     struct TopLevel {
         config: Option<ImageConfig>,
     }
-    serde_json::from_slice::<TopLevel>(data).ok()?.config
+    serde_json::from_str::<TopLevel>(data).ok()?.config
 }
 
 /// Returns the default store directory: `$BUX_HOME` or `<platform_data_dir>/bux`.

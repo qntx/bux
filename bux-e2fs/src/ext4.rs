@@ -410,6 +410,10 @@ pub fn estimate_image_size(dir: &Path) -> Result<u64> {
             total_bytes += (meta.len() + 4095) & !4095;
         } else if meta.is_dir() {
             total_bytes += 4096;
+        } else if meta.is_symlink() && meta.len() > 60 {
+            // Symlink targets <= 60 bytes are stored inline in the inode.
+            // Longer targets need a data block.
+            total_bytes += 4096;
         }
     })?;
 
@@ -424,7 +428,10 @@ const fn check(op: &'static str, code: sys::errcode_t) -> Result<()> {
     if code == 0 {
         Ok(())
     } else {
-        Err(Error::Ext2fs { op, code })
+        Err(Error::Ext2fs {
+            op,
+            code: code as i64,
+        })
     }
 }
 
