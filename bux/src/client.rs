@@ -224,7 +224,7 @@ mod inner {
                 },
             )
             .await?;
-            recv_download_chunks(&mut *stream).await
+            Self::recv_download_chunks(&mut *stream).await
         }
 
         /// Writes a file to the guest filesystem (streamed in chunks).
@@ -280,7 +280,7 @@ mod inner {
                 },
             )
             .await?;
-            recv_download_chunks(&mut *stream).await
+            Self::recv_download_chunks(&mut *stream).await
         }
 
         /// Receives chunked download data (Chunk + EndOfStream) from the guest.

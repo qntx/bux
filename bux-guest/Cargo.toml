@@ -13,7 +13,7 @@ bux-proto = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }
 tar = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros", "io-util", "process"] }
+tokio = { workspace = true, features = ["rt", "macros", "io-util", "process", "fs"] }
 tokio-vsock = { workspace = true }
 
 [lints]

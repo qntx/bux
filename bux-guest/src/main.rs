@@ -45,7 +45,7 @@ mod agent {
     }
 
     /// Ensures panics are visible and trigger a clean exit.
-    pub(crate) fn install_panic_hook() {
+    pub fn install_panic_hook() {
         std::panic::set_hook(Box::new(|info| {
             eprintln!("[bux-guest] PANIC: {info}");
             std::process::exit(1);
@@ -53,7 +53,7 @@ mod agent {
     }
 
     /// Entry point for the guest agent.
-    pub(crate) async fn run() -> io::Result<()> {
+    pub async fn run() -> io::Result<()> {
         BOOT_T0.set(Instant::now()).ok();
         eprintln!("[bux-guest] T+0ms: starting");
 
@@ -315,8 +315,7 @@ mod agent {
                     total += data.len() as u64;
                     if total > MAX_UPLOAD_BYTES {
                         let _ = tokio::fs::remove_file(&temp_path).await;
-                        return Err(io::Error::new(
-                            io::ErrorKind::Other,
+                        return Err(io::Error::other(
                             format!("upload exceeds {MAX_UPLOAD_BYTES} byte limit"),
                         ));
                     }
@@ -386,13 +385,13 @@ mod agent {
             Ok(p) => p,
             Err(e) => return bux_proto::send(w, &Response::Error(e.to_string())).await,
         };
-        let dest = dest.to_owned();
+        let dest_owned = dest.to_owned();
         let tp = temp_path.clone();
 
         let result = tokio::task::spawn_blocking(move || -> io::Result<()> {
-            let dest = Path::new(&dest);
-            std::fs::create_dir_all(dest)?;
-            let canonical_dest = dest.canonicalize()?;
+            let dest_path = Path::new(&dest_owned);
+            std::fs::create_dir_all(dest_path)?;
+            let canonical_dest = dest_path.canonicalize()?;
             let file = std::fs::File::open(&tp)?;
             let mut archive = tar::Archive::new(file);
             archive.set_preserve_permissions(true);
@@ -402,20 +401,19 @@ mod agent {
                 let path = entry.path()?.into_owned();
                 let target = canonical_dest.join(&path);
                 // Resolve symlinks in prefix only, not the final component.
-                if let Ok(resolved) = target.parent().unwrap_or(&canonical_dest).canonicalize() {
-                    if !resolved.starts_with(&canonical_dest) {
+                if let Ok(resolved) = target.parent().unwrap_or(&canonical_dest).canonicalize()
+                    && !resolved.starts_with(&canonical_dest) {
                         return Err(io::Error::new(
                             io::ErrorKind::PermissionDenied,
                             format!("path traversal blocked: {}", path.display()),
                         ));
                     }
-                }
                 entry.unpack_in(&canonical_dest)?;
             }
             Ok(())
         })
         .await
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
 
         let _ = tokio::fs::remove_file(&temp_path).await;
 
@@ -430,27 +428,27 @@ mod agent {
     /// Packs to a temp file first, then streams from the file in chunks.
     /// Memory usage is O(STREAM_CHUNK_SIZE) regardless of archive size.
     async fn copy_out(w: &mut (impl AsyncWrite + Unpin), path: &str) -> io::Result<()> {
-        let path = path.to_owned();
+        let owned_path = path.to_owned();
         let temp_path = Path::new("/tmp").join(format!("bux-download-{}", std::process::id()));
         let tp = temp_path.clone();
 
         let result = tokio::task::spawn_blocking(move || -> io::Result<()> {
             let file = std::fs::File::create(&tp)?;
             let mut ar = tar::Builder::new(file);
-            let meta = std::fs::metadata(&path)?;
+            let meta = std::fs::metadata(&owned_path)?;
             if meta.is_dir() {
-                ar.append_dir_all(".", &path)?;
+                ar.append_dir_all(".", &owned_path)?;
             } else {
-                let name = Path::new(&path)
+                let name = Path::new(&owned_path)
                     .file_name()
                     .unwrap_or_else(|| std::ffi::OsStr::new("file"));
-                ar.append_path_with_name(&path, name)?;
+                ar.append_path_with_name(&owned_path, name)?;
             }
             ar.finish()?;
             Ok(())
         })
         .await
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
 
         match result {
             Ok(()) => {
