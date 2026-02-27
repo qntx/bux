@@ -210,12 +210,14 @@ mod agent {
             Err(e) => return bux_proto::send(w, &Response::Error(e.to_string())).await,
         };
 
+        #[allow(clippy::cast_possible_wrap)]
         let pid = child.id().unwrap_or(0) as i32;
         bux_proto::send(w, &Response::Started { pid }).await?;
 
         let mut child_stdin = child.stdin.take();
-        let mut stdout = child.stdout.take().unwrap_or_else(|| unreachable!());
-        let mut stderr = child.stderr.take().unwrap_or_else(|| unreachable!());
+        // SAFETY: stdout/stderr were set to Stdio::piped() above, so take() always succeeds.
+        let Some(mut stdout) = child.stdout.take() else { unreachable!() };
+        let Some(mut stderr) = child.stderr.take() else { unreachable!() };
         let mut stdout_done = false;
         let mut stderr_done = false;
         let mut stdout_buf = [0u8; 4096];
@@ -247,11 +249,11 @@ mod agent {
                         Err(_) => break,
                     }
                 }
-                n = stdout.read(&mut stdout_buf), if !stdout_done => {
-                    match n {
+                bytes_read = stdout.read(&mut stdout_buf), if !stdout_done => {
+                    match bytes_read {
                         Ok(0) => stdout_done = true,
-                        Ok(n) => {
-                            bux_proto::send(w, &Response::Stdout(stdout_buf[..n].to_vec())).await?;
+                        Ok(len) => {
+                            bux_proto::send(w, &Response::Stdout(stdout_buf[..len].to_vec())).await?;
                         }
                         Err(e) => {
                             eprintln!("[bux-guest] stdout read error: {e}");
@@ -259,11 +261,11 @@ mod agent {
                         }
                     }
                 }
-                n = stderr.read(&mut stderr_buf), if !stderr_done => {
-                    match n {
+                bytes_read = stderr.read(&mut stderr_buf), if !stderr_done => {
+                    match bytes_read {
                         Ok(0) => stderr_done = true,
-                        Ok(n) => {
-                            bux_proto::send(w, &Response::Stderr(stderr_buf[..n].to_vec())).await?;
+                        Ok(len) => {
+                            bux_proto::send(w, &Response::Stderr(stderr_buf[..len].to_vec())).await?;
                         }
                         Err(e) => {
                             eprintln!("[bux-guest] stderr read error: {e}");
@@ -396,8 +398,8 @@ mod agent {
             let mut archive = tar::Archive::new(file);
             archive.set_preserve_permissions(true);
             // Validate each entry to prevent path traversal (e.g. ../../etc/passwd).
-            for entry in archive.entries()? {
-                let mut entry = entry?;
+            for raw_entry in archive.entries()? {
+                let mut entry = raw_entry?;
                 let path = entry.path()?.into_owned();
                 let target = canonical_dest.join(&path);
                 // Resolve symlinks in prefix only, not the final component.
