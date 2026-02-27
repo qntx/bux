@@ -317,7 +317,7 @@ pub async fn exec(args: ExecArgs) -> Result<()> {
     let handle = rt.get(&args.target)?;
 
     let (cmd, cmd_args) = args.command.split_first().context("command required")?;
-    let mut req = bux::ExecReq::new(cmd).args(cmd_args.to_vec());
+    let mut req = bux::ExecStart::new(cmd).args(cmd_args.to_vec());
 
     // Merge env: --env-file first, then -e overrides.
     let mut env_vars = Vec::new();
@@ -336,20 +336,22 @@ pub async fn exec(args: ExecArgs) -> Result<()> {
         req = req.user(uid, gid.unwrap_or(uid));
     }
 
-    let code = handle
-        .exec_stream(req, |event| match event {
-            bux::ExecEvent::Stdout(d) => {
-                let _ = std::io::stdout().write_all(&d);
+    let output = handle
+        .exec(req)
+        .await?
+        .stream(|msg| match msg {
+            bux_proto::ExecOut::Stdout(d) => {
+                let _ = std::io::stdout().write_all(d);
             }
-            bux::ExecEvent::Stderr(d) => {
-                let _ = std::io::stderr().write_all(&d);
+            bux_proto::ExecOut::Stderr(d) => {
+                let _ = std::io::stderr().write_all(d);
             }
             _ => {}
         })
         .await?;
 
-    if code != 0 {
-        std::process::exit(code);
+    if output.code != 0 {
+        std::process::exit(output.code);
     }
     Ok(())
 }

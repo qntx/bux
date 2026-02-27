@@ -15,11 +15,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use std::{fs, io};
 
-use bux_proto::{AGENT_PORT, ExecReq};
-use tokio::sync::OnceCell;
+use bux_proto::{AGENT_PORT, ExecStart};
 
 use crate::Result;
-use crate::client::{Client, ExecEvent, ExecOutput};
+use crate::client::{Client, ExecHandle, ExecOutput};
 use crate::disk::DiskManager;
 use crate::jail::{self, JailConfig};
 use crate::state::{self, StateDb, Status, VmState, VsockPort};
@@ -223,7 +222,7 @@ impl Runtime {
     }
 }
 
-/// Handle to a single managed VM with lazy persistent connection.
+/// Handle to a single managed VM.
 #[derive(Debug)]
 pub struct VmHandle {
     /// Cached state snapshot.
@@ -232,18 +231,19 @@ pub struct VmHandle {
     db: Arc<StateDb>,
     /// Disk image manager for auto-remove cleanup.
     disk: DiskManager,
-    /// Lazy persistent client connection.
-    client: OnceCell<Client>,
+    /// Stateless client (opens a new connection per operation).
+    client: Client,
 }
 
 impl VmHandle {
     /// Creates a new handle from a state snapshot, shared database, and disk manager.
     fn new(state: VmState, db: Arc<StateDb>, disk: DiskManager) -> Self {
+        let client = Client::new(&state.socket);
         Self {
             state,
             db,
             disk,
-            client: OnceCell::new(),
+            client,
         }
     }
 
@@ -252,25 +252,19 @@ impl VmHandle {
         &self.state
     }
 
-    /// Lazily connects to the guest agent (reuses across calls).
-    async fn client(&self) -> Result<&Client> {
-        self.client
-            .get_or_try_init(|| async {
-                Client::connect(&self.state.socket)
-                    .await
-                    .map_err(crate::Error::from)
-            })
-            .await
+    /// Returns a reference to the stateless client.
+    pub fn client(&self) -> &Client {
+        &self.client
     }
 
-    /// Executes a command, streaming output via callback. Returns exit code.
-    pub async fn exec_stream(&self, req: ExecReq, on: impl FnMut(ExecEvent)) -> Result<i32> {
-        Ok(self.client().await?.exec_stream(req, on).await?)
+    /// Starts a command on a dedicated exec connection.
+    pub async fn exec(&self, req: ExecStart) -> Result<ExecHandle> {
+        Ok(self.client.exec(req).await?)
     }
 
     /// Executes a command and collects all output.
-    pub async fn exec(&self, req: ExecReq) -> Result<ExecOutput> {
-        Ok(self.client().await?.exec(req).await?)
+    pub async fn exec_output(&self, req: ExecStart) -> Result<ExecOutput> {
+        Ok(self.client.exec_output(req).await?)
     }
 
     /// Graceful shutdown with default 10 s timeout.
@@ -281,9 +275,7 @@ impl VmHandle {
     /// Graceful shutdown: sends `Shutdown` request, waits up to `timeout`,
     /// then falls back to `SIGKILL`.
     pub async fn stop_timeout(&mut self, timeout: Duration) -> Result<()> {
-        if let Ok(c) = self.client().await {
-            let _ = c.shutdown().await;
-        }
+        let _ = self.client.shutdown().await;
 
         let result = tokio::time::timeout(timeout, async {
             while is_pid_alive(self.state.pid) {
@@ -329,43 +321,29 @@ impl VmHandle {
         self.mark_stopped()
     }
 
-    /// Executes a command with stdin data piped to the process.
-    pub async fn exec_with_stdin(
-        &self,
-        req: ExecReq,
-        stdin_data: &[u8],
-        on: impl FnMut(ExecEvent),
-    ) -> Result<i32> {
-        Ok(self
-            .client()
-            .await?
-            .exec_with_stdin(req, stdin_data, on)
-            .await?)
-    }
-
     /// Reads a file from the guest filesystem.
     pub async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
-        Ok(self.client().await?.read_file(path).await?)
+        Ok(self.client.read_file(path).await?)
     }
 
     /// Writes a file to the guest filesystem.
     pub async fn write_file(&self, path: &str, data: &[u8], mode: u32) -> Result<()> {
-        Ok(self.client().await?.write_file(path, data, mode).await?)
+        Ok(self.client.write_file(path, data, mode).await?)
     }
 
     /// Copies a tar archive into the guest, unpacking at `dest`.
     pub async fn copy_in(&self, dest: &str, tar_data: &[u8]) -> Result<()> {
-        Ok(self.client().await?.copy_in(dest, tar_data).await?)
+        Ok(self.client.copy_in(dest, tar_data).await?)
     }
 
     /// Copies a path from the guest as a tar archive.
     pub async fn copy_out(&self, path: &str) -> Result<Vec<u8>> {
-        Ok(self.client().await?.copy_out(path).await?)
+        Ok(self.client.copy_out(path).await?)
     }
 
     /// Performs a version handshake with the guest agent.
     pub async fn handshake(&self) -> Result<()> {
-        Ok(self.client().await?.handshake().await?)
+        Ok(self.client.handshake().await?)
     }
 
     /// Waits for the guest agent to become reachable via a single
@@ -373,9 +351,7 @@ impl VmHandle {
     async fn wait_ready(&self, timeout: Duration) -> io::Result<()> {
         tokio::time::timeout(timeout, async {
             loop {
-                if let Ok(c) = Client::connect(&self.state.socket).await
-                    && c.handshake().await.is_ok()
-                {
+                if self.client.handshake().await.is_ok() {
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;

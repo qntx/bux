@@ -36,9 +36,9 @@ mod state;
 mod sys;
 mod vm;
 
-pub use bux_proto::ExecReq;
+pub use bux_proto::ExecStart;
 #[cfg(unix)]
-pub use client::{Client, ExecEvent, ExecOutput};
+pub use client::{Client, ExecHandle, ExecOutput, PongInfo};
 #[cfg(unix)]
 pub use disk::DiskManager;
 pub use error::{Error, Result};
