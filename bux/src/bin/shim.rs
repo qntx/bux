@@ -65,17 +65,17 @@ fn main() {
 /// When the parent process dies (or drops its `Keepalive`), the write end
 /// of the pipe closes. This thread detects `POLLHUP` and exits the process.
 #[cfg(unix)]
+#[allow(unsafe_code)]
 fn start_watchdog() {
-    let fd_str = match std::env::var(bux::watchdog::ENV_WATCHDOG_FD) {
-        Ok(s) => s,
-        Err(_) => return, // no watchdog configured (e.g. detach mode)
+    let Ok(fd_str) = std::env::var(bux::watchdog::ENV_WATCHDOG_FD) else {
+        return; // no watchdog configured (e.g. detach mode)
     };
-    let fd: i32 = if let Ok(n) = fd_str.parse() { n } else {
+    let Ok(fd) = fd_str.parse::<i32>() else {
         eprintln!("[bux-shim] invalid BUX_WATCHDOG_FD: {fd_str}");
         return;
     };
 
-    std::thread::Builder::new()
+    if let Err(e) = std::thread::Builder::new()
         .name("watchdog".into())
         .spawn(move || {
             // SAFETY: fd was validated by the parent and preserved across exec.
@@ -83,5 +83,7 @@ fn start_watchdog() {
             eprintln!("[bux-shim] parent process died, shutting down");
             std::process::exit(0);
         })
-        .expect("failed to spawn watchdog thread");
+    {
+        eprintln!("[bux-shim] failed to spawn watchdog thread: {e}");
+    }
 }

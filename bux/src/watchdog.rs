@@ -17,7 +17,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 /// When this value is dropped, the write end of the pipe closes,
 /// causing `POLLHUP` on the shim's read end — signaling it to shut down.
 #[derive(Debug)]
-pub struct Keepalive(OwnedFd);
+pub struct Keepalive(#[allow(dead_code)] OwnedFd);
 
 /// Creates a watchdog pipe pair.
 ///

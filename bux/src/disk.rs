@@ -139,6 +139,8 @@ impl DiskManager {
 // Minimal QCOW2 v3 image generator (pure Rust, no external dependencies)
 // ---------------------------------------------------------------------------
 
+// All values in this module are known-small constants; truncation is impossible.
+#[allow(clippy::cast_possible_truncation)]
 mod qcow2 {
     //! Generates a minimal QCOW2 v3 overlay image with a backing file.
     //!
@@ -160,6 +162,7 @@ mod qcow2 {
     const VERSION: u32 = 3;
     /// 64 KiB clusters (cluster_bits = 16).
     const CLUSTER_BITS: u32 = 16;
+    /// Cluster size in bytes (2^16 = 65 536).
     const CLUSTER_SIZE: u64 = 1 << CLUSTER_BITS;
     /// 16-bit refcounts (refcount_order = 4, meaning 2^4 = 16 bits).
     const REFCOUNT_ORDER: u32 = 4;
@@ -187,7 +190,6 @@ mod qcow2 {
         // L1 table entries: one per L2 table worth of data.
         // Each L2 table covers (cluster_size / 8) clusters = (cluster_size / 8) * cluster_size bytes.
         let l2_coverage = (CLUSTER_SIZE / 8) * CLUSTER_SIZE; // 512 MiB per L1 entry
-        #[allow(clippy::cast_possible_truncation)]
         let l1_entries = virtual_size.div_ceil(l2_coverage) as u32;
 
         // Allocate the full file (4 clusters).
@@ -198,9 +200,7 @@ mod qcow2 {
         let h = &mut buf[..HEADER_LENGTH as usize];
         write_be32(h, 0, MAGIC);
         write_be32(h, 4, VERSION);
-        // Backing file offset: immediately after the header + extensions.
-        // We place it right after header extensions in cluster 0.
-        // For now, set a placeholder — we'll compute it after writing extensions.
+        // Backing file offset: placeholder — patched after extensions are written.
         write_be32(h, 16, backing_bytes.len() as u32); // backing_file_size
         write_be32(h, 20, CLUSTER_BITS);
         write_be64(h, 24, virtual_size);
@@ -261,16 +261,19 @@ mod qcow2 {
         Ok(())
     }
 
+    /// Writes a big-endian `u16` at `offset` into `buf`.
     #[inline]
     fn write_be16(buf: &mut [u8], offset: usize, val: u16) {
         buf[offset..offset + 2].copy_from_slice(&val.to_be_bytes());
     }
 
+    /// Writes a big-endian `u32` at `offset` into `buf`.
     #[inline]
     fn write_be32(buf: &mut [u8], offset: usize, val: u32) {
         buf[offset..offset + 4].copy_from_slice(&val.to_be_bytes());
     }
 
+    /// Writes a big-endian `u64` at `offset` into `buf`.
     #[inline]
     fn write_be64(buf: &mut [u8], offset: usize, val: u64) {
         buf[offset..offset + 8].copy_from_slice(&val.to_be_bytes());
@@ -283,6 +286,7 @@ mod qcow2 {
     }
 
     #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
     mod tests {
         use super::*;
 
