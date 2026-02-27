@@ -5,8 +5,16 @@ use serde::{Deserialize, Serialize};
 /// Wire protocol version. Bumped on every incompatible change.
 pub const PROTOCOL_VERSION: u32 = 3;
 
-/// Default chunk size for streaming transfers (256 KiB).
-pub const STREAM_CHUNK_SIZE: usize = 256 * 1024;
+/// Default chunk size for streaming transfers (1 MiB).
+///
+/// Matches industry best practice for intra-host streaming (gRPC, BoxLite, Docker).
+/// At 1 MiB, a 100 MB transfer requires only 100 messages instead of 400 at 256 KiB.
+pub const STREAM_CHUNK_SIZE: usize = 1 << 20;
+
+/// Maximum total upload size accepted by the guest agent (512 MiB).
+///
+/// Prevents runaway uploads from exhausting guest memory or disk.
+pub const MAX_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Default vsock port for the bux guest agent.
 pub const AGENT_PORT: u32 = 1024;

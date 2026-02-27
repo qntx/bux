@@ -28,7 +28,10 @@ mod agent {
     use std::sync::OnceLock;
     use std::time::Instant;
 
-    use bux_proto::{AGENT_PORT, ExecReq, PROTOCOL_VERSION, Request, Response, STREAM_CHUNK_SIZE};
+    use bux_proto::{
+        AGENT_PORT, ExecReq, MAX_UPLOAD_BYTES, PROTOCOL_VERSION, Request, Response,
+        STREAM_CHUNK_SIZE,
+    };
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
     use tokio::process::Command;
     use tokio_vsock::VsockListener;
@@ -60,8 +63,9 @@ mod agent {
         mount_essential_tmpfs();
         eprintln!("[bux-guest] T+{}ms: tmpfs mounted", elapsed_ms());
 
-        let listener = VsockListener::bind(libc::VMADDR_CID_ANY as u32, AGENT_PORT)
-            .map_err(|e| io::Error::new(io::ErrorKind::AddrInUse, e))?;
+        let addr = tokio_vsock::VsockAddr::new(libc::VMADDR_CID_ANY, AGENT_PORT);
+        let listener =
+            VsockListener::bind(addr).map_err(|e| io::Error::new(io::ErrorKind::AddrInUse, e))?;
         eprintln!(
             "[bux-guest] T+{}ms: listening on vsock port {AGENT_PORT}",
             elapsed_ms()
@@ -277,21 +281,53 @@ mod agent {
     }
 
     /// Reads a file and streams its contents back to the host in chunks.
+    ///
+    /// Streams directly from the file handle — memory usage is O(STREAM_CHUNK_SIZE).
     async fn read_file(w: &mut (impl AsyncWrite + Unpin), path: &str) -> io::Result<()> {
-        match tokio::fs::read(path).await {
-            Ok(data) => bux_proto::send_response_chunks(w, &data, STREAM_CHUNK_SIZE).await,
-            Err(e) => bux_proto::send(w, &Response::Error(e.to_string())).await,
+        let mut file = match tokio::fs::File::open(path).await {
+            Ok(f) => f,
+            Err(e) => return bux_proto::send(w, &Response::Error(e.to_string())).await,
+        };
+        let mut buf = vec![0u8; STREAM_CHUNK_SIZE];
+        loop {
+            let n = file.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            bux_proto::send(w, &Response::Chunk(buf[..n].to_vec())).await?;
         }
+        bux_proto::send(w, &Response::EndOfStream).await
     }
 
-    /// Receives upload chunks from the host until [`Request::EndOfStream`].
-    async fn recv_upload_chunks(r: &mut (impl AsyncRead + Unpin)) -> io::Result<Vec<u8>> {
-        let mut buf = Vec::new();
+    /// Receives upload chunks from the host into a temp file.
+    ///
+    /// Returns the temp file path. Enforces [`MAX_UPLOAD_BYTES`] safety cap.
+    /// Memory usage is O(STREAM_CHUNK_SIZE) regardless of total transfer size.
+    async fn recv_upload_to_file(
+        r: &mut (impl AsyncRead + Unpin),
+    ) -> io::Result<std::path::PathBuf> {
+        let temp_path = Path::new("/tmp").join(format!("bux-upload-{}", std::process::id()));
+        let mut file = tokio::fs::File::create(&temp_path).await?;
+        let mut total: u64 = 0;
         loop {
             match bux_proto::recv::<Request>(r).await? {
-                Request::Chunk(data) => buf.extend(data),
-                Request::EndOfStream => return Ok(buf),
+                Request::Chunk(data) => {
+                    total += data.len() as u64;
+                    if total > MAX_UPLOAD_BYTES {
+                        let _ = tokio::fs::remove_file(&temp_path).await;
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            format!("upload exceeds {MAX_UPLOAD_BYTES} byte limit"),
+                        ));
+                    }
+                    file.write_all(&data).await?;
+                }
+                Request::EndOfStream => {
+                    file.flush().await?;
+                    return Ok(temp_path);
+                }
                 _ => {
+                    let _ = tokio::fs::remove_file(&temp_path).await;
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "expected Chunk or EndOfStream",
@@ -302,6 +338,8 @@ mod agent {
     }
 
     /// Receives chunked data from the host and writes it to a file.
+    ///
+    /// Uses a temp file as intermediate buffer — memory usage is O(STREAM_CHUNK_SIZE).
     async fn write_file(
         r: &mut (impl AsyncRead + Unpin),
         w: &mut (impl AsyncWrite + Unpin),
@@ -310,17 +348,24 @@ mod agent {
     ) -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
 
-        let data = recv_upload_chunks(r).await?;
+        let temp_path = match recv_upload_to_file(r).await {
+            Ok(p) => p,
+            Err(e) => return bux_proto::send(w, &Response::Error(e.to_string())).await,
+        };
 
         let result = async {
             if let Some(parent) = Path::new(path).parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
-            tokio::fs::write(path, &data).await?;
+            tokio::fs::copy(&temp_path, path).await?;
             tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).await?;
+            tokio::fs::remove_file(&temp_path).await?;
             io::Result::Ok(())
         }
         .await;
+
+        // Clean up temp file on error path too.
+        let _ = tokio::fs::remove_file(&temp_path).await;
 
         match result {
             Ok(()) => bux_proto::send(w, &Response::Ok).await,
@@ -330,20 +375,26 @@ mod agent {
 
     /// Receives a chunked tar archive from the host and unpacks it into `dest`,
     /// rejecting path traversal attacks.
+    ///
+    /// Streams to a temp file first — memory usage is O(STREAM_CHUNK_SIZE).
     async fn copy_in(
         r: &mut (impl AsyncRead + Unpin),
         w: &mut (impl AsyncWrite + Unpin),
         dest: &str,
     ) -> io::Result<()> {
-        let data = recv_upload_chunks(r).await?;
+        let temp_path = match recv_upload_to_file(r).await {
+            Ok(p) => p,
+            Err(e) => return bux_proto::send(w, &Response::Error(e.to_string())).await,
+        };
         let dest = dest.to_owned();
+        let tp = temp_path.clone();
 
         let result = tokio::task::spawn_blocking(move || -> io::Result<()> {
             let dest = Path::new(&dest);
             std::fs::create_dir_all(dest)?;
             let canonical_dest = dest.canonicalize()?;
-            let cursor = io::Cursor::new(data);
-            let mut archive = tar::Archive::new(cursor);
+            let file = std::fs::File::open(&tp)?;
+            let mut archive = tar::Archive::new(file);
             archive.set_preserve_permissions(true);
             // Validate each entry to prevent path traversal (e.g. ../../etc/passwd).
             for entry in archive.entries()? {
@@ -366,39 +417,60 @@ mod agent {
         .await
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
+        let _ = tokio::fs::remove_file(&temp_path).await;
+
         match result {
             Ok(()) => bux_proto::send(w, &Response::Ok).await,
             Err(e) => bux_proto::send(w, &Response::Error(e.to_string())).await,
         }
     }
 
-    /// Packs a path (file or directory) into a tar archive and sends it.
+    /// Packs a path (file or directory) into a tar archive and streams it.
+    ///
+    /// Packs to a temp file first, then streams from the file in chunks.
+    /// Memory usage is O(STREAM_CHUNK_SIZE) regardless of archive size.
     async fn copy_out(w: &mut (impl AsyncWrite + Unpin), path: &str) -> io::Result<()> {
         let path = path.to_owned();
+        let temp_path = Path::new("/tmp").join(format!("bux-download-{}", std::process::id()));
+        let tp = temp_path.clone();
 
-        let result = tokio::task::spawn_blocking(move || -> io::Result<Vec<u8>> {
-            let mut buf = Vec::new();
-            {
-                let mut ar = tar::Builder::new(&mut buf);
-                let meta = std::fs::metadata(&path)?;
-                if meta.is_dir() {
-                    ar.append_dir_all(".", &path)?;
-                } else {
-                    let name = Path::new(&path)
-                        .file_name()
-                        .unwrap_or_else(|| std::ffi::OsStr::new("file"));
-                    ar.append_path_with_name(&path, name)?;
-                }
-                ar.finish()?;
+        let result = tokio::task::spawn_blocking(move || -> io::Result<()> {
+            let file = std::fs::File::create(&tp)?;
+            let mut ar = tar::Builder::new(file);
+            let meta = std::fs::metadata(&path)?;
+            if meta.is_dir() {
+                ar.append_dir_all(".", &path)?;
+            } else {
+                let name = Path::new(&path)
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("file"));
+                ar.append_path_with_name(&path, name)?;
             }
-            Ok(buf)
+            ar.finish()?;
+            Ok(())
         })
         .await
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         match result {
-            Ok(data) => bux_proto::send_response_chunks(w, &data, STREAM_CHUNK_SIZE).await,
-            Err(e) => bux_proto::send(w, &Response::Error(e.to_string())).await,
+            Ok(()) => {
+                // Stream the temp file in chunks.
+                let mut file = tokio::fs::File::open(&temp_path).await?;
+                let mut buf = vec![0u8; STREAM_CHUNK_SIZE];
+                loop {
+                    let n = file.read(&mut buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    bux_proto::send(w, &Response::Chunk(buf[..n].to_vec())).await?;
+                }
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                bux_proto::send(w, &Response::EndOfStream).await
+            }
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                bux_proto::send(w, &Response::Error(e.to_string())).await
+            }
         }
     }
 }

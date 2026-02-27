@@ -7,5 +7,7 @@
 mod codec;
 mod message;
 
-pub use codec::{recv, send};
-pub use message::{AGENT_PORT, ExecReq, PROTOCOL_VERSION, Request, Response};
+pub use codec::{recv, send, send_request_chunks, send_response_chunks};
+pub use message::{
+    AGENT_PORT, ExecReq, MAX_UPLOAD_BYTES, PROTOCOL_VERSION, Request, Response, STREAM_CHUNK_SIZE,
+};
