@@ -13,6 +13,11 @@ pub enum Status {
     Creating,
     /// VM process is running.
     Running,
+    /// VM is frozen via SIGSTOP (vCPUs and virtio backends paused).
+    ///
+    /// Filesystem may also be quiesced (FIFREEZE) for point-in-time consistency.
+    /// Resume with [`VmHandle::resume()`](crate::runtime::VmHandle::resume).
+    Paused,
     /// VM has been stopped or exited.
     Stopped,
 }
@@ -57,6 +62,16 @@ pub struct VmConfig {
     /// Root filesystem disk image path (block device-based).
     #[serde(default)]
     pub root_disk: Option<String>,
+    /// Disk image format for `root_disk` (defaults to `"raw"`).
+    #[serde(default = "default_disk_format")]
+    pub disk_format: String,
+    /// Shared base image path for QCOW2 overlay creation.
+    ///
+    /// When set, [`Runtime::spawn()`] creates a per-VM QCOW2 overlay backed
+    /// by this image, then replaces `root_disk` with the overlay path and
+    /// sets `disk_format` to `"qcow2"`. Consumed during spawn.
+    #[serde(default)]
+    pub base_disk: Option<String>,
 
     /// Executable path inside the VM.
     #[serde(default)]
@@ -107,6 +122,11 @@ pub struct VmConfig {
     /// Remove VM state automatically when it stops.
     #[serde(default)]
     pub auto_remove: bool,
+}
+
+/// Default disk format string for serde deserialization.
+fn default_disk_format() -> String {
+    "raw".to_owned()
 }
 
 /// Persisted state of a managed VM.
@@ -342,6 +362,7 @@ mod db {
         match s {
             Status::Creating => "creating",
             Status::Running => "running",
+            Status::Paused => "paused",
             Status::Stopped => "stopped",
         }
     }
@@ -351,6 +372,7 @@ mod db {
         match s {
             "creating" => Status::Creating,
             "running" => Status::Running,
+            "paused" => Status::Paused,
             _ => Status::Stopped,
         }
     }
@@ -392,6 +414,8 @@ mod tests {
                 ram_mib: 512,
                 rootfs: None,
                 root_disk: None,
+                disk_format: "raw".to_owned(),
+                base_disk: None,
                 exec_path: Some("/bin/sh".to_owned()),
                 exec_args: vec![],
                 env: None,

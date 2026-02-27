@@ -18,6 +18,7 @@ mod bwrap;
 mod seatbelt;
 
 use std::io;
+use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
@@ -32,6 +33,8 @@ pub struct JailConfig {
     pub socks_dir: PathBuf,
     /// Host paths for virtiofs mounts.
     pub virtiofs_paths: Vec<PathBuf>,
+    /// Watchdog pipe read-end FD to preserve across exec.
+    pub watchdog_fd: Option<RawFd>,
 }
 
 /// Spawn `bux-shim` inside a sandbox.
@@ -42,7 +45,13 @@ pub struct JailConfig {
 pub fn spawn(shim: &Path, config_path: &Path, config: &JailConfig) -> io::Result<Child> {
     let mut cmd = build_command(shim, config_path, config);
     cmd.stdin(Stdio::null());
-    pre_exec::apply(&mut cmd);
+
+    // Pass watchdog FD number to the shim via environment variable.
+    if let Some(fd) = config.watchdog_fd {
+        cmd.env(crate::watchdog::ENV_WATCHDOG_FD, fd.to_string());
+    }
+
+    pre_exec::apply(&mut cmd, config.watchdog_fd);
     cmd.spawn()
 }
 

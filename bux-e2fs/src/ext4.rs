@@ -428,10 +428,7 @@ const fn check(op: &'static str, code: sys::errcode_t) -> Result<()> {
     if code == 0 {
         Ok(())
     } else {
-        Err(Error::Ext2fs {
-            op,
-            code: code as i64,
-        })
+        Err(Error::Ext2fs { op, code })
     }
 }
 

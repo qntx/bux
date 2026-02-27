@@ -71,7 +71,7 @@ impl std::str::FromStr for LogLevel {
 ///     .build()
 ///     .expect("invalid VM config");
 /// ```
-#[derive(Debug, Default)]
+#[derive(Debug)]
 #[must_use = "a VmBuilder does nothing until .build() is called"]
 pub struct VmBuilder {
     /// Number of virtual CPUs.
@@ -82,6 +82,10 @@ pub struct VmBuilder {
     root: Option<String>,
     /// Root filesystem disk image path (mutually exclusive with `root`).
     root_disk: Option<String>,
+    /// Disk image format (`"raw"` or `"qcow2"`).
+    disk_format: String,
+    /// Shared base image for QCOW2 overlay creation (consumed by Runtime).
+    base_disk: Option<String>,
     /// Executable path inside the VM.
     exec_path: Option<String>,
     /// Arguments passed to the executable (does not include argv[0]).
@@ -132,13 +136,26 @@ impl VmBuilder {
         self
     }
 
-    /// Sets the root filesystem disk image path (block device-based).
+    /// Sets the root filesystem disk image path (raw format).
     ///
     /// The image is attached as `/dev/vda` and remounted as the root
     /// filesystem during boot. Mutually exclusive with [`root()`](Self::root).
     pub fn root_disk(mut self, path: impl Into<String>) -> Self {
         self.root_disk = Some(path.into());
+        "raw".clone_into(&mut self.disk_format);
         self.root = None;
+        self
+    }
+
+    /// Sets a shared base image for automatic QCOW2 overlay creation.
+    ///
+    /// [`Runtime::spawn()`] will create a per-VM QCOW2 overlay backed by
+    /// this image, set `root_disk` to the overlay path, and configure
+    /// `disk_format` to `"qcow2"`. The base image is never modified.
+    pub fn base_disk(mut self, path: impl Into<String>) -> Self {
+        self.base_disk = Some(path.into());
+        self.root = None;
+        self.root_disk = None;
         self
     }
 
@@ -240,6 +257,8 @@ impl VmBuilder {
             ram_mib: self.ram_mib,
             rootfs: self.root.clone(),
             root_disk: self.root_disk.clone(),
+            disk_format: self.disk_format.clone(),
+            base_disk: self.base_disk.clone(),
             exec_path: self.exec_path.clone(),
             exec_args: self.exec_args.clone(),
             env: self.env.clone(),
@@ -283,6 +302,8 @@ impl VmBuilder {
             ram_mib: c.ram_mib,
             root: c.rootfs.clone(),
             root_disk: c.root_disk.clone(),
+            disk_format: c.disk_format.clone(),
+            base_disk: c.base_disk.clone(),
             exec_path: c.exec_path.clone(),
             exec_args: c.exec_args.clone(),
             env: c.env.clone(),
@@ -326,7 +347,11 @@ impl VmBuilder {
         if let Some(ref root) = self.root {
             sys::set_root(vm.ctx, root)?;
         } else if let Some(ref disk) = self.root_disk {
-            sys::add_disk(vm.ctx, "rootfs", disk, false)?;
+            let fmt = match self.disk_format.as_str() {
+                "qcow2" => DiskFormat::Qcow2,
+                _ => DiskFormat::Raw,
+            };
+            sys::add_disk2(vm.ctx, "rootfs", disk, fmt, false)?;
             sys::set_root_disk_remount(vm.ctx, "/dev/vda", Some("ext4"), None)?;
         }
 
@@ -390,7 +415,24 @@ impl Vm {
         VmBuilder {
             vcpus: 1,
             ram_mib: 512,
-            ..VmBuilder::default()
+            root: None,
+            root_disk: None,
+            disk_format: "raw".to_owned(),
+            base_disk: None,
+            exec_path: None,
+            exec_args: Vec::new(),
+            env: None,
+            workdir: None,
+            ports: Vec::new(),
+            virtiofs: Vec::new(),
+            log_level: None,
+            uid: None,
+            gid: None,
+            rlimits: Vec::new(),
+            nested_virt: None,
+            snd_device: None,
+            console_output: None,
+            vsock_ports: Vec::new(),
         }
     }
 

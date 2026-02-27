@@ -14,7 +14,7 @@ mod inner {
         ControlReq, ControlResp, ExecIn, ExecOut, ExecStart, Hello, HelloAck, PROTOCOL_VERSION,
         STREAM_CHUNK_SIZE, UploadResult,
     };
-    use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+    use tokio::io::{AsyncRead, AsyncWrite};
     use tokio::net::UnixStream;
     use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
@@ -61,7 +61,7 @@ mod inner {
         }
 
         /// Process ID inside the guest.
-        pub fn pid(&self) -> i32 {
+        pub const fn pid(&self) -> i32 {
             self.pid
         }
 
@@ -347,6 +347,28 @@ mod inner {
             Self::expect_upload_ok(&mut stream).await
         }
 
+        /// Streams a tar archive from `reader` into the guest, unpacking at `dest`.
+        ///
+        /// Unlike [`copy_in`](Self::copy_in), this never loads the entire archive
+        /// into memory — O(chunk_size) regardless of total size.
+        pub async fn copy_in_from_reader(
+            &self,
+            dest: &str,
+            reader: &mut (impl AsyncRead + Unpin),
+        ) -> io::Result<()> {
+            let mut stream = self.connect_raw().await?;
+            bux_proto::send(
+                &mut stream,
+                &Hello::CopyIn {
+                    dest: dest.to_owned(),
+                },
+            )
+            .await?;
+            Self::expect_ready(&mut stream).await?;
+            bux_proto::send_upload_from_reader(&mut stream, reader, STREAM_CHUNK_SIZE).await?;
+            Self::expect_upload_ok(&mut stream).await
+        }
+
         /// Copies a path from the guest as a tar archive.
         pub async fn copy_out(&self, path: &str) -> io::Result<Vec<u8>> {
             self.copy_out_opts(path, false).await
@@ -369,6 +391,29 @@ mod inner {
             .await?;
             Self::expect_ready(&mut stream).await?;
             bux_proto::recv_download(&mut stream).await
+        }
+
+        /// Streams a path from the guest as a tar archive directly to `writer`.
+        ///
+        /// Unlike [`copy_out`](Self::copy_out), this never loads the entire archive
+        /// into memory — O(chunk_size) regardless of total size.
+        pub async fn copy_out_to_writer(
+            &self,
+            path: &str,
+            follow_symlinks: bool,
+            writer: &mut (impl AsyncWrite + Unpin),
+        ) -> io::Result<u64> {
+            let mut stream = self.connect_raw().await?;
+            bux_proto::send(
+                &mut stream,
+                &Hello::CopyOut {
+                    path: path.to_owned(),
+                    follow_symlinks,
+                },
+            )
+            .await?;
+            Self::expect_ready(&mut stream).await?;
+            bux_proto::recv_download_to_writer(&mut stream, writer).await
         }
 
         /// Returns the socket path this client targets.
@@ -432,4 +477,4 @@ mod inner {
 }
 
 #[cfg(unix)]
-pub use inner::{Client, ExecHandle, ExecOutput};
+pub use inner::{Client, ExecHandle, ExecOutput, PongInfo};

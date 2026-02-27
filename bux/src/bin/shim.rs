@@ -25,6 +25,9 @@ fn main() {
         std::process::exit(1);
     };
 
+    // Start watchdog thread if the parent passed a pipe FD.
+    start_watchdog();
+
     // Read and immediately delete the temp config file.
     let json = match std::fs::read_to_string(&config_path) {
         Ok(j) => {
@@ -55,4 +58,30 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// Spawns a background thread that monitors the watchdog pipe.
+///
+/// When the parent process dies (or drops its `Keepalive`), the write end
+/// of the pipe closes. This thread detects `POLLHUP` and exits the process.
+#[cfg(unix)]
+fn start_watchdog() {
+    let fd_str = match std::env::var(bux::watchdog::ENV_WATCHDOG_FD) {
+        Ok(s) => s,
+        Err(_) => return, // no watchdog configured (e.g. detach mode)
+    };
+    let fd: i32 = if let Ok(n) = fd_str.parse() { n } else {
+        eprintln!("[bux-shim] invalid BUX_WATCHDOG_FD: {fd_str}");
+        return;
+    };
+
+    std::thread::Builder::new()
+        .name("watchdog".into())
+        .spawn(move || {
+            // SAFETY: fd was validated by the parent and preserved across exec.
+            unsafe { bux::watchdog::wait_for_parent_death(fd) };
+            eprintln!("[bux-shim] parent process died, shutting down");
+            std::process::exit(0);
+        })
+        .expect("failed to spawn watchdog thread");
 }

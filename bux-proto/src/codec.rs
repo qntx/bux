@@ -54,6 +54,27 @@ pub async fn send_upload(
     send(w, &Upload::Done).await
 }
 
+/// Receives an upload stream ([`Upload::Chunk`] + [`Upload::Done`]),
+/// collecting all chunks into a single buffer with a size limit.
+pub async fn recv_upload(r: &mut (impl AsyncRead + Unpin), max_bytes: u64) -> io::Result<Vec<u8>> {
+    use crate::Upload;
+    let mut buf = Vec::new();
+    loop {
+        match recv::<Upload>(r).await? {
+            Upload::Chunk(data) => {
+                buf.extend(&data);
+                if buf.len() as u64 > max_bytes {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("upload exceeds {max_bytes} byte limit"),
+                    ));
+                }
+            }
+            Upload::Done => return Ok(buf),
+        }
+    }
+}
+
 /// Sends `data` as a series of [`Download::Chunk`] messages followed by
 /// [`Download::Done`], using the given chunk size.
 pub async fn send_download(
@@ -82,25 +103,52 @@ pub async fn recv_download(r: &mut (impl AsyncRead + Unpin)) -> io::Result<Vec<u
     }
 }
 
-/// Receives an upload stream ([`Upload::Chunk`] + [`Upload::Done`]),
-/// collecting all chunks into a single buffer with a size limit.
-pub async fn recv_upload(r: &mut (impl AsyncRead + Unpin), max_bytes: u64) -> io::Result<Vec<u8>> {
+/// Reads from `src` and sends [`Upload`] chunks until EOF.
+///
+/// Streams data without buffering the entire payload in memory.
+/// Returns the total number of bytes sent.
+pub async fn send_upload_from_reader(
+    w: &mut (impl AsyncWrite + Unpin),
+    src: &mut (impl AsyncRead + Unpin),
+    chunk_size: usize,
+) -> io::Result<u64> {
     use crate::Upload;
-    let mut buf = Vec::new();
+    let mut buf = vec![0u8; chunk_size];
+    let mut total: u64 = 0;
     loop {
-        match recv::<Upload>(r).await? {
-            Upload::Chunk(data) => {
-                buf.extend(&data);
-                if buf.len() as u64 > max_bytes {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("upload exceeds {max_bytes} byte limit"),
-                    ));
-                }
-            }
-            Upload::Done => return Ok(buf),
+        let n = src.read(&mut buf).await?;
+        if n == 0 {
+            break;
         }
+        total += n as u64;
+        send(w, &Upload::Chunk(buf[..n].to_vec())).await?;
     }
+    send(w, &Upload::Done).await?;
+    Ok(total)
+}
+
+/// Reads from `src` and sends [`Download`] chunks until EOF.
+///
+/// Streams data without buffering the entire payload in memory.
+/// Returns the total number of bytes sent.
+pub async fn send_download_from_reader(
+    w: &mut (impl AsyncWrite + Unpin),
+    src: &mut (impl AsyncRead + Unpin),
+    chunk_size: usize,
+) -> io::Result<u64> {
+    use crate::Download;
+    let mut buf = vec![0u8; chunk_size];
+    let mut total: u64 = 0;
+    loop {
+        let n = src.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        send(w, &Download::Chunk(buf[..n].to_vec())).await?;
+    }
+    send(w, &Download::Done).await?;
+    Ok(total)
 }
 
 /// Receives an upload stream and writes chunks directly to `dst`.
@@ -134,28 +182,29 @@ pub async fn recv_upload_to_writer(
     }
 }
 
-/// Reads from `src` and sends [`Download`] chunks until EOF.
+/// Receives a download stream and writes chunks directly to `dst`.
 ///
 /// Streams data without buffering the entire payload in memory.
-/// Returns the total number of bytes sent.
-pub async fn send_download_from_reader(
-    w: &mut (impl AsyncWrite + Unpin),
-    src: &mut (impl AsyncRead + Unpin),
-    chunk_size: usize,
+/// Returns the total number of bytes written.
+pub async fn recv_download_to_writer(
+    r: &mut (impl AsyncRead + Unpin),
+    dst: &mut (impl AsyncWrite + Unpin),
 ) -> io::Result<u64> {
     use crate::Download;
-    let mut buf = vec![0u8; chunk_size];
     let mut total: u64 = 0;
     loop {
-        let n = src.read(&mut buf).await?;
-        if n == 0 {
-            break;
+        match recv::<Download>(r).await? {
+            Download::Chunk(data) => {
+                total += data.len() as u64;
+                dst.write_all(&data).await?;
+            }
+            Download::Done => {
+                dst.flush().await?;
+                return Ok(total);
+            }
+            Download::Error(e) => return Err(io::Error::other(e.message)),
         }
-        total += n as u64;
-        send(w, &Download::Chunk(buf[..n].to_vec())).await?;
     }
-    send(w, &Download::Done).await?;
-    Ok(total)
 }
 
 #[cfg(test)]

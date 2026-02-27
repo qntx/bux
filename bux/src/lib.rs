@@ -35,6 +35,8 @@ mod runtime;
 mod state;
 mod sys;
 mod vm;
+#[cfg(unix)]
+pub mod watchdog;
 
 pub use bux_proto::ExecStart;
 #[cfg(unix)]

@@ -170,7 +170,12 @@ pub fn ps(args: &PsArgs) -> Result<()> {
         vms
     } else {
         vms.into_iter()
-            .filter(|v| v.status == bux::Status::Running || v.status == bux::Status::Creating)
+            .filter(|v| {
+                matches!(
+                    v.status,
+                    bux::Status::Running | bux::Status::Creating | bux::Status::Paused
+                )
+            })
             .collect()
     };
 
@@ -182,6 +187,7 @@ pub fn ps(args: &PsArgs) -> Result<()> {
                 let s = match vm.status {
                     bux::Status::Creating => "creating",
                     bux::Status::Running => "running",
+                    bux::Status::Paused => "paused",
                     bux::Status::Stopped => "stopped",
                     _ => "unknown",
                 };
@@ -220,6 +226,7 @@ pub fn ps(args: &PsArgs) -> Result<()> {
         let status = match vm.status {
             bux::Status::Creating => "creating",
             bux::Status::Running => "running",
+            bux::Status::Paused => "paused",
             bux::Status::Stopped => "stopped",
             _ => "unknown",
         };

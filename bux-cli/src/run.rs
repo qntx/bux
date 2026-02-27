@@ -124,12 +124,12 @@ impl RunArgs {
             .ram_mib(self.memory)
             .log_level(self.log_level);
 
-        // Root filesystem: explicit disk > --disk (auto-create) > directory.
+        // Root filesystem: explicit disk > --disk (auto QCOW2 overlay) > directory.
         if let Some(ref disk) = root_disk {
             b = b.root_disk(disk);
         } else if use_disk && !rootfs.is_empty() {
-            let disk_path = create_disk_from_rootfs(&rootfs)?;
-            b = b.root_disk(disk_path);
+            let base_path = create_disk_from_rootfs(&rootfs)?;
+            b = b.base_disk(base_path);
         } else {
             b = b.root(&rootfs);
         }
