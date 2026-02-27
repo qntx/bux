@@ -6,6 +6,8 @@
 //! 2. **FD cleanup** — close all inherited file descriptors ≥ 3, except for
 //!    an optionally preserved FD (used by the watchdog pipe).
 
+#![allow(unsafe_code)] // pre_exec requires unsafe
+
 use std::process::Command;
 
 /// Install pre-exec hooks on the command.
@@ -23,10 +25,10 @@ pub fn apply(cmd: &mut Command, preserve_fd: Option<i32>) {
     use std::os::unix::process::CommandExt;
 
     // SAFETY: all operations inside are async-signal-safe syscalls.
+    // pre_exec is inherently unsafe — it runs between fork and exec.
     unsafe {
         cmd.pre_exec(move || {
             // 1. Die when parent exits — prevents orphaned VM processes.
-            //    (Belt-and-suspenders with the watchdog pipe on Linux.)
             #[cfg(target_os = "linux")]
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
 
@@ -39,6 +41,12 @@ pub fn apply(cmd: &mut Command, preserve_fd: Option<i32>) {
 }
 
 /// Close all file descriptors >= 3, optionally preserving one.
+///
+/// # Note
+///
+/// This runs in a pre_exec context (between fork/exec). Only
+/// async-signal-safe functions may be called. Raw libc is intentional
+/// here — nix wrappers allocate and are not async-signal-safe.
 #[cfg(unix)]
 fn close_inherited_fds(preserve: Option<i32>) {
     match preserve {
@@ -53,7 +61,6 @@ fn close_all_fds() {
     // Try close_range(3, u32::MAX, 0) — available on Linux 5.9+.
     #[cfg(target_os = "linux")]
     {
-        // SAFETY: close_range is an async-signal-safe syscall.
         let ret = unsafe { libc::syscall(libc::SYS_close_range, 3_u32, u32::MAX, 0_u32) };
         if ret == 0 {
             return;
@@ -72,9 +79,7 @@ fn close_fds_preserving(keep: i32) {
     {
         #[allow(clippy::cast_sign_loss)]
         let keep_u = keep as u32;
-        // SAFETY: close_range is async-signal-safe.
         unsafe {
-            // Close [3, keep-1] and [keep+1, MAX].
             if keep > 3 {
                 libc::syscall(libc::SYS_close_range, 3_u32, keep_u - 1, 0_u32);
             }
@@ -97,7 +102,6 @@ fn close_fds_preserving(keep: i32) {
 /// Upper bound on FD numbers from `sysconf(_SC_OPEN_MAX)`.
 #[cfg(unix)]
 fn max_fd() -> i32 {
-    // SAFETY: sysconf is async-signal-safe.
     let n = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
     #[allow(clippy::cast_possible_truncation)]
     if n > 0 { n as i32 } else { 1024 }

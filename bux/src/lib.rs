@@ -25,7 +25,6 @@
 
 #[cfg(unix)]
 mod client;
-#[cfg(unix)]
 mod disk;
 mod error;
 #[cfg(unix)]
@@ -42,12 +41,15 @@ pub use bux_proto::ExecStart;
 #[cfg(unix)]
 pub use client::{Client, ExecHandle, ExecOutput, PongInfo};
 #[cfg(unix)]
-pub use disk::DiskManager;
+pub use disk::{Disk, DiskManager};
+pub use disk::{DiskFormat, QcowHeader};
 pub use error::{Error, Result};
+#[cfg(unix)]
+pub use jail::{JailConfig, NoopSandbox, ResourceLimits, Sandbox};
 #[cfg(unix)]
 pub use runtime::{Runtime, VmHandle};
 #[cfg(unix)]
 pub use state::StateDb;
 pub use state::{Status, VirtioFs, VmConfig, VmState, VsockPort};
-pub use sys::{DiskFormat, Feature, KernelFormat, LogStyle, SyncMode};
+pub use sys::{Feature, KernelFormat, LogStyle, SyncMode};
 pub use vm::{LogLevel, Vm, VmBuilder};

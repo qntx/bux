@@ -26,7 +26,9 @@ bux-bwrap.workspace = true
 [target.'cfg(unix)'.dependencies]
 bux-e2fs.workspace = true
 libc.workspace = true
+nix.workspace = true
 rusqlite.workspace = true
+signal-hook = "0.3"
 tokio = { workspace = true, features = ["io-util", "net", "time", "sync"] }
 
 [lints]
