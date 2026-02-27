@@ -161,7 +161,7 @@ pub fn open_runtime() -> Result<bux::Runtime> {
 }
 
 #[cfg(unix)]
-pub fn ps(args: PsArgs) -> Result<()> {
+pub fn ps(args: &PsArgs) -> Result<()> {
     let rt = open_runtime()?;
     let vms = rt.list()?;
 
@@ -211,8 +211,8 @@ pub fn ps(args: PsArgs) -> Result<()> {
         return Ok(());
     }
     println!(
-        "{:<14} {:<16} {:<8} {:<10} {}",
-        "ID", "NAME", "PID", "STATUS", "IMAGE"
+        "{:<14} {:<16} {:<8} {:<10} IMAGE",
+        "ID", "NAME", "PID", "STATUS"
     );
     for vm in &filtered {
         let name = vm.name.as_deref().unwrap_or("-");
@@ -262,7 +262,7 @@ pub async fn stop(args: StopArgs) -> Result<()> {
 }
 
 #[cfg(unix)]
-pub fn kill(args: KillArgs) -> Result<()> {
+pub fn kill(args: &KillArgs) -> Result<()> {
     let rt = open_runtime()?;
     let sig = parse_signal(&args.signal)?;
     let mut errors = Vec::new();
@@ -285,16 +285,16 @@ pub fn kill(args: KillArgs) -> Result<()> {
 }
 
 #[cfg(unix)]
-pub fn rm(args: RmArgs) -> Result<()> {
+pub fn rm(args: &RmArgs) -> Result<()> {
     let rt = open_runtime()?;
     let mut errors = Vec::new();
 
     for target in &args.targets {
         // Force mode: kill before removing.
-        if args.force {
-            if let Ok(mut h) = rt.get(target) {
-                let _ = h.kill();
-            }
+        if args.force
+            && let Ok(mut h) = rt.get(target)
+        {
+            let _ = h.kill();
         }
         match rt.remove(target) {
             Ok(()) => println!("{target}"),
@@ -338,7 +338,6 @@ pub async fn exec(args: ExecArgs) -> Result<()> {
 
     let code = handle
         .exec_stream(req, |event| match event {
-            bux::ExecEvent::Started { .. } => {}
             bux::ExecEvent::Stdout(d) => {
                 let _ = std::io::stdout().write_all(&d);
             }
@@ -356,7 +355,7 @@ pub async fn exec(args: ExecArgs) -> Result<()> {
 }
 
 #[cfg(unix)]
-pub fn inspect(args: InspectArgs) -> Result<()> {
+pub fn inspect(args: &InspectArgs) -> Result<()> {
     let rt = open_runtime()?;
     let states: Vec<_> = args
         .targets
@@ -463,7 +462,7 @@ pub fn prune() -> Result<()> {
 }
 
 #[cfg(unix)]
-pub fn rename(args: RenameArgs) -> Result<()> {
+pub fn rename(args: &RenameArgs) -> Result<()> {
     let rt = open_runtime()?;
     rt.rename(&args.target, &args.new_name)?;
     Ok(())

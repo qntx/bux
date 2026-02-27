@@ -37,6 +37,7 @@ const ACCEPTED_MEDIA_TYPES: &[&str] = &[
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors from OCI image operations.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// The image reference string could not be parsed.
@@ -65,6 +66,7 @@ pub enum Error {
 }
 
 /// Configuration for initializing [`Oci`].
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct OciConfig {
     /// Root directory for the image store. Defaults to `<platform_data_dir>/bux`.
@@ -84,6 +86,7 @@ impl Default for OciConfig {
 }
 
 /// Subset of the OCI image configuration relevant to VM execution.
+#[non_exhaustive]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ImageConfig {
     /// Default command (`CMD`).
@@ -121,6 +124,7 @@ impl ImageConfig {
 }
 
 /// Result of a successful image pull.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct PullResult {
     /// Canonical image reference string.
@@ -138,14 +142,19 @@ pub struct PullResult {
 /// All methods take `&self` — the underlying store uses SQLite (which serializes
 /// writes internally) and content-addressed blobs (immutable files).
 pub struct Oci {
+    /// Content-addressed image store.
     store: Store,
+    /// OCI registry HTTP client.
     client: oci_client::Client,
+    /// Registry authentication credentials.
     auth: RegistryAuth,
 }
 
 impl std::fmt::Debug for Oci {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Oci").field("store", &self.store).finish()
+        f.debug_struct("Oci")
+            .field("store", &self.store)
+            .finish_non_exhaustive()
     }
 }
 
@@ -235,7 +244,7 @@ impl Oci {
                 extract::extract_layer_files(&layer_files, &rootfs_clone)
             })
             .await
-            .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
+            .map_err(|e| Error::Io(std::io::Error::other(e)))??;
         }
 
         // 5. Update SQLite index.

@@ -9,6 +9,10 @@ description = "Embedded micro-VM sandbox for running AI agents"
 keywords = ["ai", "sandbox", "vm", "kvm"]
 categories = ["virtualization", "api-bindings"]
 
+[[bin]]
+name = "bux-shim"
+path = "src/bin/shim.rs"
+
 [dependencies]
 bux-proto.workspace = true
 bux-krun.workspace = true

@@ -22,6 +22,7 @@ use crate::error::{Error, Result};
 use crate::sys;
 
 /// Block size for an ext4 filesystem.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum BlockSize {
@@ -46,6 +47,7 @@ impl BlockSize {
 }
 
 /// Options for creating a new ext4 filesystem.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
 pub struct CreateOptions {
     /// Block size (default: 4096).
@@ -64,6 +66,7 @@ impl Default for CreateOptions {
 }
 
 /// File type for directory entries (maps to `EXT2_FT_*` constants).
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum FileType {
@@ -106,6 +109,7 @@ pub enum FileType {
 /// // Drop closes the filesystem automatically.
 /// ```
 pub struct Filesystem {
+    /// Raw libext2fs filesystem handle.
     inner: sys::ext2_filsys,
 }
 
@@ -295,7 +299,7 @@ impl Filesystem {
             let mut inode: sys::ext2_inode = std::mem::zeroed();
             check(
                 "ext2fs_read_inode",
-                sys::ext2fs_read_inode(self.inner, ino, &mut inode),
+                sys::ext2fs_read_inode(self.inner, ino, &raw mut inode),
             )?;
             Ok(inode)
         }
@@ -307,7 +311,7 @@ impl Filesystem {
             let mut copy = *inode;
             check(
                 "ext2fs_write_inode",
-                sys::ext2fs_write_inode(self.inner, ino, &mut copy),
+                sys::ext2fs_write_inode(self.inner, ino, &raw mut copy),
             )
         }
     }
@@ -318,7 +322,7 @@ impl Filesystem {
             let mut copy = *inode;
             check(
                 "ext2fs_write_new_inode",
-                sys::ext2fs_write_new_inode(self.inner, ino, &mut copy),
+                sys::ext2fs_write_new_inode(self.inner, ino, &raw mut copy),
             )
         }
     }
@@ -333,9 +337,9 @@ impl Filesystem {
             let map = (*self.inner).inode_map;
             check(
                 "ext2fs_new_inode",
-                sys::ext2fs_new_inode(self.inner, dir, i32::from(mode), map, &mut ino),
+                sys::ext2fs_new_inode(self.inner, dir, i32::from(mode), map, &raw mut ino),
             )?;
-            let is_dir = i32::from(mode & 0o040000 != 0);
+            let is_dir = i32::from(mode & 0o040_000 != 0);
             sys::ext2fs_inode_alloc_stats2(self.inner, ino, 1, is_dir);
             Ok(ino)
         }
@@ -351,7 +355,7 @@ impl Filesystem {
             let map = (*self.inner).block_map;
             check(
                 "ext2fs_new_block2",
-                sys::ext2fs_new_block2(self.inner, goal, map, &mut blk),
+                sys::ext2fs_new_block2(self.inner, goal, map, &raw mut blk),
             )?;
             sys::ext2fs_block_alloc_stats2(self.inner, blk, 1);
             Ok(blk)

@@ -17,29 +17,95 @@ pub enum Status {
     Stopped,
 }
 
-/// Serializable snapshot of a VM's configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A virtio-fs shared directory.
 #[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VirtioFs {
+    /// Mount tag visible inside the guest.
+    pub tag: String,
+    /// Absolute host directory path.
+    pub path: String,
+}
+
+/// A vsock port mapping.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VsockPort {
+    /// Guest-side vsock port number.
+    pub port: u32,
+    /// Host-side Unix socket path.
+    pub path: String,
+    /// `true` = guest listens, host connects (agent pattern).
+    pub listen: bool,
+}
+
+/// Complete VM configuration — sufficient to reconstruct a [`VmBuilder`].
+///
+/// Serialized as JSON inside the SQLite `config` column and passed to
+/// `bux-shim` as a temp file so the child process can rebuild the VM.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmConfig {
     /// Number of virtual CPUs.
     pub vcpus: u8,
     /// RAM size in MiB.
     pub ram_mib: u32,
-    /// Root filesystem directory path on the host.
+
+    /// Root filesystem directory path (virtiofs-based).
+    #[serde(default)]
     pub rootfs: Option<String>,
-    /// Root filesystem disk image path on the host.
+    /// Root filesystem disk image path (block device-based).
+    #[serde(default)]
     pub root_disk: Option<String>,
+
     /// Executable path inside the VM.
+    #[serde(default)]
     pub exec_path: Option<String>,
     /// Arguments passed to the executable.
+    #[serde(default)]
     pub exec_args: Vec<String>,
-    /// Environment variables (`KEY=VALUE`).
+    /// Environment variables (`KEY=VALUE`). `None` = inherit host env.
+    #[serde(default)]
     pub env: Option<Vec<String>>,
     /// Working directory inside the VM.
+    #[serde(default)]
     pub workdir: Option<String>,
+
     /// TCP port mappings (`"host:guest"`).
+    #[serde(default)]
     pub ports: Vec<String>,
+
+    /// virtio-fs shared directories.
+    #[serde(default)]
+    pub virtiofs: Vec<VirtioFs>,
+    /// vsock port mappings (includes internal agent port).
+    #[serde(default)]
+    pub vsock_ports: Vec<VsockPort>,
+
+    /// Global log level.
+    #[serde(default)]
+    pub log_level: Option<crate::vm::LogLevel>,
+    /// UID to set before starting the VM.
+    #[serde(default)]
+    pub uid: Option<u32>,
+    /// GID to set before starting the VM.
+    #[serde(default)]
+    pub gid: Option<u32>,
+    /// Resource limits (`"RESOURCE=RLIM_CUR:RLIM_MAX"`).
+    #[serde(default)]
+    pub rlimits: Vec<String>,
+    /// Enable nested virtualization (macOS only).
+    #[serde(default)]
+    pub nested_virt: Option<bool>,
+    /// Enable/disable virtio-snd.
+    #[serde(default)]
+    pub snd_device: Option<bool>,
+    /// Redirect console output to a file.
+    #[serde(default)]
+    pub console_output: Option<String>,
+
     /// Remove VM state automatically when it stops.
+    #[serde(default)]
     pub auto_remove: bool,
 }
 
@@ -330,6 +396,15 @@ mod tests {
                 env: None,
                 workdir: None,
                 ports: vec![],
+                virtiofs: vec![],
+                vsock_ports: vec![],
+                log_level: None,
+                uid: None,
+                gid: None,
+                rlimits: vec![],
+                nested_virt: None,
+                snd_device: None,
+                console_output: None,
                 auto_remove: false,
             },
             created_at: SystemTime::now(),

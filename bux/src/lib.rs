@@ -44,6 +44,6 @@ pub use error::{Error, Result};
 pub use runtime::{Runtime, VmHandle};
 #[cfg(unix)]
 pub use state::StateDb;
-pub use state::{Status, VmConfig, VmState};
+pub use state::{Status, VirtioFs, VmConfig, VmState, VsockPort};
 pub use sys::{DiskFormat, Feature, KernelFormat, LogStyle, SyncMode};
 pub use vm::{LogLevel, Vm, VmBuilder};

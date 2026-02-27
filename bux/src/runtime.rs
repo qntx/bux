@@ -1,7 +1,8 @@
 //! VM lifecycle management: spawn, list, stop, kill, remove.
 //!
-//! The [`Runtime`] manages VM state in a SQLite database and provides
-//! methods to spawn VMs in child processes via `fork(2)` + `krun_start_enter`.
+//! The [`Runtime`] manages VM state in a SQLite database and spawns VMs
+//! as child processes via the `bux-shim` binary, which calls
+//! `krun_start_enter` to take over the child process.
 //!
 //! # Platform
 //!
@@ -10,6 +11,7 @@
 #![allow(unsafe_code)]
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use std::{fs, io};
@@ -20,7 +22,7 @@ use tokio::sync::OnceCell;
 use crate::Result;
 use crate::client::{Client, ExecEvent, ExecOutput};
 use crate::disk::DiskManager;
-use crate::state::{self, StateDb, Status, VmState};
+use crate::state::{self, StateDb, Status, VmState, VsockPort};
 use crate::vm::VmBuilder;
 
 /// Manages the lifecycle of bux micro-VMs.
@@ -63,12 +65,11 @@ impl Runtime {
         &self.disk
     }
 
-    /// Spawns a VM in a child process and returns a handle.
+    /// Spawns a VM in a child process via `bux-shim` and returns a handle.
     ///
-    /// # Safety
-    ///
-    /// Uses `fork(2)`. Must be called before spawning other threads, or
-    /// from a single-threaded context.
+    /// The VM configuration is serialized to a temp JSON file, then
+    /// `bux-shim` is spawned as a subprocess that reads the config and
+    /// calls `krun_start_enter()` to become the VM.
     pub async fn spawn(
         &self,
         builder: VmBuilder,
@@ -87,51 +88,54 @@ impl Runtime {
 
         let id = state::gen_id();
         let socket = self.socks_dir.join(format!("{id}.sock"));
+        let socket_str = socket.to_string_lossy().into_owned();
 
-        // Extract config before consuming the builder.
+        // Build the full config including the internal agent vsock port.
         let mut config = builder.to_config();
         config.auto_remove = auto_remove;
+        config.vsock_ports.push(VsockPort {
+            port: AGENT_PORT,
+            path: socket_str,
+            listen: true,
+        });
 
-        // Add vsock port so guest agent is reachable via Unix socket.
-        let socket_str = socket.to_string_lossy().into_owned();
-        let configured = builder.vsock_port(AGENT_PORT, &socket_str, true);
+        // Write config to a temp file for the shim to read.
+        let config_path = self.socks_dir.join(format!("{id}.json"));
+        let json = serde_json::to_string(&config)?;
+        fs::write(&config_path, &json)?;
 
-        // Fork: child becomes the VM, parent manages state.
-        let pid = unsafe { libc::fork() };
-        match pid {
-            -1 => Err(io::Error::last_os_error().into()),
-            0 => {
-                // Child — build and start the VM (never returns on success).
-                match configured.build().and_then(super::vm::Vm::start) {
-                    Ok(()) => unreachable!(),
-                    #[allow(clippy::print_stderr)] // Only way to report errors in forked child.
-                    Err(e) => {
-                        eprintln!("[bux] child VM start failed: {e}");
-                        unsafe { libc::_exit(1) }
-                    }
-                }
-            }
-            child_pid => {
-                let vm_state = VmState {
-                    id,
-                    name,
-                    pid: child_pid,
-                    image,
-                    socket,
-                    status: Status::Running,
-                    config,
-                    created_at: SystemTime::now(),
-                };
-                self.db.insert(&vm_state)?;
+        // Spawn bux-shim as a child process.
+        let shim = find_shim()?;
+        let child = Command::new(&shim)
+            .arg(&config_path)
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| {
+                let _ = fs::remove_file(&config_path);
+                io::Error::new(e.kind(), format!("failed to spawn {}: {e}", shim.display()))
+            })?;
 
-                let handle = VmHandle::new(vm_state, Arc::clone(&self.db), self.disk.clone());
+        #[allow(clippy::cast_possible_wrap)]
+        let child_pid = child.id() as i32;
 
-                // Best-effort readiness wait.
-                let _ = handle.wait_ready(Duration::from_secs(5)).await;
+        let vm_state = VmState {
+            id,
+            name,
+            pid: child_pid,
+            image,
+            socket,
+            status: Status::Running,
+            config,
+            created_at: SystemTime::now(),
+        };
+        self.db.insert(&vm_state)?;
 
-                Ok(handle)
-            }
-        }
+        let handle = VmHandle::new(vm_state, Arc::clone(&self.db), self.disk.clone());
+
+        // Best-effort readiness wait.
+        let _ = handle.wait_ready(Duration::from_secs(5)).await;
+
+        Ok(handle)
     }
 
     /// Lists all known VMs, reconciling liveness and auto-removing stopped VMs.
@@ -394,4 +398,36 @@ impl VmHandle {
 /// Checks if a process is alive via `kill(pid, 0)`.
 fn is_pid_alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Locates the `bux-shim` binary.
+///
+/// Search order:
+/// 1. Next to the current executable (e.g. `/usr/bin/bux-shim`).
+/// 2. In `$PATH` via `which`.
+fn find_shim() -> io::Result<PathBuf> {
+    const NAME: &str = "bux-shim";
+
+    // 1. Sibling of the current executable.
+    if let Ok(exe) = std::env::current_exe() {
+        let sibling = exe.with_file_name(NAME);
+        if sibling.is_file() {
+            return Ok(sibling);
+        }
+    }
+
+    // 2. Search $PATH.
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(NAME);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("'{NAME}' not found; install it next to the bux binary or in $PATH"),
+    ))
 }

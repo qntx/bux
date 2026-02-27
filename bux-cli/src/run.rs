@@ -149,7 +149,10 @@ impl RunArgs {
             parts.extend(self.command);
             parts
         } else if self.command.is_empty() {
-            oci_cfg.as_ref().map(|c| c.command()).unwrap_or_default()
+            oci_cfg
+                .as_ref()
+                .map(bux_oci::ImageConfig::command)
+                .unwrap_or_default()
         } else {
             self.command
         };

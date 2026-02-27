@@ -6,8 +6,8 @@ use crate::state::VmConfig;
 use crate::sys::{self, DiskFormat, Feature, KernelFormat, LogStyle, SyncMode};
 
 /// Log verbosity level for libkrun.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[repr(u32)]
 pub enum LogLevel {
     /// Logging disabled.
@@ -234,6 +234,7 @@ impl VmBuilder {
     /// Extracts a serializable configuration snapshot.
     #[cfg(unix)]
     pub(crate) fn to_config(&self) -> VmConfig {
+        use crate::state::{VirtioFs, VsockPort};
         VmConfig {
             vcpus: self.vcpus,
             ram_mib: self.ram_mib,
@@ -244,7 +245,66 @@ impl VmBuilder {
             env: self.env.clone(),
             workdir: self.workdir.clone(),
             ports: self.ports.clone(),
+            virtiofs: self
+                .virtiofs
+                .iter()
+                .map(|(tag, path)| VirtioFs {
+                    tag: tag.clone(),
+                    path: path.clone(),
+                })
+                .collect(),
+            vsock_ports: self
+                .vsock_ports
+                .iter()
+                .map(|(port, path, listen)| VsockPort {
+                    port: *port,
+                    path: path.clone(),
+                    listen: *listen,
+                })
+                .collect(),
+            log_level: self.log_level,
+            uid: self.uid,
+            gid: self.gid,
+            rlimits: self.rlimits.clone(),
+            nested_virt: self.nested_virt,
+            snd_device: self.snd_device,
+            console_output: self.console_output.clone(),
             auto_remove: false,
+        }
+    }
+
+    /// Reconstructs a [`VmBuilder`] from a serialized [`VmConfig`].
+    ///
+    /// Used by `bux-shim` to rebuild the VM in a child process.
+    #[cfg(unix)]
+    pub fn from_config(c: &VmConfig) -> Self {
+        Self {
+            vcpus: c.vcpus,
+            ram_mib: c.ram_mib,
+            root: c.rootfs.clone(),
+            root_disk: c.root_disk.clone(),
+            exec_path: c.exec_path.clone(),
+            exec_args: c.exec_args.clone(),
+            env: c.env.clone(),
+            workdir: c.workdir.clone(),
+            ports: c.ports.clone(),
+            virtiofs: c
+                .virtiofs
+                .iter()
+                .map(|v| (v.tag.clone(), v.path.clone()))
+                .collect(),
+            vsock_ports: c
+                .vsock_ports
+                .iter()
+                .map(|v| (v.port, v.path.clone(), v.listen))
+                .collect(),
+            log_level: c.log_level,
+            uid: c.uid,
+            gid: c.gid,
+            rlimits: c.rlimits.clone(),
+            nested_virt: c.nested_virt,
+            snd_device: c.snd_device,
+            console_output: c.console_output.clone(),
         }
     }
 

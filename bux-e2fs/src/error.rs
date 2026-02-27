@@ -1,6 +1,7 @@
 //! Error types for ext4 filesystem operations.
 
 /// Errors returned by ext4 operations.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// A libext2fs function returned a non-zero error code.

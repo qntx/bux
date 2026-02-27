@@ -17,6 +17,7 @@ use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 
 /// Metadata for a locally stored image.
+#[non_exhaustive]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ImageMeta {
     /// Full image reference string (e.g. `docker.io/library/alpine:latest`).
@@ -29,13 +30,18 @@ pub struct ImageMeta {
 
 /// Content-addressed OCI image store with SQLite indexing.
 pub struct Store {
+    /// Root directory for the store.
     root: PathBuf,
+    /// SQLite database connection.
     db: Connection,
 }
 
 impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Store").field("root", &self.root).finish()
+        f.debug_struct("Store")
+            .field("root", &self.root)
+            .field("db", &"<sqlite>")
+            .finish()
     }
 }
 
@@ -108,7 +114,11 @@ impl Store {
                 "INSERT INTO layers (digest, media_type, size)
                  VALUES (?1, ?2, ?3)
                  ON CONFLICT(digest) DO UPDATE SET ref_count = ref_count + 1",
-                params![digest, media_type, data.len() as i64],
+                params![
+                    digest,
+                    media_type,
+                    i64::try_from(data.len()).unwrap_or(i64::MAX)
+                ],
             )
             .map_err(|e| crate::Error::Db(e.to_string()))?;
 
@@ -162,7 +172,12 @@ impl Store {
                 size = excluded.size,
                 config = excluded.config,
                 created = datetime('now')",
-            params![reference, digest, size as i64, config_json],
+            params![
+                reference,
+                digest,
+                i64::try_from(size).unwrap_or(i64::MAX),
+                config_json
+            ],
         )
         .map_err(|e| crate::Error::Db(e.to_string()))?;
 
@@ -177,7 +192,11 @@ impl Store {
             tx.execute(
                 "INSERT OR IGNORE INTO image_layers (image_ref, layer_digest, position)
                  VALUES (?1, ?2, ?3)",
-                params![reference, layer_digest, pos as i64],
+                params![
+                    reference,
+                    layer_digest,
+                    i64::try_from(pos).unwrap_or(i64::MAX)
+                ],
             )
             .map_err(|e| crate::Error::Db(e.to_string()))?;
         }
@@ -198,7 +217,7 @@ impl Store {
                 Ok(ImageMeta {
                     reference: row.get(0)?,
                     digest: row.get(1)?,
-                    size: row.get::<_, i64>(2)? as u64,
+                    size: u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
                 })
             })
             .map_err(|e| crate::Error::Db(e.to_string()))?;
@@ -253,7 +272,7 @@ impl Store {
             let rows = stmt
                 .query_map(params![reference], |row| row.get(0))
                 .map_err(|e| crate::Error::Db(e.to_string()))?;
-            rows.filter_map(|r| r.ok()).collect()
+            rows.filter_map(Result::ok).collect()
         };
 
         let tx = self
@@ -284,7 +303,7 @@ impl Store {
             let rows = stmt
                 .query_map([], |row| row.get(0))
                 .map_err(|e| crate::Error::Db(e.to_string()))?;
-            rows.filter_map(|r| r.ok()).collect()
+            rows.filter_map(Result::ok).collect()
         };
         for orphan in &orphans {
             tx.execute("DELETE FROM layers WHERE digest = ?1", params![orphan])
