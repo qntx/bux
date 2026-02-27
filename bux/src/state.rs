@@ -51,8 +51,8 @@ pub struct VmState {
     pub id: String,
     /// Optional human-friendly name (unique across the runtime).
     pub name: Option<String>,
-    /// Host PID of the VM process.
-    pub pid: u32,
+    /// Host PID of the VM process (matches `libc::pid_t`).
+    pub pid: i32,
     /// OCI image reference (if pulled from a registry).
     pub image: Option<String>,
     /// Unix socket path for host↔guest communication.

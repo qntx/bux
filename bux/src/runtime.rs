@@ -115,7 +115,7 @@ impl Runtime {
                 let vm_state = VmState {
                     id,
                     name,
-                    pid: child_pid.cast_unsigned(),
+                    pid: child_pid,
                     image,
                     socket,
                     status: Status::Running,
@@ -291,7 +291,7 @@ impl VmHandle {
     /// Sends `SIGKILL` to the VM process.
     pub fn kill(&mut self) -> Result<()> {
         unsafe {
-            libc::kill(self.state.pid.cast_signed(), libc::SIGKILL);
+            libc::kill(self.state.pid, libc::SIGKILL);
         }
         self.mark_stopped()
     }
@@ -303,7 +303,7 @@ impl VmHandle {
 
     /// Sends a POSIX signal to the VM process.
     pub fn signal(&self, sig: i32) -> Result<()> {
-        let ret = unsafe { libc::kill(self.state.pid.cast_signed(), sig) };
+        let ret = unsafe { libc::kill(self.state.pid, sig) };
         if ret == 0 {
             Ok(())
         } else {
@@ -358,15 +358,13 @@ impl VmHandle {
         Ok(self.client().await?.handshake().await?)
     }
 
-    /// Waits for the guest agent to become reachable.
+    /// Waits for the guest agent to become reachable via a single
+    /// connect + handshake probe per attempt.
     async fn wait_ready(&self, timeout: Duration) -> io::Result<()> {
         tokio::time::timeout(timeout, async {
             loop {
-                if Client::connect(&self.state.socket).await.is_ok() {
-                    // Don't store this probe connection; let client() create the real one.
-                    if let Ok(c) = Client::connect(&self.state.socket).await
-                        && c.handshake().await.is_ok()
-                    {
+                if let Ok(c) = Client::connect(&self.state.socket).await {
+                    if c.handshake().await.is_ok() {
                         return;
                     }
                 }
@@ -394,6 +392,6 @@ impl VmHandle {
 }
 
 /// Checks if a process is alive via `kill(pid, 0)`.
-fn is_pid_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid.cast_signed(), 0) == 0 }
+fn is_pid_alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
 }
