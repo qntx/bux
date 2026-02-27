@@ -64,6 +64,8 @@ mod inner {
         }
 
         /// Performs a version handshake with the guest agent.
+        ///
+        /// Verifies that the guest speaks the same major protocol version.
         pub async fn handshake(&self) -> io::Result<()> {
             let mut stream = self.stream.lock().await;
             bux_proto::send(
@@ -74,7 +76,11 @@ mod inner {
             )
             .await?;
             match bux_proto::recv::<Response>(&mut *stream).await? {
-                Response::Handshake { .. } => Ok(()),
+                Response::Handshake { version } if version == PROTOCOL_VERSION => Ok(()),
+                Response::Handshake { version } => Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("protocol version mismatch: host={PROTOCOL_VERSION}, guest={version}"),
+                )),
                 Response::Error(e) => Err(io::Error::other(e)),
                 _ => Err(io::Error::new(
                     io::ErrorKind::InvalidData,
