@@ -2,30 +2,38 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Wire protocol version. Bumped on every incompatible change.
+pub const PROTOCOL_VERSION: u32 = 2;
+
 /// Default vsock port for the bux guest agent.
 pub const AGENT_PORT: u32 = 1024;
 
 /// Request sent from host to guest.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
+    /// Version handshake — must be the first message on every connection.
+    Handshake {
+        /// Protocol version offered by the sender.
+        version: u32,
+    },
     /// Execute a command inside the guest.
     Exec(ExecReq),
     /// Write data to a running process's stdin.
     Stdin {
         /// Target process ID.
-        pid: u32,
+        pid: i32,
         /// Raw bytes to write.
         data: Vec<u8>,
     },
     /// Close a running process's stdin (sends EOF).
     StdinClose {
         /// Target process ID.
-        pid: u32,
+        pid: i32,
     },
     /// Send a POSIX signal to a running process.
     Signal {
         /// Target process ID.
-        pid: u32,
+        pid: i32,
         /// Signal number (e.g. `libc::SIGTERM`).
         signal: i32,
     },
@@ -55,8 +63,6 @@ pub enum Request {
         /// Path inside the guest to archive.
         path: String,
     },
-    /// Health-check ping.
-    Ping,
     /// Request graceful shutdown of the guest agent.
     Shutdown,
 }
@@ -134,15 +140,19 @@ impl ExecReq {
 
 /// Response sent from guest to host.
 ///
-/// For [`Request::Exec`], the guest first sends [`Response::Started`] with
-/// the child PID, then streams [`Response::Stdout`] / [`Response::Stderr`]
-/// chunks, and finally sends exactly one [`Response::Exit`].
+/// For [`Request::Exec`], the guest sends [`Response::Started`], then streams
+/// [`Response::Stdout`] / [`Response::Stderr`] chunks, then one [`Response::Exit`].
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
-    /// Process started with the given PID (for subsequent `Stdin`/`Signal`).
+    /// Handshake reply with the agent's protocol version.
+    Handshake {
+        /// Protocol version supported by the agent.
+        version: u32,
+    },
+    /// Process started — PID for subsequent `Stdin`/`Signal` messages.
     Started {
         /// Child process ID inside the guest.
-        pid: u32,
+        pid: i32,
     },
     /// A chunk of stdout data.
     Stdout(Vec<u8>),
@@ -152,8 +162,6 @@ pub enum Response {
     Exit(i32),
     /// An error occurred while handling the request.
     Error(String),
-    /// Reply to [`Request::Ping`].
-    Pong,
     /// File contents returned for [`Request::ReadFile`].
     FileData(Vec<u8>),
     /// Tar archive returned for [`Request::CopyOut`].

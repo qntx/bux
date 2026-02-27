@@ -8,4 +8,4 @@ mod codec;
 mod message;
 
 pub use codec::{recv, send};
-pub use message::{AGENT_PORT, ExecReq, Request, Response};
+pub use message::{AGENT_PORT, ExecReq, PROTOCOL_VERSION, Request, Response};

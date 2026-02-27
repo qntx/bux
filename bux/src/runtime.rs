@@ -353,9 +353,9 @@ impl VmHandle {
         Ok(self.client().await?.copy_out(path).await?)
     }
 
-    /// Pings the guest agent.
-    pub async fn ping(&self) -> Result<()> {
-        Ok(self.client().await?.ping().await?)
+    /// Performs a version handshake with the guest agent.
+    pub async fn handshake(&self) -> Result<()> {
+        Ok(self.client().await?.handshake().await?)
     }
 
     /// Waits for the guest agent to become reachable.
@@ -365,7 +365,7 @@ impl VmHandle {
                 if Client::connect(&self.state.socket).await.is_ok() {
                     // Don't store this probe connection; let client() create the real one.
                     if let Ok(c) = Client::connect(&self.state.socket).await
-                        && c.ping().await.is_ok()
+                        && c.handshake().await.is_ok()
                     {
                         return;
                     }

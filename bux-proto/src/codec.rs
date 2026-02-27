@@ -46,11 +46,13 @@ mod tests {
     use crate::{ExecReq, Request, Response};
 
     #[tokio::test]
-    async fn roundtrip_ping_pong() {
+    async fn roundtrip_handshake() {
         let (mut client, mut server) = tokio::io::duplex(1024);
-        send(&mut client, &Request::Ping).await.unwrap();
+        send(&mut client, &Request::Handshake { version: 2 })
+            .await
+            .unwrap();
         let decoded: Request = recv(&mut server).await.unwrap();
-        assert!(matches!(decoded, Request::Ping));
+        assert!(matches!(decoded, Request::Handshake { version: 2 }));
     }
 
     #[tokio::test]
@@ -86,7 +88,7 @@ mod tests {
             Response::Stderr(b"error".to_vec()),
             Response::Exit(0),
             Response::Error("boom".into()),
-            Response::Pong,
+            Response::Handshake { version: 2 },
             Response::FileData(b"content".to_vec()),
             Response::TarData(b"tarball".to_vec()),
             Response::Ok,

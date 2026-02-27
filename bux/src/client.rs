@@ -10,19 +10,19 @@ mod inner {
     use std::io;
     use std::path::Path;
 
-    use bux_proto::{ExecReq, Request, Response};
+    use bux_proto::{ExecReq, PROTOCOL_VERSION, Request, Response};
     use tokio::io::AsyncWriteExt;
     use tokio::net::UnixStream;
     use tokio::sync::Mutex;
 
     /// Event emitted during streaming command execution.
-    #[derive(Debug)]
     #[non_exhaustive]
+    #[derive(Debug)]
     pub enum ExecEvent {
         /// Process spawned with the given PID.
         Started {
             /// Child process ID inside the guest.
-            pid: u32,
+            pid: i32,
         },
         /// A chunk of stdout data.
         Stdout(Vec<u8>),
@@ -31,11 +31,11 @@ mod inner {
     }
 
     /// Output captured from a command executed inside the guest.
-    #[derive(Debug)]
     #[non_exhaustive]
+    #[derive(Debug)]
     pub struct ExecOutput {
         /// Child process ID inside the guest.
-        pub pid: u32,
+        pub pid: i32,
         /// Stdout bytes.
         pub stdout: Vec<u8>,
         /// Stderr bytes.
@@ -63,10 +63,24 @@ mod inner {
             })
         }
 
-        /// Sends a ping and waits for a pong.
-        pub async fn ping(&self) -> io::Result<()> {
-            self.send_expect(&Request::Ping, |r| matches!(r, Response::Pong))
-                .await
+        /// Performs a version handshake with the guest agent.
+        pub async fn handshake(&self) -> io::Result<()> {
+            let mut stream = self.stream.lock().await;
+            bux_proto::send(
+                &mut *stream,
+                &Request::Handshake {
+                    version: PROTOCOL_VERSION,
+                },
+            )
+            .await?;
+            match bux_proto::recv::<Response>(&mut *stream).await? {
+                Response::Handshake { .. } => Ok(()),
+                Response::Error(e) => Err(io::Error::other(e)),
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "expected Handshake",
+                )),
+            }
         }
 
         /// Requests graceful shutdown of the guest agent.
@@ -76,7 +90,7 @@ mod inner {
         }
 
         /// Sends a signal to a process inside the guest.
-        pub async fn signal(&self, pid: u32, signal: i32) -> io::Result<()> {
+        pub async fn signal(&self, pid: i32, signal: i32) -> io::Result<()> {
             self.send_expect(&Request::Signal { pid, signal }, |r| {
                 matches!(r, Response::Ok)
             })
@@ -113,7 +127,7 @@ mod inner {
 
         /// Executes a command and collects all output.
         pub async fn exec(&self, req: ExecReq) -> io::Result<ExecOutput> {
-            let mut pid = 0;
+            let mut pid = 0i32;
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             let code = self
@@ -149,7 +163,7 @@ mod inner {
             let (mut r, mut w) = tokio::io::split(&mut *guard);
 
             // First response must be Started.
-            let pid = match bux_proto::recv::<Response>(&mut r).await? {
+            let pid: i32 = match bux_proto::recv::<Response>(&mut r).await? {
                 Response::Started { pid } => {
                     on(ExecEvent::Started { pid });
                     pid
