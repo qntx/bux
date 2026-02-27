@@ -20,22 +20,35 @@ mod inner {
 
     /// Output captured from a completed exec.
     #[derive(Debug)]
+    #[non_exhaustive]
     pub struct ExecOutput {
+        /// Unique execution identifier assigned by the guest.
         pub exec_id: String,
+        /// Child process ID inside the guest.
         pub pid: i32,
+        /// Captured stdout bytes.
         pub stdout: Vec<u8>,
+        /// Captured stderr bytes (empty in TTY mode).
         pub stderr: Vec<u8>,
+        /// Process exit code.
         pub code: i32,
+        /// Signal that terminated the process, if any.
         pub signal: Option<i32>,
+        /// Whether the exec was killed due to timeout.
         pub timed_out: bool,
+        /// Wall-clock duration in milliseconds.
         pub duration_ms: u64,
+        /// Error message from the guest agent, if any.
         pub error_message: String,
     }
 
     /// Information returned by a successful ping.
     #[derive(Debug)]
+    #[non_exhaustive]
     pub struct PongInfo {
+        /// Guest agent version string.
         pub version: String,
+        /// Guest uptime in milliseconds.
         pub uptime_ms: u64,
     }
 
@@ -43,6 +56,7 @@ mod inner {
     ///
     /// The connection is split into read/write halves so stdin writes and
     /// stdout/stderr reads proceed concurrently without deadlock.
+    #[derive(Debug)]
     pub struct ExecHandle {
         /// Unique execution identifier assigned by the guest.
         exec_id: String,

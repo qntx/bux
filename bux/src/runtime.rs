@@ -103,7 +103,7 @@ impl Runtime {
         if let Some(ref base) = config.base_disk {
             let overlay = self.disk.create_overlay(Path::new(base), &id)?;
             config.root_disk = Some(overlay.to_string_lossy().into_owned());
-            config.disk_format = "qcow2".to_owned();
+            "qcow2".clone_into(&mut config.disk_format);
             config.base_disk = None; // consumed — shim doesn't need this
         }
 
