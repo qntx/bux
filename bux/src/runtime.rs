@@ -11,7 +11,6 @@
 #![allow(unsafe_code)]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use std::{fs, io};
@@ -22,6 +21,7 @@ use tokio::sync::OnceCell;
 use crate::Result;
 use crate::client::{Client, ExecEvent, ExecOutput};
 use crate::disk::DiskManager;
+use crate::jail::{self, JailConfig};
 use crate::state::{self, StateDb, Status, VmState, VsockPort};
 use crate::vm::VmBuilder;
 
@@ -104,16 +104,22 @@ impl Runtime {
         let json = serde_json::to_string(&config)?;
         fs::write(&config_path, &json)?;
 
-        // Spawn bux-shim as a child process.
+        // Spawn bux-shim inside a sandbox (bwrap on Linux, seatbelt on macOS).
         let shim = find_shim()?;
-        let child = Command::new(&shim)
-            .arg(&config_path)
-            .stdin(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| {
-                let _ = fs::remove_file(&config_path);
-                io::Error::new(e.kind(), format!("failed to spawn {}: {e}", shim.display()))
-            })?;
+        let jail_config = JailConfig {
+            rootfs: config.rootfs.as_deref().map(PathBuf::from),
+            root_disk: config.root_disk.as_deref().map(PathBuf::from),
+            socks_dir: self.socks_dir.clone(),
+            virtiofs_paths: config
+                .virtiofs
+                .iter()
+                .map(|v| PathBuf::from(&v.path))
+                .collect(),
+        };
+        let child = jail::spawn(&shim, &config_path, &jail_config).map_err(|e| {
+            let _ = fs::remove_file(&config_path);
+            io::Error::new(e.kind(), format!("failed to spawn {}: {e}", shim.display()))
+        })?;
 
         #[allow(clippy::cast_possible_wrap)]
         let child_pid = child.id() as i32;

@@ -1,0 +1,20 @@
+[package]
+name = "bux-bwrap"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bundles the bubblewrap (bwrap) sandbox binary for bux — Linux-only process isolation"
+readme = "README.md"
+links = "bubblewrap"
+categories = ["os"]
+keywords = ["sandbox", "bubblewrap", "bwrap", "namespace", "isolation"]
+rust-version = "1.85"
+
+[build-dependencies]
+flate2.workspace = true
+tar.workspace = true
+ureq.workspace = true
+
+[lints]
+workspace = true

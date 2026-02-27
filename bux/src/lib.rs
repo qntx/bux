@@ -29,6 +29,8 @@ mod client;
 mod disk;
 mod error;
 #[cfg(unix)]
+mod jail;
+#[cfg(unix)]
 mod runtime;
 mod state;
 mod sys;
