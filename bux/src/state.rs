@@ -372,6 +372,7 @@ mod db {
 pub use db::StateDb;
 
 #[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::shadow_unrelated)]
 mod tests {
     use std::time::SystemTime;
 

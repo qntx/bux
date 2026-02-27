@@ -51,7 +51,9 @@ fn close_inherited_fds() {
     // SAFETY: sysconf and close are async-signal-safe.
     let max_fd = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
     let limit = if max_fd > 0 { max_fd } else { 1024 };
-    for fd in 3..limit as i32 {
+    #[allow(clippy::cast_possible_truncation)]
+    let end = limit as i32; // _SC_OPEN_MAX fits in i32 on all real systems.
+    for fd in 3..end {
         unsafe { libc::close(fd) };
     }
 }
