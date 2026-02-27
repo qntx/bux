@@ -40,6 +40,34 @@ pub async fn recv<T: for<'de> Deserialize<'de>>(r: &mut (impl AsyncRead + Unpin)
     postcard::from_bytes(&payload).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+/// Sends `data` as a series of [`Request::Chunk`] messages followed by
+/// [`Request::EndOfStream`], using the given chunk size.
+pub async fn send_request_chunks(
+    w: &mut (impl AsyncWrite + Unpin),
+    data: &[u8],
+    chunk_size: usize,
+) -> io::Result<()> {
+    use crate::Request;
+    for chunk in data.chunks(chunk_size) {
+        send(w, &Request::Chunk(chunk.to_vec())).await?;
+    }
+    send(w, &Request::EndOfStream).await
+}
+
+/// Sends `data` as a series of [`Response::Chunk`] messages followed by
+/// [`Response::EndOfStream`], using the given chunk size.
+pub async fn send_response_chunks(
+    w: &mut (impl AsyncWrite + Unpin),
+    data: &[u8],
+    chunk_size: usize,
+) -> io::Result<()> {
+    use crate::Response;
+    for chunk in data.chunks(chunk_size) {
+        send(w, &Response::Chunk(chunk.to_vec())).await?;
+    }
+    send(w, &Response::EndOfStream).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,8 +117,8 @@ mod tests {
             Response::Exit(0),
             Response::Error("boom".into()),
             Response::Handshake { version: 2 },
-            Response::FileData(b"content".to_vec()),
-            Response::TarData(b"tarball".to_vec()),
+            Response::Chunk(b"content".to_vec()),
+            Response::EndOfStream,
             Response::Ok,
         ];
 
@@ -102,15 +130,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn roundtrip_copy_in() {
-        let req = Request::CopyIn {
-            dest: "/tmp/upload".into(),
-            tar: vec![1, 2, 3, 4],
-        };
-        let (mut client, mut server) = tokio::io::duplex(1024);
-        send(&mut client, &req).await.unwrap();
-        let decoded: Request = recv(&mut server).await.unwrap();
-        assert!(matches!(decoded, Request::CopyIn { .. }));
+    async fn roundtrip_streaming_copy_in() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+
+        // Send header + chunks + end
+        send(
+            &mut client,
+            &Request::CopyIn {
+                dest: "/tmp".into(),
+            },
+        )
+        .await
+        .unwrap();
+        send(&mut client, &Request::Chunk(vec![1, 2, 3]))
+            .await
+            .unwrap();
+        send(&mut client, &Request::Chunk(vec![4, 5, 6]))
+            .await
+            .unwrap();
+        send(&mut client, &Request::EndOfStream).await.unwrap();
+
+        // Receive and verify
+        let header: Request = recv(&mut server).await.unwrap();
+        assert!(matches!(header, Request::CopyIn { dest } if dest == "/tmp"));
+
+        let mut collected = Vec::new();
+        loop {
+            let msg: Request = recv(&mut server).await.unwrap();
+            match msg {
+                Request::Chunk(data) => collected.extend(data),
+                Request::EndOfStream => break,
+                _ => panic!("unexpected message"),
+            }
+        }
+        assert_eq!(collected, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[tokio::test]
+    async fn send_response_chunks_helper() {
+        let data = vec![10u8; 600];
+        let (mut client, mut server) = tokio::io::duplex(4096);
+
+        send_response_chunks(&mut client, &data, 256).await.unwrap();
+
+        let mut collected = Vec::new();
+        loop {
+            let msg: Response = recv(&mut server).await.unwrap();
+            match msg {
+                Response::Chunk(chunk) => collected.extend(chunk),
+                Response::EndOfStream => break,
+                _ => panic!("unexpected message"),
+            }
+        }
+        assert_eq!(collected, data);
     }
 
     #[tokio::test]

@@ -70,12 +70,13 @@ bux completion bash             # Shell completions
 
 ## Protocol
 
-Host and guest communicate over vsock (port 1024) using a binary protocol:
+Host and guest communicate over vsock (port 1024) using a binary protocol (v3):
 
 - **Serialization**: [postcard](https://crates.io/crates/postcard) (compact, no-std compatible)
 - **Framing**: 4-byte big-endian length prefix per message
 - **Handshake**: First message on every connection negotiates `PROTOCOL_VERSION`
-- **Max frame**: 16 MiB
+- **Max frame**: 16 MiB per chunk
+- **Streaming transfers**: File and tar operations use chunked streaming (`Chunk` + `EndOfStream` messages), removing the previous 16 MiB total size limit. Default chunk size is 256 KiB.
 
 ## Development
 

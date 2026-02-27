@@ -28,7 +28,7 @@ mod agent {
     use std::sync::OnceLock;
     use std::time::Instant;
 
-    use bux_proto::{AGENT_PORT, ExecReq, PROTOCOL_VERSION, Request, Response};
+    use bux_proto::{AGENT_PORT, ExecReq, PROTOCOL_VERSION, Request, Response, STREAM_CHUNK_SIZE};
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
     use tokio::process::Command;
     use tokio_vsock::VsockListener;
@@ -127,11 +127,15 @@ mod agent {
                     bux_proto::send(&mut w, &Response::Ok).await?;
                 }
                 Request::ReadFile { path } => read_file(&mut w, &path).await?,
-                Request::WriteFile { path, data, mode } => {
-                    write_file(&mut w, &path, &data, mode).await?;
+                Request::WriteFile { path, mode } => {
+                    write_file(&mut r, &mut w, &path, mode).await?;
                 }
-                Request::CopyIn { dest, tar } => copy_in(&mut w, &dest, &tar).await?,
+                Request::CopyIn { dest } => copy_in(&mut r, &mut w, &dest).await?,
                 Request::CopyOut { path } => copy_out(&mut w, &path).await?,
+                // Chunk/EndOfStream outside an active upload are protocol errors.
+                Request::Chunk(_) | Request::EndOfStream => {
+                    bux_proto::send(&mut w, &Response::Error("unexpected chunk".into())).await?;
+                }
                 Request::Shutdown => {
                     bux_proto::send(&mut w, &Response::Ok).await?;
                     w.flush().await?;
@@ -272,28 +276,47 @@ mod agent {
         bux_proto::send(w, &Response::Exit(status.code().unwrap_or(-1))).await
     }
 
-    /// Reads a file and sends its contents back to the host.
+    /// Reads a file and streams its contents back to the host in chunks.
     async fn read_file(w: &mut (impl AsyncWrite + Unpin), path: &str) -> io::Result<()> {
         match tokio::fs::read(path).await {
-            Ok(data) => bux_proto::send(w, &Response::FileData(data)).await,
+            Ok(data) => bux_proto::send_response_chunks(w, &data, STREAM_CHUNK_SIZE).await,
             Err(e) => bux_proto::send(w, &Response::Error(e.to_string())).await,
         }
     }
 
-    /// Writes data to a file with the specified permission mode.
+    /// Receives upload chunks from the host until [`Request::EndOfStream`].
+    async fn recv_upload_chunks(r: &mut (impl AsyncRead + Unpin)) -> io::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        loop {
+            match bux_proto::recv::<Request>(r).await? {
+                Request::Chunk(data) => buf.extend(data),
+                Request::EndOfStream => return Ok(buf),
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "expected Chunk or EndOfStream",
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Receives chunked data from the host and writes it to a file.
     async fn write_file(
+        r: &mut (impl AsyncRead + Unpin),
         w: &mut (impl AsyncWrite + Unpin),
         path: &str,
-        data: &[u8],
         mode: u32,
     ) -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
+
+        let data = recv_upload_chunks(r).await?;
 
         let result = async {
             if let Some(parent) = Path::new(path).parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
-            tokio::fs::write(path, data).await?;
+            tokio::fs::write(path, &data).await?;
             tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).await?;
             io::Result::Ok(())
         }
@@ -305,14 +328,15 @@ mod agent {
         }
     }
 
-    /// Unpacks a tar archive into `dest`, rejecting path traversal attacks.
+    /// Receives a chunked tar archive from the host and unpacks it into `dest`,
+    /// rejecting path traversal attacks.
     async fn copy_in(
+        r: &mut (impl AsyncRead + Unpin),
         w: &mut (impl AsyncWrite + Unpin),
         dest: &str,
-        tar_data: &[u8],
     ) -> io::Result<()> {
+        let data = recv_upload_chunks(r).await?;
         let dest = dest.to_owned();
-        let data = tar_data.to_vec();
 
         let result = tokio::task::spawn_blocking(move || -> io::Result<()> {
             let dest = Path::new(&dest);
@@ -373,7 +397,7 @@ mod agent {
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         match result {
-            Ok(data) => bux_proto::send(w, &Response::TarData(data)).await,
+            Ok(data) => bux_proto::send_response_chunks(w, &data, STREAM_CHUNK_SIZE).await,
             Err(e) => bux_proto::send(w, &Response::Error(e.to_string())).await,
         }
     }

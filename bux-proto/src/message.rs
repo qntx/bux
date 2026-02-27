@@ -3,7 +3,10 @@
 use serde::{Deserialize, Serialize};
 
 /// Wire protocol version. Bumped on every incompatible change.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
+
+/// Default chunk size for streaming transfers (256 KiB).
+pub const STREAM_CHUNK_SIZE: usize = 256 * 1024;
 
 /// Default vsock port for the bux guest agent.
 pub const AGENT_PORT: u32 = 1024;
@@ -38,31 +41,41 @@ pub enum Request {
         signal: i32,
     },
     /// Read a single file from the guest filesystem.
+    ///
+    /// Response: stream of [`Response::Chunk`] followed by [`Response::EndOfStream`].
     ReadFile {
         /// Absolute path inside the guest.
         path: String,
     },
-    /// Write a single file to the guest filesystem.
+    /// Write a single file to the guest filesystem (header only).
+    ///
+    /// The host must follow with [`Request::Chunk`] messages and a final
+    /// [`Request::EndOfStream`]. Guest replies [`Response::Ok`] or [`Response::Error`].
     WriteFile {
         /// Absolute path inside the guest.
         path: String,
-        /// File contents.
-        data: Vec<u8>,
         /// Unix permission mode (e.g. `0o644`).
         mode: u32,
     },
-    /// Copy a tar archive into the guest, unpacking at `dest`.
+    /// Copy a tar archive into the guest (header only).
+    ///
+    /// The host must follow with [`Request::Chunk`] messages and a final
+    /// [`Request::EndOfStream`]. Guest replies [`Response::Ok`] or [`Response::Error`].
     CopyIn {
         /// Destination directory inside the guest.
         dest: String,
-        /// Tar archive bytes.
-        tar: Vec<u8>,
     },
     /// Copy a path from the guest as a tar archive.
+    ///
+    /// Response: stream of [`Response::Chunk`] followed by [`Response::EndOfStream`].
     CopyOut {
         /// Path inside the guest to archive.
         path: String,
     },
+    /// A data chunk for an active upload stream.
+    Chunk(Vec<u8>),
+    /// Marks the end of an upload stream.
+    EndOfStream,
     /// Request graceful shutdown of the guest agent.
     Shutdown,
 }
@@ -162,10 +175,10 @@ pub enum Response {
     Exit(i32),
     /// An error occurred while handling the request.
     Error(String),
-    /// File contents returned for [`Request::ReadFile`].
-    FileData(Vec<u8>),
-    /// Tar archive returned for [`Request::CopyOut`].
-    TarData(Vec<u8>),
+    /// A data chunk for an active download stream.
+    Chunk(Vec<u8>),
+    /// Marks the end of a download stream.
+    EndOfStream,
     /// Generic success acknowledgment.
     Ok,
 }

@@ -10,7 +10,7 @@ mod inner {
     use std::io;
     use std::path::Path;
 
-    use bux_proto::{ExecReq, PROTOCOL_VERSION, Request, Response};
+    use bux_proto::{ExecReq, PROTOCOL_VERSION, Request, Response, STREAM_CHUNK_SIZE};
     use tokio::io::AsyncWriteExt;
     use tokio::net::UnixStream;
     use tokio::sync::Mutex;
@@ -214,7 +214,7 @@ mod inner {
             code
         }
 
-        /// Reads a file from the guest filesystem.
+        /// Reads a file from the guest filesystem (streamed in chunks).
         pub async fn read_file(&self, path: &str) -> io::Result<Vec<u8>> {
             let mut stream = self.stream.lock().await;
             bux_proto::send(
@@ -224,8 +224,23 @@ mod inner {
                 },
             )
             .await?;
+            recv_download_chunks(&mut *stream).await
+        }
+
+        /// Writes a file to the guest filesystem (streamed in chunks).
+        pub async fn write_file(&self, path: &str, data: &[u8], mode: u32) -> io::Result<()> {
+            let mut stream = self.stream.lock().await;
+            bux_proto::send(
+                &mut *stream,
+                &Request::WriteFile {
+                    path: path.to_owned(),
+                    mode,
+                },
+            )
+            .await?;
+            bux_proto::send_request_chunks(&mut *stream, data, STREAM_CHUNK_SIZE).await?;
             match bux_proto::recv::<Response>(&mut *stream).await? {
-                Response::FileData(data) => Ok(data),
+                Response::Ok => Ok(()),
                 Response::Error(e) => Err(io::Error::other(e)),
                 _ => Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -234,32 +249,28 @@ mod inner {
             }
         }
 
-        /// Writes a file to the guest filesystem.
-        pub async fn write_file(&self, path: &str, data: &[u8], mode: u32) -> io::Result<()> {
-            self.send_expect(
-                &Request::WriteFile {
-                    path: path.to_owned(),
-                    data: data.to_vec(),
-                    mode,
-                },
-                |r| matches!(r, Response::Ok),
-            )
-            .await
-        }
-
-        /// Copies a tar archive into the guest, unpacking at `dest`.
+        /// Copies a tar archive into the guest, unpacking at `dest` (streamed in chunks).
         pub async fn copy_in(&self, dest: &str, tar_data: &[u8]) -> io::Result<()> {
-            self.send_expect(
+            let mut stream = self.stream.lock().await;
+            bux_proto::send(
+                &mut *stream,
                 &Request::CopyIn {
                     dest: dest.to_owned(),
-                    tar: tar_data.to_vec(),
                 },
-                |r| matches!(r, Response::Ok),
             )
-            .await
+            .await?;
+            bux_proto::send_request_chunks(&mut *stream, tar_data, STREAM_CHUNK_SIZE).await?;
+            match bux_proto::recv::<Response>(&mut *stream).await? {
+                Response::Ok => Ok(()),
+                Response::Error(e) => Err(io::Error::other(e)),
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unexpected response",
+                )),
+            }
         }
 
-        /// Copies a path from the guest as a tar archive.
+        /// Copies a path from the guest as a tar archive (streamed in chunks).
         pub async fn copy_out(&self, path: &str) -> io::Result<Vec<u8>> {
             let mut stream = self.stream.lock().await;
             bux_proto::send(
@@ -269,13 +280,26 @@ mod inner {
                 },
             )
             .await?;
-            match bux_proto::recv::<Response>(&mut *stream).await? {
-                Response::TarData(data) => Ok(data),
-                Response::Error(e) => Err(io::Error::other(e)),
-                _ => Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "unexpected response",
-                )),
+            recv_download_chunks(&mut *stream).await
+        }
+
+        /// Receives chunked download data (Chunk + EndOfStream) from the guest.
+        async fn recv_download_chunks(
+            stream: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin),
+        ) -> io::Result<Vec<u8>> {
+            let mut buf = Vec::new();
+            loop {
+                match bux_proto::recv::<Response>(stream).await? {
+                    Response::Chunk(data) => buf.extend(data),
+                    Response::EndOfStream => return Ok(buf),
+                    Response::Error(e) => return Err(io::Error::other(e)),
+                    _ => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "expected Chunk or EndOfStream",
+                        ));
+                    }
+                }
             }
         }
 
