@@ -518,7 +518,7 @@ pub fn read_env_file(path: &str) -> Result<Vec<String>> {
 macro_rules! unix_only_stub {
     (sync: $($name:ident($($arg:ident: $ty:ty),*));+ $(;)?) => {
         $(
-            pub fn $name($(_: $ty),*) -> Result<()> {
+            pub fn $name($(_: &$ty),*) -> Result<()> {
                 anyhow::bail!("VM management requires Linux or macOS")
             }
         )+

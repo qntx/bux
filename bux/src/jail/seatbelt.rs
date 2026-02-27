@@ -7,25 +7,33 @@ use std::fmt::Write;
 use std::path::Path;
 use std::process::Command;
 
-use super::JailConfig;
+use super::{JailConfig, Sandbox};
 
 /// Path to the macOS sandbox-exec binary (pre-installed on all macOS versions).
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
-/// Build a sandbox-exec-wrapped command, or `None` if sandbox-exec is missing.
-pub fn wrap(shim: &Path, config_path: &Path, config: &JailConfig) -> Option<Command> {
-    if !Path::new(SANDBOX_EXEC).is_file() {
-        return None;
+/// macOS seatbelt sandbox via `sandbox-exec`.
+///
+/// Generates a deny-default SBPL profile allowing only the minimal
+/// filesystem and process access needed by bux-shim.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SeatbeltSandbox;
+
+impl Sandbox for SeatbeltSandbox {
+    fn wrap(&self, shim: &Path, config_path: &Path, jail: &JailConfig) -> Option<Command> {
+        if !Path::new(SANDBOX_EXEC).is_file() {
+            return None;
+        }
+
+        let profile = generate_profile(shim, config_path, jail);
+
+        let mut cmd = Command::new(SANDBOX_EXEC);
+        cmd.args(["-p", &profile, "--"]);
+        cmd.arg(shim);
+        cmd.arg(config_path);
+
+        Some(cmd)
     }
-
-    let profile = generate_profile(shim, config_path, config);
-
-    let mut cmd = Command::new(SANDBOX_EXEC);
-    cmd.args(["-p", &profile, "--"]);
-    cmd.arg(shim);
-    cmd.arg(config_path);
-
-    Some(cmd)
 }
 
 /// Generate a deny-default SBPL profile string.

@@ -34,6 +34,15 @@ pub enum Error {
     #[error("{0}")]
     Ambiguous(String),
 
+    /// An operation was attempted in an invalid VM state.
+    #[error("{0}")]
+    InvalidState(String),
+
+    /// Unix syscall error (via nix).
+    #[cfg(unix)]
+    #[error(transparent)]
+    Nix(#[from] nix::errno::Errno),
+
     /// Ext4 filesystem image creation error.
     #[cfg(unix)]
     #[error(transparent)]

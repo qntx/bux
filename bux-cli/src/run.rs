@@ -301,7 +301,23 @@ async fn spawn_vm(
     }
 
     eprintln!("{id}");
-    handle.wait().await?;
+
+    // Race: wait for VM exit vs. SIGTERM/SIGINT for graceful shutdown.
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+
+    tokio::select! {
+        result = handle.wait() => result?,
+        _ = sigterm.recv() => {
+            eprintln!("\n[bux] received SIGTERM, stopping VM {id}...");
+            handle.stop().await?;
+        }
+        _ = sigint.recv() => {
+            eprintln!("\n[bux] received SIGINT, stopping VM {id}...");
+            handle.stop().await?;
+        }
+    }
+
     Ok(())
 }
 

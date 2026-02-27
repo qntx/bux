@@ -5,7 +5,16 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
+use crate::disk::DiskFormat;
+
 /// VM lifecycle status.
+///
+/// ```text
+/// Creating ──► Running ──► Stopping ──► Stopped
+///                │  ▲                      ▲
+///                ▼  │                      │
+///              Paused ────────────────────►┘
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Status {
@@ -18,8 +27,42 @@ pub enum Status {
     /// Filesystem may also be quiesced (FIFREEZE) for point-in-time consistency.
     /// Resume with [`VmHandle::resume()`](crate::runtime::VmHandle::resume).
     Paused,
+    /// A graceful shutdown has been requested; waiting for the process to exit.
+    Stopping,
     /// VM has been stopped or exited.
     Stopped,
+}
+
+impl Status {
+    /// Returns `true` if the VM process may still be alive.
+    pub const fn is_active(self) -> bool {
+        matches!(self, Self::Running | Self::Paused | Self::Stopping)
+    }
+
+    /// Returns `true` if `exec()` can be called.
+    pub const fn can_exec(self) -> bool {
+        matches!(self, Self::Running)
+    }
+
+    /// Returns `true` if `stop()` can be called.
+    pub const fn can_stop(self) -> bool {
+        matches!(self, Self::Running | Self::Paused)
+    }
+
+    /// Returns `true` if `pause()` can be called.
+    pub const fn can_pause(self) -> bool {
+        matches!(self, Self::Running)
+    }
+
+    /// Returns `true` if `resume()` can be called.
+    pub const fn can_resume(self) -> bool {
+        matches!(self, Self::Paused)
+    }
+
+    /// Returns `true` if `remove()` can be called.
+    pub const fn can_remove(self) -> bool {
+        matches!(self, Self::Stopped)
+    }
 }
 
 /// A virtio-fs shared directory.
@@ -62,14 +105,14 @@ pub struct VmConfig {
     /// Root filesystem disk image path (block device-based).
     #[serde(default)]
     pub root_disk: Option<String>,
-    /// Disk image format for `root_disk` (defaults to `"raw"`).
-    #[serde(default = "default_disk_format")]
-    pub disk_format: String,
+    /// Disk image format for `root_disk`.
+    #[serde(default)]
+    pub disk_format: DiskFormat,
     /// Shared base image path for QCOW2 overlay creation.
     ///
     /// When set, [`Runtime::spawn()`] creates a per-VM QCOW2 overlay backed
     /// by this image, then replaces `root_disk` with the overlay path and
-    /// sets `disk_format` to `"qcow2"`. Consumed during spawn.
+    /// sets `disk_format` to [`DiskFormat::Qcow2`]. Consumed during spawn.
     #[serde(default)]
     pub base_disk: Option<String>,
 
@@ -122,11 +165,6 @@ pub struct VmConfig {
     /// Remove VM state automatically when it stops.
     #[serde(default)]
     pub auto_remove: bool,
-}
-
-/// Default disk format string for serde deserialization.
-fn default_disk_format() -> String {
-    "raw".to_owned()
 }
 
 /// Persisted state of a managed VM.
@@ -363,6 +401,7 @@ mod db {
             Status::Creating => "creating",
             Status::Running => "running",
             Status::Paused => "paused",
+            Status::Stopping => "stopping",
             Status::Stopped => "stopped",
         }
     }
@@ -373,6 +412,7 @@ mod db {
             "creating" => Status::Creating,
             "running" => Status::Running,
             "paused" => Status::Paused,
+            "stopping" => Status::Stopping,
             _ => Status::Stopped,
         }
     }
@@ -414,7 +454,7 @@ mod tests {
                 ram_mib: 512,
                 rootfs: None,
                 root_disk: None,
-                disk_format: "raw".to_owned(),
+                disk_format: DiskFormat::default(),
                 base_disk: None,
                 exec_path: Some("/bin/sh".to_owned()),
                 exec_args: vec![],

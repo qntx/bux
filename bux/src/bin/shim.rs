@@ -65,21 +65,31 @@ fn main() {
 /// When the parent process dies (or drops its `Keepalive`), the write end
 /// of the pipe closes. This thread detects `POLLHUP` and exits the process.
 #[cfg(unix)]
-#[allow(unsafe_code)]
 fn start_watchdog() {
+    use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd};
+
     let Ok(fd_str) = std::env::var(bux::watchdog::ENV_WATCHDOG_FD) else {
         return; // no watchdog configured (e.g. detach mode)
     };
-    let Ok(fd) = fd_str.parse::<i32>() else {
+    let Ok(fd_num) = fd_str.parse::<i32>() else {
         eprintln!("[bux-shim] invalid BUX_WATCHDOG_FD: {fd_str}");
         return;
     };
 
+    // SAFETY: fd_num was created by the parent via pipe() and preserved
+    // across exec by not setting O_CLOEXEC on the read end.
+    #[allow(unsafe_code)]
+    let owned_fd = unsafe { OwnedFd::from_raw_fd(fd_num) };
+
     if let Err(e) = std::thread::Builder::new()
         .name("watchdog".into())
         .spawn(move || {
-            // SAFETY: fd was validated by the parent and preserved across exec.
-            unsafe { bux::watchdog::wait_for_parent_death(fd) };
+            // Borrow the owned FD for the blocking poll.
+            // SAFETY: owned_fd lives for the duration of this thread.
+            #[allow(unsafe_code)]
+            let borrowed = unsafe { BorrowedFd::borrow_raw(fd_num) };
+            bux::watchdog::wait_for_parent_death(borrowed);
+            drop(owned_fd); // ensure lifetime extends through poll
             eprintln!("[bux-shim] parent process died, shutting down");
             std::process::exit(0);
         })

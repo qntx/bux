@@ -8,14 +8,16 @@
 //!
 //! This module is only available on Unix (Linux / macOS).
 
-#![allow(unsafe_code)]
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use std::{fs, io};
 
 use bux_proto::{AGENT_PORT, ExecStart};
+use nix::fcntl::{Flock, FlockArg};
+use nix::sys::signal::{self, Signal};
+use nix::sys::wait::{WaitStatus, waitpid};
+use nix::unistd::Pid;
 
 use crate::Result;
 use crate::client::{Client, ExecHandle, ExecOutput};
@@ -28,6 +30,9 @@ use crate::watchdog::{self, Keepalive};
 /// Manages the lifecycle of bux micro-VMs.
 ///
 /// State is stored in `{data_dir}/bux.db` (SQLite).
+///
+/// A file lock (`bux.lock`) prevents multiple `Runtime` instances from
+/// operating on the same data directory concurrently.
 #[derive(Debug)]
 pub struct Runtime {
     /// SQLite state database.
@@ -36,13 +41,30 @@ pub struct Runtime {
     socks_dir: PathBuf,
     /// Disk image manager.
     disk: DiskManager,
+    /// Advisory lock on `{data_dir}/bux.lock` — held for the lifetime of this
+    /// `Runtime`. Prevents concurrent access from multiple processes.
+    _lock: Flock<fs::File>,
 }
 
 impl Runtime {
     /// Opens (or creates) the runtime data directory and database.
+    ///
+    /// Acquires an exclusive file lock (`bux.lock`) to prevent multiple
+    /// processes from corrupting state. Returns an error if another
+    /// `Runtime` already holds the lock.
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self> {
         let base = data_dir.as_ref();
         fs::create_dir_all(base)?;
+
+        // Acquire exclusive lock — prevents concurrent access.
+        let lock_file = fs::File::create(base.join("bux.lock"))?;
+        let lock =
+            Flock::lock(lock_file, FlockArg::LockExclusiveNonblock).map_err(|(_, errno)| {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("another bux runtime is using {}: {errno}", base.display()),
+                )
+            })?;
 
         let socks_dir = base.join("socks");
         fs::create_dir_all(&socks_dir)?;
@@ -57,6 +79,7 @@ impl Runtime {
             db: Arc::new(db),
             socks_dir,
             disk,
+            _lock: lock,
         })
     }
 
@@ -103,7 +126,7 @@ impl Runtime {
         if let Some(ref base) = config.base_disk {
             let overlay = self.disk.create_overlay(Path::new(base), &id)?;
             config.root_disk = Some(overlay.to_string_lossy().into_owned());
-            "qcow2".clone_into(&mut config.disk_format);
+            config.disk_format = crate::disk::DiskFormat::Qcow2;
             config.base_disk = None; // consumed — shim doesn't need this
         }
 
@@ -128,14 +151,16 @@ impl Runtime {
                 .map(|v| PathBuf::from(&v.path))
                 .collect(),
             watchdog_fd: Some(std::os::unix::io::AsRawFd::as_raw_fd(&shim_wd_fd)),
+            sandbox: None,         // use auto-detected platform sandbox
+            resource_limits: None, // TODO: expose via VmBuilder
         };
-        let child = jail::spawn(&shim, &config_path, &jail_config).map_err(|e| {
+        let result = jail::spawn(&shim, &config_path, &jail_config, &id).map_err(|e| {
             let _ = fs::remove_file(&config_path);
             io::Error::new(e.kind(), format!("failed to spawn {}: {e}", shim.display()))
         })?;
 
         #[allow(clippy::cast_possible_wrap)]
-        let child_pid = child.id() as i32;
+        let child_pid = result.child.id() as i32;
 
         let vm_state = VmState {
             id,
@@ -173,7 +198,7 @@ impl Runtime {
 
         for mut vm in vms {
             // Reconcile: mark dead processes as stopped.
-            if matches!(vm.status, Status::Running | Status::Paused) && !is_pid_alive(vm.pid) {
+            if vm.status.is_active() && !is_pid_alive(vm.pid) {
                 vm.status = Status::Stopped;
                 let _ = self.db.update_status(&vm.id, Status::Stopped);
             }
@@ -200,7 +225,7 @@ impl Runtime {
         };
 
         // Reconcile liveness.
-        if matches!(state.status, Status::Running | Status::Paused) && !is_pid_alive(state.pid) {
+        if state.status.is_active() && !is_pid_alive(state.pid) {
             state.status = Status::Stopped;
             let _ = self.db.update_status(&state.id, Status::Stopped);
         }
@@ -232,10 +257,10 @@ impl Runtime {
         let handle = self.get(id_or_name)?;
         let state = handle.state();
 
-        if state.status == Status::Running && is_pid_alive(state.pid) {
-            return Err(crate::Error::Io(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("VM {} is still running; stop it first", state.id),
+        if !state.status.can_remove() {
+            return Err(crate::Error::InvalidState(format!(
+                "VM {} cannot be removed (status: {:?}); stop it first",
+                state.id, state.status
             )));
         }
 
@@ -308,6 +333,17 @@ impl VmHandle {
     /// Graceful shutdown: sends `Shutdown` request, waits up to `timeout`,
     /// then falls back to `SIGKILL`.
     pub async fn stop_timeout(&mut self, timeout: Duration) -> Result<()> {
+        if !self.state.status.can_stop() {
+            return Err(crate::Error::InvalidState(format!(
+                "VM {} cannot be stopped (status: {:?})",
+                self.state.id, self.state.status
+            )));
+        }
+
+        // Transition to Stopping before sending the shutdown request.
+        self.state.status = Status::Stopping;
+        self.db.update_status(&self.state.id, Status::Stopping)?;
+
         let _ = self.client.shutdown().await;
 
         let pid = self.state.pid;
@@ -325,9 +361,7 @@ impl VmHandle {
 
     /// Sends `SIGKILL` to the VM process.
     pub fn kill(&mut self) -> Result<()> {
-        unsafe {
-            libc::kill(self.state.pid, libc::SIGKILL);
-        }
+        let _ = signal::kill(Pid::from_raw(self.state.pid), Signal::SIGKILL);
         self.mark_stopped()
     }
 
@@ -341,15 +375,15 @@ impl VmHandle {
     /// The guest's filesystems are frozen (FIFREEZE) for point-in-time
     /// consistency before the VM process is stopped.
     pub async fn pause(&mut self) -> Result<()> {
-        if self.state.status != Status::Running {
-            return Err(crate::Error::Io(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("VM {} is not running", self.state.id),
+        if !self.state.status.can_pause() {
+            return Err(crate::Error::InvalidState(format!(
+                "VM {} cannot be paused (status: {:?})",
+                self.state.id, self.state.status
             )));
         }
         // Quiesce guest filesystems before freezing the process.
         let _ = self.client.quiesce().await;
-        unsafe { libc::kill(self.state.pid, libc::SIGSTOP) };
+        signal::kill(Pid::from_raw(self.state.pid), Signal::SIGSTOP)?;
         self.state.status = Status::Paused;
         self.db.update_status(&self.state.id, Status::Paused)?;
         Ok(())
@@ -357,13 +391,13 @@ impl VmHandle {
 
     /// Resumes a paused VM by sending `SIGCONT` and thawing its filesystems.
     pub async fn resume(&mut self) -> Result<()> {
-        if self.state.status != Status::Paused {
-            return Err(crate::Error::Io(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("VM {} is not paused", self.state.id),
+        if !self.state.status.can_resume() {
+            return Err(crate::Error::InvalidState(format!(
+                "VM {} cannot be resumed (status: {:?})",
+                self.state.id, self.state.status
             )));
         }
-        unsafe { libc::kill(self.state.pid, libc::SIGCONT) };
+        signal::kill(Pid::from_raw(self.state.pid), Signal::SIGCONT)?;
         // Thaw guest filesystems after resuming the process.
         let _ = self.client.thaw().await;
         self.state.status = Status::Running;
@@ -373,12 +407,10 @@ impl VmHandle {
 
     /// Sends a POSIX signal to the VM process.
     pub fn signal(&self, sig: i32) -> Result<()> {
-        let ret = unsafe { libc::kill(self.state.pid, sig) };
-        if ret == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error().into())
-        }
+        let signal =
+            Signal::try_from(sig).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        signal::kill(Pid::from_raw(self.state.pid), signal)?;
+        Ok(())
     }
 
     /// Waits for the VM process to exit.
@@ -507,7 +539,7 @@ impl VmHandle {
 
 /// Checks if a process is alive via `kill(pid, 0)`.
 fn is_pid_alive(pid: i32) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
+    signal::kill(Pid::from_raw(pid), None).is_ok()
 }
 
 /// Blocks until a process exits.
@@ -516,10 +548,11 @@ fn is_pid_alive(pid: i32) -> bool {
 /// Falls back to `kill(pid, 0)` polling if the process is not a direct child
 /// (e.g. `ECHILD` from attached mode).
 fn wait_for_exit(pid: i32) {
+    let nix_pid = Pid::from_raw(pid);
     // Try waitpid — only succeeds for our own child processes.
-    let ret = unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
-    if ret == pid {
-        return;
+    match waitpid(nix_pid, None) {
+        Ok(WaitStatus::Exited(..)) | Ok(WaitStatus::Signaled(..)) => return,
+        _ => {}
     }
     // Not our child (ECHILD) or other error — fall back to polling.
     while is_pid_alive(pid) {
