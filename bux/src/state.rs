@@ -304,3 +304,147 @@ mod db {
 
 #[cfg(unix)]
 pub use db::StateDb;
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::time::SystemTime;
+
+    use super::*;
+
+    /// Creates a test `VmState` with the given ID and name.
+    fn test_vm(id: &str, name: Option<&str>) -> VmState {
+        VmState {
+            id: id.to_owned(),
+            name: name.map(ToOwned::to_owned),
+            pid: 1234,
+            image: Some("alpine:latest".to_owned()),
+            socket: format!("/tmp/{id}.sock").into(),
+            status: Status::Running,
+            config: VmConfig {
+                vcpus: 2,
+                ram_mib: 512,
+                rootfs: None,
+                root_disk: None,
+                exec_path: Some("/bin/sh".to_owned()),
+                exec_args: vec![],
+                env: None,
+                workdir: None,
+                ports: vec![],
+                auto_remove: false,
+            },
+            created_at: SystemTime::now(),
+        }
+    }
+
+    /// Opens an in-memory StateDb for testing.
+    fn open_test_db() -> StateDb {
+        StateDb::open(":memory:").expect("open in-memory db")
+    }
+
+    #[test]
+    fn insert_and_list() {
+        let db = open_test_db();
+        let vm = test_vm("aaa111bbb222", Some("myvm"));
+        db.insert(&vm).unwrap();
+
+        let all = db.list().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, "aaa111bbb222");
+        assert_eq!(all[0].name.as_deref(), Some("myvm"));
+        assert_eq!(all[0].pid, 1234);
+        assert_eq!(all[0].status, Status::Running);
+    }
+
+    #[test]
+    fn get_by_name() {
+        let db = open_test_db();
+        db.insert(&test_vm("aaa111", Some("alpha"))).unwrap();
+        db.insert(&test_vm("bbb222", Some("beta"))).unwrap();
+
+        let found = db.get_by_name("alpha").unwrap().unwrap();
+        assert_eq!(found.id, "aaa111");
+
+        assert!(db.get_by_name("nonexistent").unwrap().is_none());
+    }
+
+    #[test]
+    fn get_by_id_prefix() {
+        let db = open_test_db();
+        db.insert(&test_vm("abc123def456", None)).unwrap();
+        db.insert(&test_vm("xyz789000111", None)).unwrap();
+
+        // Exact match.
+        let found = db.get_by_id_prefix("abc123def456").unwrap();
+        assert_eq!(found.id, "abc123def456");
+
+        // Unique prefix.
+        let found = db.get_by_id_prefix("abc").unwrap();
+        assert_eq!(found.id, "abc123def456");
+
+        // No match → NotFound.
+        assert!(db.get_by_id_prefix("zzz").is_err());
+    }
+
+    #[test]
+    fn ambiguous_prefix() {
+        let db = open_test_db();
+        db.insert(&test_vm("abc111", None)).unwrap();
+        db.insert(&test_vm("abc222", None)).unwrap();
+
+        let err = db.get_by_id_prefix("abc").unwrap_err();
+        assert!(
+            matches!(err, crate::Error::Ambiguous(_)),
+            "expected Ambiguous, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn update_status() {
+        let db = open_test_db();
+        db.insert(&test_vm("aaa111", None)).unwrap();
+
+        db.update_status("aaa111", Status::Stopped).unwrap();
+        let vm = db.get_by_id_prefix("aaa111").unwrap();
+        assert_eq!(vm.status, Status::Stopped);
+    }
+
+    #[test]
+    fn update_name() {
+        let db = open_test_db();
+        db.insert(&test_vm("aaa111", Some("old"))).unwrap();
+
+        db.update_name("aaa111", Some("new")).unwrap();
+        assert!(db.get_by_name("old").unwrap().is_none());
+        assert!(db.get_by_name("new").unwrap().is_some());
+    }
+
+    #[test]
+    fn delete() {
+        let db = open_test_db();
+        db.insert(&test_vm("aaa111", None)).unwrap();
+        assert_eq!(db.list().unwrap().len(), 1);
+
+        db.delete("aaa111").unwrap();
+        assert_eq!(db.list().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn duplicate_name_rejected() {
+        let db = open_test_db();
+        db.insert(&test_vm("aaa111", Some("dup"))).unwrap();
+
+        let result = db.insert(&test_vm("bbb222", Some("dup")));
+        assert!(result.is_err(), "duplicate name should be rejected");
+    }
+
+    #[test]
+    fn pid_stored_as_i32() {
+        let db = open_test_db();
+        let mut vm = test_vm("aaa111", None);
+        vm.pid = -1; // Negative PID should survive round-trip.
+        db.insert(&vm).unwrap();
+
+        let loaded = db.get_by_id_prefix("aaa111").unwrap();
+        assert_eq!(loaded.pid, -1);
+    }
+}
