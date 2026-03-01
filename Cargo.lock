@@ -231,7 +231,7 @@ version = "0.6.1"
 dependencies = [
  "bux-proto",
  "libc",
- "nix",
+ "nix 0.31.2",
  "tar",
  "tokio",
  "tokio-vsock",
@@ -1362,6 +1362,18 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "memoffset",
+]
+
+[[package]]
+name = "nix"
+version = "0.31.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d6d0705320c1e6ba1d912b5e37cf18071b6c2e9b7fa8215a1e8a7651966f5d3"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]
@@ -2517,7 +2529,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2da6e4ac76cd19635dce0f98985378bb62f8044ee2ff80abd2a7334b920ed63"
 dependencies = [
  "libc",
- "nix",
+ "nix 0.30.1",
 ]
 
 [[package]]
