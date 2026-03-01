@@ -91,7 +91,7 @@ jobs:
           ls -la dist/
           tar -czf "bux-deps-${{ matrix.target }}.tar.gz" -C dist .
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: bux-deps-${{ matrix.target }}
           path: bux-deps-${{ matrix.target }}.tar.gz
