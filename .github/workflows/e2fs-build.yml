@@ -141,7 +141,7 @@ jobs:
         run: |
           tar -czf "bux-e2fs-${{ matrix.target }}.tar.gz" -C dist .
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: bux-e2fs-${{ matrix.target }}
           path: bux-e2fs-${{ matrix.target }}.tar.gz
