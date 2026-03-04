@@ -90,5 +90,22 @@ make doc        # Generate and open docs
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE)
-or [MIT License](LICENSE-MIT) at your option.
+Licensed under the [Functional Source License, Version 1.1, Apache-2.0 Future License](LICENSE.md) (FSL-1.1-ALv2).
+
+- You can use, modify, and redistribute for any purpose **except** competing use.
+- Each version automatically converts to the [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0) two years after release.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this project shall be licensed as above, without any additional terms or conditions.
+
+---
+
+<div align="center">
+
+A **[QNTX](https://qntx.fun)** open-source project.
+
+<a href="https://qntx.fun"><img alt="QNTX" width="369" src="https://raw.githubusercontent.com/qntx/.github/main/profile/qntx-banner.svg" /></a>
+
+<!--prettier-ignore-->
+Code is law. We write both.
+
+</div>

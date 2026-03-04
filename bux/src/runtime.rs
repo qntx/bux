@@ -124,7 +124,11 @@ impl Runtime {
 
         // If a base disk is specified, create a per-VM QCOW2 overlay.
         if let Some(ref base) = config.base_disk {
-            let overlay = self.disk.create_overlay(Path::new(base), &id)?;
+            let overlay = self.disk.create_overlay(
+                Path::new(base),
+                config.disk_format,
+                &id,
+            )?;
             config.root_disk = Some(overlay.to_string_lossy().into_owned());
             config.disk_format = crate::disk::DiskFormat::Qcow2;
             config.base_disk = None; // consumed — shim doesn't need this
