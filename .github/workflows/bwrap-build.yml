@@ -68,7 +68,7 @@ jobs:
         run: |
           tar -czf "bux-bwrap-${{ matrix.target }}.tar.gz" -C dist .
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: bux-bwrap-${{ matrix.target }}
           path: bux-bwrap-${{ matrix.target }}.tar.gz
