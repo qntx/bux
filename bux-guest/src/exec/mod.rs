@@ -119,7 +119,6 @@ async fn handle_pipe(
                     Ok(ExecIn::Signal(sig)) => {
                         let _ = unsafe { libc::kill(pid, sig) };
                     }
-                    Ok(ExecIn::ResizeTty(_)) => {}
                     Ok(_) => {}
                     Err(_) => {
                         // Host disconnected — kill child and collect exit status.
@@ -200,9 +199,6 @@ async fn handle_pty(
                 match host_msg {
                     Ok(ExecIn::Stdin(data)) => {
                         let _ = pty_handle.master_write.write_all(&data).await;
-                    }
-                    Ok(ExecIn::StdinClose) => {
-                        // PTY doesn't have a separate stdin EOF concept.
                     }
                     Ok(ExecIn::Signal(sig)) => {
                         let _ = unsafe { libc::kill(pid, sig) };
