@@ -274,7 +274,7 @@ fn disk_cmd(action: DiskAction) -> Result<()> {
             } else {
                 for d in &bases {
                     let path = dm.base_path(d);
-                    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    let size = std::fs::metadata(&path).map_or(0, |m| m.len());
                     println!("{:<40} {:>10}", d, human_size(size));
                 }
             }

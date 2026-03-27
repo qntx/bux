@@ -208,6 +208,12 @@ pub async fn recv_download_to_writer(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::shadow_unrelated,
+    clippy::panic
+)]
 mod tests {
     use super::*;
     use crate::{

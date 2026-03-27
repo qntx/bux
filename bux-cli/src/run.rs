@@ -294,9 +294,9 @@ async fn spawn_vm(
     let rt = crate::vm::open_runtime()?;
     let mut handle = rt.spawn(builder, image, name, auto_remove).await?;
 
-    let id = &handle.state().id;
+    let id = handle.state().id.clone();
     if detach {
-        println!("{}", handle.state().name.as_deref().unwrap_or(id));
+        println!("{}", handle.state().name.as_deref().unwrap_or(&id));
         return Ok(());
     }
 

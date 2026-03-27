@@ -26,6 +26,7 @@ pub const MAX_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
 pub const AGENT_PORT: u32 = 1024;
 
 /// First message on every new connection — identifies the operation type.
+#[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Hello {
     /// Open a control channel (ping, shutdown, quiesce, thaw).
@@ -62,6 +63,7 @@ pub enum Hello {
 }
 
 /// Guest's acknowledgment after receiving [`Hello`].
+#[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum HelloAck {
     /// Control channel accepted.
@@ -83,6 +85,7 @@ pub enum HelloAck {
 }
 
 /// Host → guest on a control connection.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum ControlReq {
     /// Health check.
@@ -96,6 +99,7 @@ pub enum ControlReq {
 }
 
 /// Guest → host on a control connection.
+#[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ControlResp {
     /// Reply to [`ControlReq::Ping`].
@@ -122,6 +126,7 @@ pub enum ControlResp {
 }
 
 /// Command execution parameters, sent inside [`Hello::Exec`].
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecStart {
     /// Executable path or name.
@@ -218,6 +223,7 @@ impl ExecStart {
 }
 
 /// PTY dimensions for interactive terminal sessions.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TtyConfig {
     /// Terminal height in rows.
@@ -230,7 +236,21 @@ pub struct TtyConfig {
     pub y_pixels: u16,
 }
 
+impl TtyConfig {
+    /// Creates a new TTY configuration with the given dimensions.
+    #[must_use]
+    pub const fn new(rows: u16, cols: u16, x_pixels: u16, y_pixels: u16) -> Self {
+        Self {
+            rows,
+            cols,
+            x_pixels,
+            y_pixels,
+        }
+    }
+}
+
 /// Host → guest messages on an exec connection (after [`HelloAck::ExecStarted`]).
+#[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ExecIn {
     /// Raw stdin data for the child process.
@@ -244,6 +264,7 @@ pub enum ExecIn {
 }
 
 /// Guest → host messages on an exec connection (after [`HelloAck::ExecStarted`]).
+#[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ExecOut {
     /// A chunk of stdout data.
@@ -268,6 +289,7 @@ pub enum ExecOut {
 }
 
 /// Host → guest data chunk for upload streams ([`Hello::FileWrite`], [`Hello::CopyIn`]).
+#[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Upload {
     /// A data chunk.
@@ -277,6 +299,7 @@ pub enum Upload {
 }
 
 /// Guest → host reply after an upload completes.
+#[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum UploadResult {
     /// Upload succeeded.
@@ -286,6 +309,7 @@ pub enum UploadResult {
 }
 
 /// Guest → host data chunk for download streams ([`Hello::FileRead`], [`Hello::CopyOut`]).
+#[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Download {
     /// A data chunk.
@@ -297,6 +321,7 @@ pub enum Download {
 }
 
 /// Structured error with machine-readable code and human-readable message.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorInfo {
     /// Machine-readable error classification.
@@ -349,6 +374,7 @@ impl std::fmt::Display for ErrorInfo {
 impl std::error::Error for ErrorInfo {}
 
 /// Machine-readable error codes.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ErrorCode {
     /// Protocol version mismatch.

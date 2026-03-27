@@ -104,12 +104,7 @@ mod inner {
         ) -> io::Result<()> {
             bux_proto::send(
                 &mut self.writer,
-                &ExecIn::ResizeTty(bux_proto::TtyConfig {
-                    rows,
-                    cols,
-                    x_pixels,
-                    y_pixels,
-                }),
+                &ExecIn::ResizeTty(bux_proto::TtyConfig::new(rows, cols, x_pixels, y_pixels)),
             )
             .await
         }
@@ -149,6 +144,7 @@ mod inner {
                         });
                     }
                     ExecOut::Error(e) => return Err(io::Error::other(e)),
+                    _ => {}
                 }
             }
         }
@@ -183,6 +179,7 @@ mod inner {
                         });
                     }
                     ExecOut::Error(e) => return Err(io::Error::other(e)),
+                    _ => {}
                 }
             }
         }
@@ -485,6 +482,7 @@ mod inner {
             match bux_proto::recv::<UploadResult>(stream).await? {
                 UploadResult::Ok => Ok(()),
                 UploadResult::Error(e) => Err(io::Error::other(e)),
+                _ => Err(io::Error::other("unexpected upload result")),
             }
         }
     }

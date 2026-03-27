@@ -9,6 +9,7 @@
 //!   rootfs/{digest}/   — extracted rootfs directories (keyed by manifest digest)
 //! ```
 
+use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -154,7 +155,12 @@ impl Store {
     pub fn verify_layer(&self, digest: &str) -> crate::Result<bool> {
         let path = self.layer_path(digest);
         let data = fs::read(&path)?;
-        let computed = format!("sha256:{:x}", Sha256::digest(&data));
+        let hash = Sha256::digest(&data);
+        let hex = hash.iter().fold(String::new(), |mut acc, b| {
+            let _ = write!(acc, "{b:02x}");
+            acc
+        });
+        let computed = format!("sha256:{hex}");
         Ok(computed == digest)
     }
 

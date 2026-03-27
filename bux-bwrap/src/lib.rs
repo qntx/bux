@@ -10,8 +10,7 @@
 //!
 //! [bubblewrap]: https://github.com/containers/bubblewrap
 
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::path::Path;
 
 /// Build-time path to the bwrap binary (baked in by build.rs).
 #[cfg(target_os = "linux")]
@@ -51,7 +50,7 @@ pub fn path() -> Option<&'static Path> {
 
 /// On non-Linux platforms, bwrap is unavailable.
 #[cfg(not(target_os = "linux"))]
-pub fn path() -> Option<&'static Path> {
+pub const fn path() -> Option<&'static Path> {
     None
 }
 

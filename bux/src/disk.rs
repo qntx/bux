@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 
 /// Parsed QCOW2 header information extracted via `qemu-img info`.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct QcowHeader {
     /// Format version (2 or 3).
@@ -346,11 +347,11 @@ mod qcow2 {
     //! - [`flatten`] — merges a backing chain into a standalone QCOW2.
     //! - [`resize`] — changes the virtual size via `qemu-img resize`.
 
-    use std::io::{self, Read, Write};
+    use std::io::{self, Read, Seek, SeekFrom, Write};
     use std::path::Path;
     use std::process::Command;
 
-    use super::QcowHeader;
+    use super::{DiskFormat, QcowHeader};
 
     // -- Constants --
 
@@ -388,7 +389,7 @@ mod qcow2 {
     pub fn create_overlay(
         path: &Path,
         backing_file: &str,
-        backing_format: super::DiskFormat,
+        backing_format: DiskFormat,
         virtual_size: u64,
     ) -> io::Result<()> {
         let backing_bytes = backing_file.as_bytes();
@@ -621,12 +622,17 @@ mod qcow2 {
     ///
     /// This is a lightweight alternative to [`read_header`] when only the
     /// backing file path is needed (e.g. for walking a backing chain).
+    #[allow(dead_code)]
     pub fn read_backing_file(path: &Path) -> io::Result<Option<String>> {
         let mut f = std::fs::File::open(path)?;
         let mut hdr = [0u8; 20];
         f.read_exact(&mut hdr)?;
 
-        let magic = u32::from_be_bytes(hdr[0..4].try_into().unwrap());
+        let magic = u32::from_be_bytes(
+            hdr[0..4]
+                .try_into()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        );
         if magic != MAGIC {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -634,14 +640,21 @@ mod qcow2 {
             ));
         }
 
-        let bf_offset = u64::from_be_bytes(hdr[8..16].try_into().unwrap());
-        let bf_size = u32::from_be_bytes(hdr[16..20].try_into().unwrap()) as usize;
+        let bf_offset = u64::from_be_bytes(
+            hdr[8..16]
+                .try_into()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        );
+        let bf_size = u32::from_be_bytes(
+            hdr[16..20]
+                .try_into()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        ) as usize;
 
         if bf_offset == 0 || bf_size == 0 {
             return Ok(None);
         }
 
-        use std::io::{Seek, SeekFrom};
         f.seek(SeekFrom::Start(bf_offset))?;
         let mut buf = vec![0u8; bf_size];
         f.read_exact(&mut buf)?;
@@ -667,7 +680,11 @@ mod qcow2 {
         let mut chain = open_chain(src)?;
 
         let (virtual_size, cluster_bits) = match &chain[0] {
-            Layer::Qcow2 { virtual_size, cluster_bits, .. } => (*virtual_size, *cluster_bits),
+            Layer::Qcow2 {
+                virtual_size,
+                cluster_bits,
+                ..
+            } => (*virtual_size, *cluster_bits),
             Layer::Raw { .. } => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -680,7 +697,7 @@ mod qcow2 {
         let num_virtual_clusters = virtual_size.div_ceil(cluster_size);
         let l2_entries = cluster_size / 8;
         let num_l1 = num_virtual_clusters.div_ceil(l2_entries) as u32;
-        let l1_clusters = ((num_l1 as u64) * 8).div_ceil(cluster_size);
+        let l1_clusters = (u64::from(num_l1) * 8).div_ceil(cluster_size);
 
         // Output layout:
         //   Cluster 0:                           Header
@@ -689,7 +706,7 @@ mod qcow2 {
         //   Clusters data_start..:               Data clusters
         //   After data:                          Refcount table + blocks
         let l2_start = 1 + l1_clusters;
-        let data_start = l2_start + num_l1 as u64;
+        let data_start = l2_start + u64::from(num_l1);
 
         let mut output = std::fs::File::create(dst)?;
         let zero_cluster = vec![0u8; cluster_size as usize];
@@ -700,24 +717,24 @@ mod qcow2 {
 
         for vc in 0..num_virtual_clusters {
             let mut data = None;
-            for layer in chain.iter_mut() {
+            for layer in &mut chain {
                 if let Some(d) = layer.read_cluster(vc, cluster_size)? {
                     data = Some(d);
                     break;
                 }
             }
 
-            if let Some(ref d) = data {
-                if d.as_slice() != zero_cluster.as_slice() {
-                    let offset = next_data * cluster_size;
-                    output.seek(SeekFrom::Start(offset))?;
-                    output.write_all(d)?;
+            if let Some(ref d) = data
+                && d.as_slice() != zero_cluster.as_slice()
+            {
+                let offset = next_data * cluster_size;
+                output.seek(SeekFrom::Start(offset))?;
+                output.write_all(d)?;
 
-                    let l1_idx = (vc / l2_entries) as usize;
-                    let l2_idx = (vc % l2_entries) as usize;
-                    l2_tables[l1_idx][l2_idx] = offset;
-                    next_data += 1;
-                }
+                let l1_idx = (vc / l2_entries) as usize;
+                let l2_idx = (vc % l2_entries) as usize;
+                l2_tables[l1_idx][l2_idx] = offset;
+                next_data += 1;
             }
         }
 
@@ -769,7 +786,7 @@ mod qcow2 {
         // Phase 6: Write refcount blocks.
         let mut used = vec![false; total_clusters as usize];
         used[0] = true;
-        for c in 1..1 + l1_clusters {
+        for c in 1..=l1_clusters {
             used[c as usize] = true;
         }
         for (i, l2) in l2_tables.iter().enumerate() {
@@ -789,7 +806,7 @@ mod qcow2 {
             output.seek(SeekFrom::Start((rc_block_start + bi) * cluster_size))?;
             let first = (bi * rc_entries_per_block) as usize;
             for c in 0..rc_entries_per_block as usize {
-                let rc: u16 = if first + c < used.len() && used[first + c] { 1 } else { 0 };
+                let rc: u16 = u16::from(first + c < used.len() && used[first + c]);
                 output.write_all(&rc.to_be_bytes())?;
             }
         }
@@ -821,14 +838,20 @@ mod qcow2 {
     enum Layer {
         /// A QCOW2 layer with L1/L2 indirection.
         Qcow2 {
+            /// Open file handle for the QCOW2 image.
             file: std::fs::File,
+            /// Cluster size exponent (log2).
             cluster_bits: u32,
+            /// Virtual disk size in bytes.
             virtual_size: u64,
+            /// L1 table entries (physical offsets to L2 tables).
             l1_table: Vec<u64>,
         },
         /// A raw (non-QCOW2) base image.
         Raw {
+            /// Open file handle for the raw image.
             file: std::fs::File,
+            /// Size of the raw image in bytes.
             size: u64,
         },
     }
@@ -838,9 +861,8 @@ mod qcow2 {
         ///
         /// Returns `Some(data)` if allocated, `None` to fall through to backing.
         fn read_cluster(&mut self, vc: u64, cluster_size: u64) -> io::Result<Option<Vec<u8>>> {
-            use std::io::{Seek, SeekFrom};
             match self {
-                Layer::Raw { file, size } => {
+                Self::Raw { file, size } => {
                     let offset = vc * cluster_size;
                     if offset >= *size {
                         return Ok(None);
@@ -851,7 +873,12 @@ mod qcow2 {
                     file.read_exact(&mut buf[..remaining])?;
                     Ok(Some(buf))
                 }
-                Layer::Qcow2 { file, cluster_bits, l1_table, .. } => {
+                Self::Qcow2 {
+                    file,
+                    cluster_bits,
+                    l1_table,
+                    ..
+                } => {
                     let cs = 1u64 << *cluster_bits;
                     let l2_entries = cs / 8;
                     let l1_idx = (vc / l2_entries) as usize;
@@ -929,7 +956,10 @@ mod qcow2 {
             file.read_exact(&mut l1_buf)?;
             let l1_table: Vec<u64> = l1_buf
                 .chunks_exact(8)
-                .map(|c| u64::from_be_bytes(c.try_into().unwrap()))
+                .map(|c| {
+                    let arr: [u8; 8] = [c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]];
+                    u64::from_be_bytes(arr)
+                })
                 .collect();
 
             // Read backing file path.
@@ -937,14 +967,20 @@ mod qcow2 {
                 file.seek(SeekFrom::Start(bf_offset))?;
                 let mut buf = vec![0u8; bf_size];
                 file.read_exact(&mut buf)?;
-                Some(String::from_utf8(buf).map_err(|e| {
-                    io::Error::new(io::ErrorKind::InvalidData, e)
-                })?)
+                Some(
+                    String::from_utf8(buf)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+                )
             } else {
                 None
             };
 
-            chain.push(Layer::Qcow2 { file, cluster_bits, virtual_size, l1_table });
+            chain.push(Layer::Qcow2 {
+                file,
+                cluster_bits,
+                virtual_size,
+                l1_table,
+            });
 
             match backing {
                 Some(bp) => current = std::path::PathBuf::from(bp),
@@ -960,13 +996,27 @@ mod qcow2 {
     /// Reads a big-endian `u32` from `buf` at `offset`.
     #[inline]
     fn read_be32(buf: &[u8], offset: usize) -> u32 {
-        u32::from_be_bytes(buf[offset..offset + 4].try_into().expect("4-byte slice"))
+        u32::from_be_bytes([
+            buf[offset],
+            buf[offset + 1],
+            buf[offset + 2],
+            buf[offset + 3],
+        ])
     }
 
     /// Reads a big-endian `u64` from `buf` at `offset`.
     #[inline]
     fn read_be64(buf: &[u8], offset: usize) -> u64 {
-        u64::from_be_bytes(buf[offset..offset + 8].try_into().expect("8-byte slice"))
+        u64::from_be_bytes([
+            buf[offset],
+            buf[offset + 1],
+            buf[offset + 2],
+            buf[offset + 3],
+            buf[offset + 4],
+            buf[offset + 5],
+            buf[offset + 6],
+            buf[offset + 7],
+        ])
     }
 
     /// Writes a big-endian `u16` at `offset` into `buf`.
@@ -996,9 +1046,10 @@ mod qcow2 {
     // -- Tests --
 
     #[cfg(test)]
-    #[allow(clippy::unwrap_used)]
+    #[allow(clippy::unwrap_used, clippy::shadow_unrelated)]
     mod tests {
         use super::*;
+        use crate::disk::DiskFormat;
 
         #[test]
         fn creates_valid_qcow2_header() {
@@ -1008,7 +1059,7 @@ mod qcow2 {
             let backing = "/tmp/base.raw";
             let vsize: u64 = 1 << 30; // 1 GiB
 
-            create_overlay(&path, backing, super::DiskFormat::Raw, vsize).unwrap();
+            create_overlay(&path, backing, DiskFormat::Raw, vsize).unwrap();
 
             // Verify via read_header.
             let hdr = read_header(&path).unwrap();
@@ -1055,7 +1106,7 @@ mod qcow2 {
             let path = dir.join("big.qcow2");
             let vsize: u64 = 100 << 30; // 100 GiB
 
-            create_overlay(&path, "/tmp/big.raw", super::DiskFormat::Raw, vsize).unwrap();
+            create_overlay(&path, "/tmp/big.raw", DiskFormat::Raw, vsize).unwrap();
 
             let hdr = read_header(&path).unwrap();
             // 100 GiB / 512 MiB per L1 entry = 200 entries.
@@ -1098,7 +1149,7 @@ mod qcow2 {
             let path = dir.join("child.qcow2");
             let vsize: u64 = 1 << 30;
 
-            create_overlay(&path, "/tmp/base.qcow2", super::DiskFormat::Qcow2, vsize).unwrap();
+            create_overlay(&path, "/tmp/base.qcow2", DiskFormat::Qcow2, vsize).unwrap();
 
             let hdr = read_header(&path).unwrap();
             assert_eq!(hdr.backing_file.as_deref(), Some("/tmp/base.qcow2"));
@@ -1113,7 +1164,7 @@ mod qcow2 {
             let _ = std::fs::create_dir_all(&dir);
             let path = dir.join("overlay.qcow2");
 
-            create_overlay(&path, "/data/base.raw", super::DiskFormat::Raw, 1 << 30).unwrap();
+            create_overlay(&path, "/data/base.raw", DiskFormat::Raw, 1 << 30).unwrap();
 
             let bf = read_backing_file(&path).unwrap();
             assert_eq!(bf.as_deref(), Some("/data/base.raw"));
@@ -1168,7 +1219,7 @@ mod qcow2 {
             create_overlay(
                 &child,
                 &abs_base.to_string_lossy(),
-                super::DiskFormat::Raw,
+                DiskFormat::Raw,
                 raw_size as u64,
             )
             .unwrap();
