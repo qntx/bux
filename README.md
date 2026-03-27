@@ -1,6 +1,6 @@
 <!-- markdownlint-disable MD033 MD041 MD036 -->
 
-# bux
+# Bux
 
 Embedded micro-VM sandbox for running AI agents.
 

@@ -82,10 +82,7 @@ fn obtain_headers(target: &str, out_dir: &Path) -> PathBuf {
             return inc;
         }
         // Fall through to download.
-        eprintln!(
-            "bux-e2fs: BUX_E2FS_DIR set but {}/include not found, downloading",
-            dir
-        );
+        eprintln!("bux-e2fs: BUX_E2FS_DIR set but {dir}/include not found, downloading");
     }
 
     // Reuse the library download — headers are in the same archive.

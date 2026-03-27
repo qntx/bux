@@ -124,11 +124,9 @@ impl Runtime {
 
         // If a base disk is specified, create a per-VM QCOW2 overlay.
         if let Some(ref base) = config.base_disk {
-            let overlay = self.disk.create_overlay(
-                Path::new(base),
-                config.disk_format,
-                &id,
-            )?;
+            let overlay = self
+                .disk
+                .create_overlay(Path::new(base), config.disk_format, &id)?;
             config.root_disk = Some(overlay.to_string_lossy().into_owned());
             config.disk_format = crate::disk::DiskFormat::Qcow2;
             config.base_disk = None; // consumed — shim doesn't need this
@@ -554,9 +552,8 @@ fn is_pid_alive(pid: i32) -> bool {
 fn wait_for_exit(pid: i32) {
     let nix_pid = Pid::from_raw(pid);
     // Try waitpid — only succeeds for our own child processes.
-    match waitpid(nix_pid, None) {
-        Ok(WaitStatus::Exited(..)) | Ok(WaitStatus::Signaled(..)) => return,
-        _ => {}
+    if let Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..)) = waitpid(nix_pid, None) {
+        return;
     }
     // Not our child (ECHILD) or other error — fall back to polling.
     while is_pid_alive(pid) {

@@ -48,6 +48,7 @@ pub trait Sandbox: std::fmt::Debug + Send + Sync {
 ///
 /// Pre-exec hardening (FD cleanup, die-with-parent) is always applied
 /// regardless of sandbox choice.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoopSandbox;
 
@@ -60,6 +61,7 @@ impl Sandbox for NoopSandbox {
 }
 
 /// cgroup v2 resource limits for VM processes.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct ResourceLimits {
     /// Maximum CPU bandwidth as a fraction (e.g. 2.0 = 2 cores).
@@ -71,6 +73,7 @@ pub struct ResourceLimits {
 }
 
 /// Sandbox configuration for a single VM spawn.
+#[non_exhaustive]
 #[derive(Debug)]
 pub struct JailConfig {
     /// Path to the rootfs directory (if using directory-based root).
@@ -112,7 +115,7 @@ pub fn spawn(
     shim: &Path,
     config_path: &Path,
     config: &JailConfig,
-    vm_id: &str,
+    _vm_id: &str,
 ) -> io::Result<SpawnResult> {
     let mut cmd = build_command(shim, config_path, config);
     cmd.stdin(Stdio::null());
@@ -154,10 +157,10 @@ pub fn spawn(
 /// Build the sandboxed `Command` using the configured (or auto-detected) sandbox.
 fn build_command(shim: &Path, config_path: &Path, config: &JailConfig) -> Command {
     // Use explicit sandbox override if provided.
-    if let Some(ref sandbox) = config.sandbox {
-        if let Some(cmd) = sandbox.wrap(shim, config_path, config) {
-            return cmd;
-        }
+    if let Some(ref sandbox) = config.sandbox
+        && let Some(cmd) = sandbox.wrap(shim, config_path, config)
+    {
+        return cmd;
     }
 
     // Auto-detect platform sandbox.

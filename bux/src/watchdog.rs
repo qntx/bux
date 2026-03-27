@@ -8,7 +8,7 @@
 //! `PR_SET_PDEATHSIG` which is Linux-only.
 
 use std::io;
-use std::os::fd::{AsBorrowedFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use nix::fcntl::{FcntlArg, FdFlag, fcntl};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
@@ -50,13 +50,13 @@ pub fn wait_for_parent_death(fd: BorrowedFd<'_>) {
     loop {
         match poll(&mut pfd, PollTimeout::NONE) {
             Ok(n) if n > 0 => {
-                if let Some(revents) = pfd[0].revents() {
-                    if revents.contains(PollFlags::POLLHUP) {
-                        return;
-                    }
+                if let Some(revents) = pfd[0].revents()
+                    && revents.contains(PollFlags::POLLHUP)
+                {
+                    return;
                 }
             }
-            Err(nix::errno::Errno::EINTR) => continue,
+            Err(nix::errno::Errno::EINTR) => {}
             Err(_) => return, // fatal poll error — treat as parent death
             _ => {}
         }
