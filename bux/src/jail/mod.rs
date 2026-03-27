@@ -16,7 +16,7 @@ mod pre_exec;
 #[cfg(target_os = "linux")]
 mod bwrap;
 #[cfg(target_os = "linux")]
-pub(crate) mod cgroup;
+pub mod cgroup;
 #[cfg(target_os = "macos")]
 mod seatbelt;
 
@@ -103,6 +103,7 @@ pub struct SpawnResult {
     /// cgroup guard — holds the cgroup alive; cleaned up on drop.
     /// `None` on non-Linux platforms or when no resource limits are set.
     #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
     pub cgroup: Option<cgroup::CgroupGuard>,
 }
 

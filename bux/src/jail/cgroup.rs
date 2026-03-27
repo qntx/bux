@@ -51,12 +51,16 @@ pub fn create(vm_id: &str, limits: &ResourceLimits) -> io::Result<CgroupGuard> {
 
     // Enable controllers in the parent if needed.
     let parent = Path::new(CGROUP_ROOT).join("bux");
-    enable_controllers(&parent)?;
+    enable_controllers(&parent);
 
     // Apply CPU limit via cpu.max: "$QUOTA $PERIOD"
     if let Some(cores) = limits.cpu_cores {
         let period: u64 = 100_000; // 100ms in microseconds
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
         let quota = (cores * period as f64) as u64;
         let value = format!("{quota} {period}");
         write_cgroup_file(&cgroup_dir, "cpu.max", &value)?;
@@ -80,20 +84,14 @@ pub fn add_pid(guard: &CgroupGuard, pid: i32) -> io::Result<()> {
     write_cgroup_file(&guard.path, "cgroup.procs", &pid.to_string())
 }
 
-/// Returns the cgroup directory path.
-pub fn path(guard: &CgroupGuard) -> &Path {
-    &guard.path
-}
-
 /// Enable cpu and memory controllers in the parent cgroup.
-fn enable_controllers(parent: &Path) -> io::Result<()> {
+fn enable_controllers(parent: &Path) {
     let subtree_control = parent.join("cgroup.subtree_control");
     if subtree_control.exists() {
         // Best-effort — may fail if controllers are already enabled or
         // if the user lacks permission.
         let _ = fs::write(&subtree_control, "+cpu +memory");
     }
-    Ok(())
 }
 
 /// Write a value to a cgroup control file.
