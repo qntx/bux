@@ -106,5 +106,6 @@ async fn session(stream: tokio_vsock::VsockStream) -> io::Result<()> {
             w.flush().await?;
             files::handle_copy_out(&mut w, &path, follow_symlinks).await
         }
+        _ => Err(io::Error::other("unsupported hello variant")),
     }
 }
