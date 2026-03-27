@@ -56,9 +56,8 @@ jobs:
           # Configure for static-only, minimal feature set.
           # --enable-libuuid: use bundled libuuid (avoids system util-linux dep).
           # --disable-*: strip everything we don't need.
-          # ac_cv_header_archive_h=no: tell autoconf that archive.h is
-          # unavailable so create_inode.c never references
-          # __populate_fs_from_tar (which requires libarchive).
+          # ac_cv_header_archive_h=no: ensure create_inode_libarchive.c
+          # compiles to a no-op stub instead of pulling in libarchive.
           ./configure \
             ac_cv_header_archive_h=no \
             --disable-nls \
@@ -79,19 +78,20 @@ jobs:
           # Build core libraries (produces .a files in lib/*/).
           make -j$(getconf _NPROCESSORS_ONLN) libs
 
-          # Build create_inode.o from misc/ — this implements populate_fs()
-          # which is the core of `mke2fs -d <dir>`.
+          # Build create_inode objects from misc/.
           #
-          # create_inode.c references one external symbol we must stub:
-          #   - no_copy_xattrs: global int, normally defined in mke2fs.c
+          # populate_fs() → populate_fs2() unconditionally calls
+          # __populate_fs_from_tar() declared in create_inode_libarchive.h.
+          # That symbol lives in create_inode_libarchive.c — when built
+          # without HAVE_ARCHIVE_H it compiles to a stub returning an error.
+          # Both .o files must be in the archive.
           #
-          # We compile a minimal stub providing it so the resulting
-          # libcreate_inode.a is fully self-contained.
+          # We also stub no_copy_xattrs (normally in mke2fs.c).
           cd misc
-          make create_inode.o
+          make create_inode.o create_inode_libarchive.o
           printf 'int no_copy_xattrs = 1;\n' > e2fs_stubs.c
           ${CC:-cc} $CFLAGS -c -o e2fs_stubs.o e2fs_stubs.c
-          ar rcs libcreate_inode.a create_inode.o e2fs_stubs.o
+          ar rcs libcreate_inode.a create_inode.o create_inode_libarchive.o e2fs_stubs.o
           cd ..
 
           # Collect static libraries into dist/lib/.

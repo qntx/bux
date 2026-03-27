@@ -16,7 +16,7 @@ bux-proto = { version = "0.7", path = "bux-proto" }
 
 bux-bwrap = { version = "0.1", path = "bux-bwrap" }
 bux-krun = { version = "0.1", path = "bux-krun" }
-bux-e2fs = { version = "0.1.4", path = "bux-e2fs" }
+bux-e2fs = { version = "0.1.5", path = "bux-e2fs" }
 
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
