@@ -1,15 +1,16 @@
 //! VM lifecycle management: spawn, list, stop, kill, remove.
 //!
-//! The [`Runtime`] manages VM state in a SQLite database and spawns VMs
-//! as child processes via the `bux-shim` binary, which calls
-//! `krun_start_enter` to take over the child process.
+//! The [`Runtime`] manages VM state in a SQLite database, OCI images, and
+//! spawns VMs as child processes via the `bux-shim` binary.
 //!
 //! # Platform
 //!
 //! This module is only available on Unix (Linux / macOS).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 use std::{fs, io};
 
@@ -18,45 +19,87 @@ use nix::fcntl::{Flock, FlockArg};
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::Pid;
+use tracing::{debug, info, warn};
 
 use crate::Result;
-use crate::client::{Client, ExecHandle, ExecOutput};
+use crate::client::{Client, ExecHandle, ExecOutput, PongInfo};
 use crate::disk::DiskManager;
 use crate::jail::{self, JailConfig};
 use crate::state::{self, StateDb, Status, VmState, VsockPort};
 use crate::vm::VmBuilder;
 use crate::watchdog::{self, Keepalive};
 
+/// VM health status returned by [`VmHandle::health`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HealthStatus {
+    /// VM process is alive but guest agent has not responded yet.
+    Starting,
+    /// Guest agent responded to ping successfully.
+    Healthy,
+    /// Guest agent did not respond within the probe timeout.
+    Unhealthy,
+    /// VM process has exited.
+    Dead,
+}
+
+/// Global default runtime singleton.
+static DEFAULT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
+/// Ensures atexit handler is registered only once.
+static ATEXIT_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// Atexit handler: stops non-detached VMs on normal process exit.
+extern "C" fn shutdown_on_exit() {
+    if let Some(rt) = DEFAULT_RUNTIME.get() {
+        rt.shutdown_sync();
+    }
+}
+
+/// Returns the platform-default data directory for bux.
+///
+/// Checks `$BUX_HOME` first, then falls back to platform conventions:
+/// - Linux: `$XDG_DATA_HOME/bux` or `~/.local/share/bux`
+/// - macOS: `~/Library/Application Support/bux`
+fn default_data_dir() -> PathBuf {
+    if let Ok(home) = std::env::var("BUX_HOME") {
+        return PathBuf::from(home);
+    }
+    dirs::data_dir()
+        .map(|d| d.join("bux"))
+        .unwrap_or_else(|| PathBuf::from("bux"))
+}
+
 /// Manages the lifecycle of bux micro-VMs.
 ///
-/// State is stored in `{data_dir}/bux.db` (SQLite).
-///
-/// A file lock (`bux.lock`) prevents multiple `Runtime` instances from
-/// operating on the same data directory concurrently.
+/// Integrates OCI image management, disk management, and VM state
+/// persistence in a single entry point. A file lock prevents multiple
+/// `Runtime` instances from operating on the same data directory.
 #[derive(Debug)]
 pub struct Runtime {
     /// SQLite state database.
     db: Arc<StateDb>,
+    /// Root data directory for this runtime.
+    data_dir: PathBuf,
     /// Directory for Unix sockets (`{data_dir}/socks/`).
     socks_dir: PathBuf,
     /// Disk image manager.
     disk: DiskManager,
-    /// Advisory lock on `{data_dir}/bux.lock` — held for the lifetime of this
-    /// `Runtime`. Prevents concurrent access from multiple processes.
+    /// OCI image manager.
+    oci: bux_oci::Oci,
+    /// Advisory lock — held for the lifetime of this `Runtime`.
     _lock: Flock<fs::File>,
 }
 
 impl Runtime {
     /// Opens (or creates) the runtime data directory and database.
     ///
-    /// Acquires an exclusive file lock (`bux.lock`) to prevent multiple
-    /// processes from corrupting state. Returns an error if another
-    /// `Runtime` already holds the lock.
+    /// Runs crash recovery to reconcile stale state from previous runs.
+    /// Acquires an exclusive file lock to prevent concurrent access.
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self> {
         let base = data_dir.as_ref();
         fs::create_dir_all(base)?;
 
-        // Acquire exclusive lock — prevents concurrent access.
         let lock_file = fs::File::create(base.join("bux.lock"))?;
         let lock =
             Flock::lock(lock_file, FlockArg::LockExclusiveNonblock).map_err(|(_, errno)| {
@@ -69,18 +112,59 @@ impl Runtime {
         let socks_dir = base.join("socks");
         fs::create_dir_all(&socks_dir)?;
 
-        let db_path = base.join("bux.db");
-        let db = StateDb::open(db_path)?;
+        let db = StateDb::open(base.join("bux.db"))?;
         let disk = DiskManager::open(base)?;
+        let oci = bux_oci::Oci::open_at(base)?;
 
         #[allow(clippy::arc_with_non_send_sync)]
-        // StateDb uses rusqlite::Connection (not Sync), but Arc is needed for VmHandle sharing within a single-threaded tokio runtime.
-        Ok(Self {
+        let rt = Self {
             db: Arc::new(db),
+            data_dir: base.to_path_buf(),
             socks_dir,
             disk,
+            oci,
             _lock: lock,
-        })
+        };
+
+        rt.recover();
+        info!(data_dir = %base.display(), "runtime opened");
+        Ok(rt)
+    }
+
+    /// Returns the global default runtime, creating it on first call.
+    ///
+    /// Uses [`default_data_dir()`] for the data directory. Installs an
+    /// atexit handler and signal handler for graceful shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if runtime initialization fails (filesystem,
+    /// lock, database).
+    pub fn global() -> Result<&'static Self> {
+        // OnceLock doesn't support fallible init that returns the error,
+        // so we use get_or_init with a nested Result.
+        if let Some(rt) = DEFAULT_RUNTIME.get() {
+            return Ok(rt);
+        }
+
+        let rt = Self::open(default_data_dir())?;
+
+        // Store — race-safe: if another thread beat us, just return theirs.
+        let _ = DEFAULT_RUNTIME.set(rt);
+        let rt = DEFAULT_RUNTIME.get().expect("just set");
+
+        // Register atexit handler (once).
+        if ATEXIT_INSTALLED
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            #[allow(unsafe_code)]
+            unsafe {
+                libc::atexit(shutdown_on_exit);
+            }
+        }
+
+        Ok(rt)
     }
 
     /// Returns a reference to the disk image manager.
@@ -88,11 +172,48 @@ impl Runtime {
         &self.disk
     }
 
-    /// Spawns a VM in a child process via `bux-shim` and returns a handle.
+    /// Returns a reference to the OCI image manager.
+    pub const fn oci(&self) -> &bux_oci::Oci {
+        &self.oci
+    }
+
+    /// One-shot: pull image → create disk → spawn VM.
     ///
-    /// The VM configuration is serialized to a temp JSON file, then
-    /// `bux-shim` is spawned as a subprocess that reads the config and
-    /// calls `krun_start_enter()` to become the VM.
+    /// Applies OCI image defaults (entrypoint, env, workdir) then lets
+    /// `configure` override any settings before spawning.
+    pub async fn run(
+        &self,
+        image: &str,
+        configure: impl FnOnce(VmBuilder) -> VmBuilder,
+        name: Option<String>,
+    ) -> Result<VmHandle> {
+        let pull = self.oci.ensure(image, |_| {}).await?;
+
+        let mut builder = Vm::builder().root(pull.rootfs.to_string_lossy());
+
+        if let Some(ref cfg) = pull.config {
+            let cmd = cfg.command();
+            if !cmd.is_empty() {
+                let args: Vec<&str> = cmd[1..].iter().map(String::as_str).collect();
+                builder = builder.exec(&cmd[0], &args);
+            }
+            if let Some(ref env) = cfg.env {
+                let refs: Vec<&str> = env.iter().map(String::as_str).collect();
+                builder = builder.env(&refs);
+            }
+            if let Some(ref wd) = cfg.working_dir
+                && !wd.is_empty()
+            {
+                builder = builder.workdir(wd);
+            }
+        }
+
+        builder = configure(builder);
+        self.spawn(builder, Some(image.to_owned()), name, true)
+            .await
+    }
+
+    /// Spawns a VM in a child process via `bux-shim` and returns a handle.
     pub async fn spawn(
         &self,
         builder: VmBuilder,
@@ -100,7 +221,6 @@ impl Runtime {
         name: Option<String>,
         auto_remove: bool,
     ) -> Result<VmHandle> {
-        // Validate name uniqueness via DB index.
         if let Some(ref n) = name
             && self.db.get_by_name(n)?.is_some()
         {
@@ -113,7 +233,6 @@ impl Runtime {
         let socket = self.socks_dir.join(format!("{id}.sock"));
         let socket_str = socket.to_string_lossy().into_owned();
 
-        // Build the full config including the internal agent vsock port.
         let mut config = builder.to_config();
         config.auto_remove = auto_remove;
         config.vsock_ports.push(VsockPort {
@@ -122,26 +241,21 @@ impl Runtime {
             listen: true,
         });
 
-        // If a base disk is specified, create a per-VM QCOW2 overlay.
         if let Some(ref base) = config.base_disk {
             let overlay = self
                 .disk
                 .create_overlay(Path::new(base), config.disk_format, &id)?;
             config.root_disk = Some(overlay.to_string_lossy().into_owned());
             config.disk_format = crate::disk::DiskFormat::Qcow2;
-            config.base_disk = None; // consumed — shim doesn't need this
+            config.base_disk = None;
         }
 
-        // Write config to a temp file for the shim to read.
         let config_path = self.socks_dir.join(format!("{id}.json"));
         let json = serde_json::to_string(&config)?;
         fs::write(&config_path, &json)?;
 
-        // Create watchdog pipe — parent holds write end (Keepalive),
-        // shim gets read end for parent-death detection.
         let (shim_wd_fd, keepalive) = watchdog::create()?;
 
-        // Spawn bux-shim inside a sandbox (bwrap on Linux, seatbelt on macOS).
         let shim = find_shim()?;
         let jail_config = JailConfig {
             rootfs: config.rootfs.as_deref().map(PathBuf::from),
@@ -153,8 +267,8 @@ impl Runtime {
                 .map(|v| PathBuf::from(&v.path))
                 .collect(),
             watchdog_fd: Some(std::os::unix::io::AsRawFd::as_raw_fd(&shim_wd_fd)),
-            sandbox: None,         // use auto-detected platform sandbox
-            resource_limits: None, // TODO: expose via VmBuilder
+            sandbox: None,
+            resource_limits: None,
         };
         let result = jail::spawn(&shim, &config_path, &jail_config, &id).map_err(|e| {
             let _ = fs::remove_file(&config_path);
@@ -165,7 +279,7 @@ impl Runtime {
         let child_pid = result.child.id() as i32;
 
         let vm_state = VmState {
-            id,
+            id: id.clone(),
             name,
             pid: child_pid,
             image,
@@ -175,10 +289,9 @@ impl Runtime {
             created_at: SystemTime::now(),
         };
         self.db.insert(&vm_state)?;
-
-        // Drop the shim's read end in the parent — the child already
-        // inherited it before exec.
         drop(shim_wd_fd);
+
+        info!(vm_id = %id, pid = child_pid, "VM spawned");
 
         let handle = VmHandle::new(
             vm_state,
@@ -187,9 +300,7 @@ impl Runtime {
             Some(keepalive),
         );
 
-        // Best-effort readiness wait.
         let _ = handle.wait_ready(Duration::from_secs(5)).await;
-
         Ok(handle)
     }
 
@@ -199,15 +310,14 @@ impl Runtime {
         let mut keep = Vec::with_capacity(vms.len());
 
         for mut vm in vms {
-            // Reconcile: mark dead processes as stopped.
             if vm.status.is_active() && !is_pid_alive(vm.pid) {
                 vm.status = Status::Stopped;
                 let _ = self.db.update_status(&vm.id, Status::Stopped);
             }
 
-            // Auto-remove stopped VMs with auto_remove flag.
             if vm.status == Status::Stopped && vm.config.auto_remove {
                 let _ = fs::remove_file(&vm.socket);
+                let _ = self.disk.remove_vm_disk(&vm.id);
                 let _ = self.db.delete(&vm.id);
                 continue;
             }
@@ -219,14 +329,12 @@ impl Runtime {
 
     /// Retrieves a handle by name or ID prefix.
     pub fn get(&self, id_or_name: &str) -> Result<VmHandle> {
-        // Try name lookup first (O(1) via UNIQUE index).
         let mut state = if let Some(s) = self.db.get_by_name(id_or_name)? {
             s
         } else {
             self.db.get_by_id_prefix(id_or_name)?
         };
 
-        // Reconcile liveness.
         if state.status.is_active() && !is_pid_alive(state.pid) {
             state.status = Status::Stopped;
             let _ = self.db.update_status(&state.id, Status::Stopped);
@@ -236,7 +344,7 @@ impl Runtime {
             state,
             Arc::clone(&self.db),
             self.disk.clone(),
-            None, // no keepalive — reconnecting to an existing VM
+            None,
         ))
     }
 
@@ -254,7 +362,7 @@ impl Runtime {
         Ok(())
     }
 
-    /// Removes a stopped VM's state and socket.
+    /// Removes a stopped VM's state, socket, and disk overlay.
     pub fn remove(&self, id_or_name: &str) -> Result<()> {
         let handle = self.get(id_or_name)?;
         let state = handle.state();
@@ -269,7 +377,101 @@ impl Runtime {
         let _ = fs::remove_file(&state.socket);
         let _ = self.disk.remove_vm_disk(&state.id);
         self.db.delete(&state.id)?;
+        info!(vm_id = %state.id, "VM removed");
         Ok(())
+    }
+
+    /// Gracefully stops all active VMs.
+    ///
+    /// Sends `SIGTERM` to each shim process, waits briefly, then
+    /// `SIGKILL` any survivors. Called by the atexit handler and
+    /// can be called manually for coordinated shutdown.
+    pub fn shutdown_sync(&self) {
+        let vms = match self.db.list() {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        for vm in vms {
+            if !vm.status.is_active() || !is_pid_alive(vm.pid) {
+                continue;
+            }
+
+            info!(vm_id = %vm.id, pid = vm.pid, "stopping VM on shutdown");
+            let _ = signal::kill(Pid::from_raw(vm.pid), Signal::SIGTERM);
+
+            let start = std::time::Instant::now();
+            let timeout = Duration::from_secs(5);
+            while is_pid_alive(vm.pid) && start.elapsed() < timeout {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+
+            if is_pid_alive(vm.pid) {
+                warn!(vm_id = %vm.id, pid = vm.pid, "SIGKILL after timeout");
+                let _ = signal::kill(Pid::from_raw(vm.pid), Signal::SIGKILL);
+            }
+
+            let _ = self.db.update_status(&vm.id, Status::Stopped);
+        }
+    }
+
+    /// Recovers stale state from a previous run.
+    ///
+    /// Three phases:
+    /// 1. Auto-remove stopped VMs flagged with `auto_remove`.
+    /// 2. Mark dead-but-active processes as Stopped.
+    /// 3. Clean up orphaned socket files.
+    fn recover(&self) {
+        let vms = match self.db.list() {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(error = %e, "recovery: failed to list VMs");
+                return;
+            }
+        };
+
+        let mut cleaned = 0u32;
+        for vm in &vms {
+            // Phase 1: auto-remove stopped VMs.
+            if vm.status == Status::Stopped && vm.config.auto_remove {
+                let _ = fs::remove_file(&vm.socket);
+                let _ = self.disk.remove_vm_disk(&vm.id);
+                let _ = self.db.delete(&vm.id);
+                cleaned += 1;
+                continue;
+            }
+
+            // Phase 2: reconcile active VMs whose process died.
+            if vm.status.is_active() && !is_pid_alive(vm.pid) {
+                warn!(vm_id = %vm.id, pid = vm.pid, "recovery: marking dead VM as stopped");
+                let _ = self.db.update_status(&vm.id, Status::Stopped);
+                let _ = fs::remove_file(&vm.socket);
+
+                if vm.config.auto_remove {
+                    let _ = self.disk.remove_vm_disk(&vm.id);
+                    let _ = self.db.delete(&vm.id);
+                    cleaned += 1;
+                }
+            }
+        }
+
+        // Phase 3: clean orphaned socket files.
+        let known_ids: HashSet<&str> = vms.iter().map(|v| v.id.as_str()).collect();
+        if let Ok(entries) = fs::read_dir(&self.socks_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if let Some(id) = name.to_str().and_then(|s| s.strip_suffix(".sock"))
+                    && !known_ids.contains(id)
+                {
+                    let _ = fs::remove_file(entry.path());
+                    cleaned += 1;
+                }
+            }
+        }
+
+        if cleaned > 0 {
+            info!(cleaned, "recovery complete");
+        }
     }
 }
 
@@ -290,7 +492,7 @@ pub struct VmHandle {
 }
 
 impl VmHandle {
-    /// Creates a new handle from a state snapshot, shared database, and disk manager.
+    /// Creates a new handle from a state snapshot.
     fn new(
         state: VmState,
         db: Arc<StateDb>,
@@ -315,6 +517,23 @@ impl VmHandle {
     /// Returns a reference to the stateless client.
     pub const fn client(&self) -> &Client {
         &self.client
+    }
+
+    /// Probes the guest agent and returns the current health status.
+    pub async fn health(&self) -> HealthStatus {
+        if !self.is_alive() {
+            return HealthStatus::Dead;
+        }
+        match tokio::time::timeout(Duration::from_secs(2), self.client.ping()).await {
+            Ok(Ok(_)) => HealthStatus::Healthy,
+            Ok(Err(_)) => HealthStatus::Unhealthy,
+            Err(_) => HealthStatus::Starting,
+        }
+    }
+
+    /// Pings the guest agent and returns agent metadata.
+    pub async fn ping(&self) -> Result<PongInfo> {
+        Ok(self.client.ping().await?)
     }
 
     /// Starts a command on a dedicated exec connection.
@@ -342,7 +561,6 @@ impl VmHandle {
             )));
         }
 
-        // Transition to Stopping before sending the shutdown request.
         self.state.status = Status::Stopping;
         self.db.update_status(&self.state.id, Status::Stopping)?;
 
@@ -373,9 +591,6 @@ impl VmHandle {
     }
 
     /// Pauses the VM by quiescing its filesystems and sending `SIGSTOP`.
-    ///
-    /// The guest's filesystems are frozen (FIFREEZE) for point-in-time
-    /// consistency before the VM process is stopped.
     pub async fn pause(&mut self) -> Result<()> {
         if !self.state.status.can_pause() {
             return Err(crate::Error::InvalidState(format!(
@@ -383,7 +598,6 @@ impl VmHandle {
                 self.state.id, self.state.status
             )));
         }
-        // Quiesce guest filesystems before freezing the process.
         let _ = self.client.quiesce().await;
         signal::kill(Pid::from_raw(self.state.pid), Signal::SIGSTOP)?;
         self.state.status = Status::Paused;
@@ -400,7 +614,6 @@ impl VmHandle {
             )));
         }
         signal::kill(Pid::from_raw(self.state.pid), Signal::SIGCONT)?;
-        // Thaw guest filesystems after resuming the process.
         let _ = self.client.thaw().await;
         self.state.status = Status::Running;
         self.db.update_status(&self.state.id, Status::Running)?;
@@ -416,76 +629,19 @@ impl VmHandle {
     }
 
     /// Waits for the VM process to exit.
-    ///
-    /// Uses `waitpid` for child processes (zero CPU, zero latency).
-    /// Falls back to `kill(pid, 0)` polling for non-child processes.
     pub async fn wait(&mut self) -> Result<()> {
         let pid = self.state.pid;
         let _ = tokio::task::spawn_blocking(move || wait_for_exit(pid)).await;
         self.mark_stopped()
     }
 
-    /// Reads a file from the guest filesystem.
-    pub async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
-        Ok(self.client.read_file(path).await?)
-    }
-
-    /// Writes a file to the guest filesystem.
-    pub async fn write_file(&self, path: &str, data: &[u8], mode: u32) -> Result<()> {
-        Ok(self.client.write_file(path, data, mode).await?)
-    }
-
-    /// Copies a tar archive into the guest, unpacking at `dest`.
-    pub async fn copy_in(&self, dest: &str, tar_data: &[u8]) -> Result<()> {
-        Ok(self.client.copy_in(dest, tar_data).await?)
-    }
-
-    /// Streams a tar archive from `reader` into the guest, unpacking at `dest`.
+    /// Waits for the guest agent to become reachable.
     ///
-    /// O(chunk_size) memory regardless of total archive size.
-    pub async fn copy_in_from_reader(
-        &self,
-        dest: &str,
-        reader: &mut (impl tokio::io::AsyncRead + Unpin),
-    ) -> Result<()> {
-        Ok(self.client.copy_in_from_reader(dest, reader).await?)
-    }
-
-    /// Copies a path from the guest as a tar archive.
-    pub async fn copy_out(&self, path: &str) -> Result<Vec<u8>> {
-        Ok(self.client.copy_out(path).await?)
-    }
-
-    /// Streams a path from the guest as a tar archive directly to `writer`.
-    ///
-    /// O(chunk_size) memory regardless of total archive size.
-    pub async fn copy_out_to_writer(
-        &self,
-        path: &str,
-        follow_symlinks: bool,
-        writer: &mut (impl tokio::io::AsyncWrite + Unpin),
-    ) -> Result<u64> {
-        Ok(self
-            .client
-            .copy_out_to_writer(path, follow_symlinks, writer)
-            .await?)
-    }
-
-    /// Performs a version handshake with the guest agent.
-    pub async fn handshake(&self) -> Result<()> {
-        Ok(self.client.handshake().await?)
-    }
-
-    /// Waits for the guest agent to become reachable, racing handshake probes
-    /// against shim process death detection.
-    ///
-    /// If the shim exits before the agent is ready, returns immediately with
-    /// a diagnostic error instead of waiting for the full timeout.
-    async fn wait_ready(&self, timeout: Duration) -> io::Result<()> {
+    /// Races handshake probes against shim process death detection.
+    pub async fn wait_ready(&self, timeout: Duration) -> io::Result<()> {
         let pid = self.state.pid;
         let console_output = self.state.config.console_output.clone();
 
-        // Race: handshake loop vs. process death vs. timeout.
         tokio::time::timeout(timeout, async {
             let handshake_loop = async {
                 loop {
@@ -497,8 +653,6 @@ impl VmHandle {
             };
 
             let process_monitor = async {
-                // Poll for process death (cannot use waitpid here — it would
-                // consume the zombie before wait()/stop() can reap it).
                 loop {
                     if !is_pid_alive(pid) {
                         let console_hint = console_output
@@ -521,6 +675,53 @@ impl VmHandle {
         })
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "guest agent did not become ready"))?
+    }
+
+    /// Reads a file from the guest filesystem.
+    pub async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
+        Ok(self.client.read_file(path).await?)
+    }
+
+    /// Writes a file to the guest filesystem.
+    pub async fn write_file(&self, path: &str, data: &[u8], mode: u32) -> Result<()> {
+        Ok(self.client.write_file(path, data, mode).await?)
+    }
+
+    /// Copies a tar archive into the guest, unpacking at `dest`.
+    pub async fn copy_in(&self, dest: &str, tar_data: &[u8]) -> Result<()> {
+        Ok(self.client.copy_in(dest, tar_data).await?)
+    }
+
+    /// Streams a tar archive from `reader` into the guest, unpacking at `dest`.
+    pub async fn copy_in_from_reader(
+        &self,
+        dest: &str,
+        reader: &mut (impl tokio::io::AsyncRead + Unpin),
+    ) -> Result<()> {
+        Ok(self.client.copy_in_from_reader(dest, reader).await?)
+    }
+
+    /// Copies a path from the guest as a tar archive.
+    pub async fn copy_out(&self, path: &str) -> Result<Vec<u8>> {
+        Ok(self.client.copy_out(path).await?)
+    }
+
+    /// Streams a path from the guest as a tar archive directly to `writer`.
+    pub async fn copy_out_to_writer(
+        &self,
+        path: &str,
+        follow_symlinks: bool,
+        writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    ) -> Result<u64> {
+        Ok(self
+            .client
+            .copy_out_to_writer(path, follow_symlinks, writer)
+            .await?)
+    }
+
+    /// Performs a version handshake with the guest agent.
+    pub async fn handshake(&self) -> Result<()> {
+        Ok(self.client.handshake().await?)
     }
 
     /// Updates status to Stopped and persists. If `auto_remove` is set,
@@ -547,15 +748,12 @@ fn is_pid_alive(pid: i32) -> bool {
 /// Blocks until a process exits.
 ///
 /// Tries `waitpid` first (works for child processes — zero CPU, zero delay).
-/// Falls back to `kill(pid, 0)` polling if the process is not a direct child
-/// (e.g. `ECHILD` from attached mode).
+/// Falls back to `kill(pid, 0)` polling if the process is not a direct child.
 fn wait_for_exit(pid: i32) {
     let nix_pid = Pid::from_raw(pid);
-    // Try waitpid — only succeeds for our own child processes.
     if let Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..)) = waitpid(nix_pid, None) {
         return;
     }
-    // Not our child (ECHILD) or other error — fall back to polling.
     while is_pid_alive(pid) {
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -564,12 +762,19 @@ fn wait_for_exit(pid: i32) {
 /// Locates the `bux-shim` binary.
 ///
 /// Search order:
-/// 1. Next to the current executable (e.g. `/usr/bin/bux-shim`).
-/// 2. In `$PATH` via `which`.
+/// 1. `$BUX_SHIM_PATH` environment variable (development override).
+/// 2. Next to the current executable.
+/// 3. In `$PATH`.
 fn find_shim() -> io::Result<PathBuf> {
     const NAME: &str = "bux-shim";
 
-    // 1. Sibling of the current executable.
+    if let Ok(p) = std::env::var("BUX_SHIM_PATH") {
+        let path = PathBuf::from(p);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+
     if let Ok(exe) = std::env::current_exe() {
         let sibling = exe.with_file_name(NAME);
         if sibling.is_file() {
@@ -577,7 +782,6 @@ fn find_shim() -> io::Result<PathBuf> {
         }
     }
 
-    // 2. Search $PATH.
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path_var) {
             let candidate = dir.join(NAME);

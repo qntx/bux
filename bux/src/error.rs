@@ -38,6 +38,10 @@ pub enum Error {
     #[error("{0}")]
     InvalidState(String),
 
+    /// The runtime has been shut down; no new operations are accepted.
+    #[error("runtime has been shut down")]
+    Shutdown,
+
     /// Unix syscall error (via nix).
     #[cfg(unix)]
     #[error(transparent)]
@@ -47,6 +51,11 @@ pub enum Error {
     #[cfg(unix)]
     #[error(transparent)]
     E2fs(#[from] bux_e2fs::Error),
+
+    /// OCI image operation error.
+    #[cfg(unix)]
+    #[error(transparent)]
+    Oci(#[from] bux_oci::Error),
 
     /// SQLite database error.
     #[cfg(unix)]

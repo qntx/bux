@@ -4,7 +4,22 @@
 //! and managing lightweight virtual machines powered by KVM (Linux) or
 //! Hypervisor.framework (macOS).
 //!
-//! # Quick start — one-shot execution
+//! # Quick start — managed VM via Runtime
+//!
+//! ```no_run
+//! # #[cfg(unix)]
+//! # async fn example() -> bux::Result<()> {
+//! use bux::{Runtime, ExecStart};
+//!
+//! let rt = Runtime::global()?;
+//! let mut handle = rt.run("alpine:latest", |b| b.vcpus(2).ram_mib(512), None).await?;
+//! let output = handle.exec_output(ExecStart::new("echo").args(vec!["hello".into()])).await?;
+//! handle.stop().await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Quick start — low-level VM (takes over the process)
 //!
 //! ```no_run
 //! use bux::Vm;
@@ -17,7 +32,6 @@
 //!     .build()
 //!     .expect("invalid VM config");
 //!
-//! // Takes over the process — only returns on error.
 //! vm.start().expect("failed to start VM");
 //! ```
 //!
@@ -47,7 +61,7 @@ pub use error::{Error, Result};
 #[cfg(unix)]
 pub use jail::{JailConfig, NoopSandbox, ResourceLimits, Sandbox};
 #[cfg(unix)]
-pub use runtime::{Runtime, VmHandle};
+pub use runtime::{HealthStatus, Runtime, VmHandle};
 #[cfg(unix)]
 pub use state::StateDb;
 pub use state::{Status, VirtioFs, VmConfig, VmState, VsockPort};

@@ -188,7 +188,9 @@ dependencies = [
  "bux-bwrap",
  "bux-e2fs",
  "bux-krun",
+ "bux-oci",
  "bux-proto",
+ "dirs",
  "libc",
  "nix",
  "rusqlite",
@@ -197,6 +199,7 @@ dependencies = [
  "signal-hook",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
