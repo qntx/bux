@@ -120,6 +120,7 @@ async fn handle_pipe(
                         let _ = unsafe { libc::kill(pid, sig) };
                     }
                     Ok(ExecIn::ResizeTty(_)) => {}
+                    Ok(_) => {}
                     Err(_) => {
                         // Host disconnected — kill child and collect exit status.
                         let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
@@ -209,6 +210,7 @@ async fn handle_pty(
                     Ok(ExecIn::ResizeTty(config)) => {
                         pty_handle.resize(&config);
                     }
+                    Ok(_) => {}
                     Err(_) => {
                         let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
                         break;

@@ -11,6 +11,10 @@
 //! [bubblewrap]: https://github.com/containers/bubblewrap
 
 use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::sync::OnceLock;
 
 /// Build-time path to the bwrap binary (baked in by build.rs).
 #[cfg(target_os = "linux")]
