@@ -115,7 +115,7 @@ pub fn spawn(
     shim: &Path,
     config_path: &Path,
     config: &JailConfig,
-    _vm_id: &str,
+    vm_id: &str,
 ) -> io::Result<SpawnResult> {
     let mut cmd = build_command(shim, config_path, config);
     cmd.stdin(Stdio::null());
@@ -127,6 +127,9 @@ pub fn spawn(
 
     pre_exec::apply(&mut cmd, config.watchdog_fd);
     let child = cmd.spawn()?;
+
+    // vm_id is only used on Linux (cgroup setup).
+    let _ = vm_id;
 
     // Apply cgroup v2 resource limits (Linux only).
     #[cfg(target_os = "linux")]
