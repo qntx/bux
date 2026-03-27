@@ -56,7 +56,11 @@ jobs:
           # Configure for static-only, minimal feature set.
           # --enable-libuuid: use bundled libuuid (avoids system util-linux dep).
           # --disable-*: strip everything we don't need.
+          # ac_cv_header_archive_h=no: tell autoconf that archive.h is
+          # unavailable so create_inode.c never references
+          # __populate_fs_from_tar (which requires libarchive).
           ./configure \
+            ac_cv_header_archive_h=no \
             --disable-nls \
             --disable-tdb \
             --disable-debugfs \
@@ -69,10 +73,7 @@ jobs:
             --enable-libuuid \
             --enable-libblkid
 
-          # Strip HAVE_ARCHIVE_H from the generated config so that
-          # create_inode.c does NOT reference __populate_fs_from_tar
-          # (which requires libarchive). The -U flag alone is insufficient
-          # because config.h re-#defines the macro after -U takes effect.
+          # Belt-and-suspenders: strip HAVE_ARCHIVE_H if it leaks through.
           sed -i '/#define HAVE_ARCHIVE_H/d' config.h lib/config.h 2>/dev/null || true
 
           # Build core libraries (produces .a files in lib/*/).
