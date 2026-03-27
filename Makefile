@@ -1,85 +1,55 @@
-# Makefile for qntx/bux — Distributable BoxLite VM Runtime
-#
-# Workspace members : bux-sys, bux, bux-cli
+# Makefile for Rust project using Cargo
 
-.PHONY: all
-all: pre-commit
+.PHONY: all build check run test bench clippy clippy-fix fmt doc update
 
-# Build the workspace in release mode
-.PHONY: build
+all: fmt clippy-fix
+
+# Build the project with all features enabled in release mode
 build:
-	cargo build --release --all-features
+	cargo build --workspace --release --all-features
 
-# Quick compilation check without codegen
-.PHONY: check
+# Check the project for compilation errors without producing binaries
 check:
-	cargo check --all-features
+	cargo check --workspace --all-features
 
-# Run all workspace tests
-.PHONY: test
-test:
-	cargo test --all-features
+# Update dependencies to their latest compatible versions
+update:
+	cargo update
 
-# Run benchmarks
-.PHONY: bench
-bench:
-	cargo bench --all-features
-
-# Run the CLI binary
-.PHONY: run
+# Run the project with all features enabled in release mode
 run:
 	cargo run --release --all-features
 
-# Lint with Clippy (auto-fix)
-.PHONY: clippy
+# Run all tests with all features enabled
+test:
+	cargo test --workspace --all-features
+
+# Run benchmarks with all features enabled
+bench:
+	cargo bench --all-features
+
+# Run Clippy linter with nightly toolchain (check only, for CI)
+# Uses workspace lints from Cargo.toml
 clippy:
-	cargo +nightly clippy --fix \
+	cargo +nightly clippy --workspace \
+		--all-targets \
+		--all-features \
+		-- -D warnings
+
+# Run Clippy linter with auto-fix (for development)
+clippy-fix:
+	cargo +nightly clippy --workspace \
+		--fix \
 		--all-targets \
 		--all-features \
 		--allow-dirty \
 		--allow-staged \
 		-- -D warnings
 
-# Format workspace code
-.PHONY: fmt
+# Format the code using rustfmt with nightly toolchain
 fmt:
 	cargo +nightly fmt
 
-# Check formatting without modifying files
-.PHONY: fmt-check
-fmt-check:
-	cargo +nightly fmt --check
-
-# Generate and open documentation
-.PHONY: doc
+# Generate documentation for all crates and open it in the browser
 doc:
 	cargo +nightly doc --all-features --no-deps --open
-
-# Regenerate bux-sys/src/bindings.rs from remote libkrun.h (requires libclang)
-# Pipeline: download libkrun.h → bindgen → src/bindings.rs
-.PHONY: regenerate-bindings
-regenerate-bindings:
-	BUX_UPDATE_BINDINGS=1 cargo check -p bux-sys --features regenerate
-
-# Update dependencies
-.PHONY: update
-update:
-	cargo update
-
-# Check for unused dependencies
-.PHONY: udeps
-udeps:
-	cargo +nightly udeps --all-features
-
-# Generate CHANGELOG.md using git-cliff
-.PHONY: cliff
-cliff:
-	git cliff --output CHANGELOG.md
-
-.PHONY: pre-commit
-pre-commit:
-	$(MAKE) fmt
-	$(MAKE) clippy
-	$(MAKE) test
-	$(MAKE) build
-	$(MAKE) cliff
