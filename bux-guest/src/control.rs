@@ -74,6 +74,9 @@ pub async fn handle(
                 .await?;
                 w.flush().await?;
             }
+            _ => {
+                return Err(io::Error::other("unsupported control request"));
+            }
         }
     }
 }
