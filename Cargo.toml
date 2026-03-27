@@ -39,6 +39,7 @@ flate2 = "1"
 tar = "0.4"
 ureq = "3"
 signal-hook = "0.4"
+tracing = "0.1"
 
 [profile.release]
 codegen-units = 1

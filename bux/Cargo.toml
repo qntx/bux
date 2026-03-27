@@ -19,12 +19,15 @@ bux-krun.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bux-bwrap.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 bux-e2fs.workspace = true
+bux-oci.workspace = true
+dirs.workspace = true
 libc.workspace = true
 nix.workspace = true
 rusqlite.workspace = true
