@@ -12,9 +12,16 @@
 //! use bux::{Runtime, ExecStart};
 //!
 //! let rt = Runtime::global()?;
-//! let mut handle = rt.run("alpine:latest", |b| b.vcpus(2).ram_mib(512), None).await?;
-//! let output = handle.exec_output(ExecStart::new("echo").args(vec!["hello".into()])).await?;
-//! handle.stop().await?;
+//! let mut vm = rt.run("python:slim", |b| b.vcpus(2).ram_mib(1024), None).await?;
+//!
+//! // Each VM gets a writable QCOW2 overlay — install packages, write files, etc.
+//! vm.exec_output(ExecStart::new("pip").args(["install", "numpy"].map(Into::into).to_vec())).await?;
+//! vm.write_file("/work/hello.py", b"print('hello')", 0o755).await?;
+//! let out = vm.exec_output(ExecStart::new("python").args(vec!["/work/hello.py".into()])).await?;
+//!
+//! // Stop preserves disk state; start resumes from the same overlay.
+//! vm.stop().await?;
+//! vm.start(std::time::Duration::from_secs(30)).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -61,7 +68,7 @@ pub use error::{Error, Result};
 #[cfg(unix)]
 pub use jail::{JailConfig, NoopSandbox, ResourceLimits, Sandbox};
 #[cfg(unix)]
-pub use runtime::{HealthStatus, Runtime, VmHandle};
+pub use runtime::{HealthStatus, RunOptions, Runtime, VmHandle};
 #[cfg(unix)]
 pub use state::StateDb;
 pub use state::{Status, VirtioFs, VmConfig, VmState, VsockPort};

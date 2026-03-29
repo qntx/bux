@@ -19,14 +19,14 @@ use nix::fcntl::{Flock, FlockArg};
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::Pid;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::Result;
 use crate::client::{Client, ExecHandle, ExecOutput, PongInfo};
 use crate::disk::DiskManager;
 use crate::jail::{self, JailConfig};
 use crate::state::{self, StateDb, Status, VmState, VsockPort};
-use crate::vm::VmBuilder;
+use crate::vm::{Vm, VmBuilder};
 use crate::watchdog::{self, Keepalive};
 
 /// VM health status returned by [`VmHandle::health`].
@@ -41,6 +41,29 @@ pub enum HealthStatus {
     Unhealthy,
     /// VM process has exited.
     Dead,
+}
+
+/// Options for [`Runtime::run_opts`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct RunOptions {
+    /// Remove VM state automatically when it stops (default: `false`).
+    ///
+    /// When `false`, the QCOW2 overlay disk is preserved after stop,
+    /// allowing the VM to be restarted with [`VmHandle::start`].
+    pub auto_remove: bool,
+    /// Maximum time to wait for the guest agent to become reachable
+    /// (default: 30 s). Set to `Duration::ZERO` to skip the readiness check.
+    pub ready_timeout: Duration,
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            auto_remove: false,
+            ready_timeout: Duration::from_secs(30),
+        }
+    }
 }
 
 /// Global default runtime singleton.
@@ -65,9 +88,7 @@ fn default_data_dir() -> PathBuf {
     if let Ok(home) = std::env::var("BUX_HOME") {
         return PathBuf::from(home);
     }
-    dirs::data_dir()
-        .map(|d| d.join("bux"))
-        .unwrap_or_else(|| PathBuf::from("bux"))
+    dirs::data_dir().map_or_else(|| PathBuf::from("bux"), |d| d.join("bux"))
 }
 
 /// Manages the lifecycle of bux micro-VMs.
@@ -90,6 +111,17 @@ pub struct Runtime {
     /// Advisory lock — held for the lifetime of this `Runtime`.
     _lock: Flock<fs::File>,
 }
+
+// SAFETY: Runtime is protected by an exclusive file lock — only one instance
+// per data directory. The OnceLock<Runtime> static requires Send + Sync, but
+// rusqlite::Connection and oci_client::Client are !Sync. This is safe because:
+// 1. The file lock guarantees single-process access.
+// 2. Runtime::global() returns &'static Self — no ownership transfer.
+// 3. All public methods take &self and execute sequentially (no interior mut races).
+#[allow(unsafe_code)]
+unsafe impl Send for Runtime {}
+#[allow(unsafe_code)]
+unsafe impl Sync for Runtime {}
 
 impl Runtime {
     /// Opens (or creates) the runtime data directory and database.
@@ -177,19 +209,35 @@ impl Runtime {
         &self.oci
     }
 
-    /// One-shot: pull image → create disk → spawn VM.
+    /// One-shot: pull image → create base disk → spawn VM with writable overlay.
     ///
-    /// Applies OCI image defaults (entrypoint, env, workdir) then lets
-    /// `configure` override any settings before spawning.
+    /// Flow: OCI pull → ext4 base image (cached by digest) → per-VM QCOW2
+    /// overlay → block-device boot. Each VM gets its own copy-on-write layer,
+    /// so `pip install`, `apt install`, etc. work out of the box.
     pub async fn run(
         &self,
         image: &str,
         configure: impl FnOnce(VmBuilder) -> VmBuilder,
         name: Option<String>,
     ) -> Result<VmHandle> {
+        self.run_opts(image, configure, name, &RunOptions::default())
+            .await
+    }
+
+    /// Like [`run`](Self::run) but with explicit options.
+    pub async fn run_opts(
+        &self,
+        image: &str,
+        configure: impl FnOnce(VmBuilder) -> VmBuilder,
+        name: Option<String>,
+        opts: &RunOptions,
+    ) -> Result<VmHandle> {
         let pull = self.oci.ensure(image, |_| {}).await?;
 
-        let mut builder = Vm::builder().root(pull.rootfs.to_string_lossy());
+        // Convert rootfs directory → ext4 base image (idempotent, cached by digest).
+        let base_path = self.ensure_base_disk(&pull)?;
+
+        let mut builder = Vm::builder().base_disk(base_path.to_string_lossy());
 
         if let Some(ref cfg) = pull.config {
             let cmd = cfg.command();
@@ -209,8 +257,26 @@ impl Runtime {
         }
 
         builder = configure(builder);
-        self.spawn(builder, Some(image.to_owned()), name, true)
-            .await
+        let handle = self
+            .spawn(builder, Some(image.to_owned()), name, opts.auto_remove)
+            .await?;
+
+        if !opts.ready_timeout.is_zero() {
+            let _ = handle.wait_ready(opts.ready_timeout).await;
+        }
+        Ok(handle)
+    }
+
+    /// Converts an OCI rootfs directory into a shared ext4 base image.
+    ///
+    /// Cached under `disks/bases/{digest}.raw` — no-op when already present.
+    fn ensure_base_disk(&self, pull: &bux_oci::PullResult) -> Result<PathBuf> {
+        let digest = pull.digest.replace(':', "-");
+        if self.disk.has_base(&digest) {
+            return Ok(self.disk.base_path(&digest));
+        }
+        info!(image = %pull.reference, "creating ext4 base image from rootfs");
+        self.disk.create_base(&pull.rootfs, &digest)
     }
 
     /// Spawns a VM in a child process via `bux-shim` and returns a handle.
@@ -293,15 +359,12 @@ impl Runtime {
 
         info!(vm_id = %id, pid = child_pid, "VM spawned");
 
-        let handle = VmHandle::new(
+        Ok(VmHandle::new(
             vm_state,
             Arc::clone(&self.db),
             self.disk.clone(),
             Some(keepalive),
-        );
-
-        let _ = handle.wait_ready(Duration::from_secs(5)).await;
-        Ok(handle)
+        ))
     }
 
     /// Lists all known VMs, reconciling liveness and auto-removing stopped VMs.
@@ -544,6 +607,69 @@ impl VmHandle {
     /// Executes a command and collects all output.
     pub async fn exec_output(&self, req: ExecStart) -> Result<ExecOutput> {
         Ok(self.client.exec_output(req).await?)
+    }
+
+    /// Restarts a stopped VM from its preserved QCOW2 overlay disk.
+    ///
+    /// Only works when `auto_remove` is `false` (the default for [`Runtime::run`]).
+    /// All previous state (installed packages, files) is preserved.
+    pub async fn start(&mut self, ready_timeout: Duration) -> Result<()> {
+        if self.state.status != Status::Stopped {
+            return Err(crate::Error::InvalidState(format!(
+                "VM {} cannot be started (status: {:?}); only stopped VMs can restart",
+                self.state.id, self.state.status
+            )));
+        }
+
+        let config_path = self
+            .state
+            .socket
+            .with_file_name(format!("{}.json", self.state.id));
+        let json = serde_json::to_string(&self.state.config)?;
+        fs::write(&config_path, &json)?;
+
+        let (shim_wd_fd, keepalive) = watchdog::create()?;
+        let shim = find_shim()?;
+        let socks_dir = self.state.socket.parent().unwrap_or_else(|| Path::new("."));
+        let jail_config = JailConfig {
+            rootfs: self.state.config.rootfs.as_deref().map(PathBuf::from),
+            root_disk: self.state.config.root_disk.as_deref().map(PathBuf::from),
+            socks_dir: socks_dir.to_path_buf(),
+            virtiofs_paths: self
+                .state
+                .config
+                .virtiofs
+                .iter()
+                .map(|v| PathBuf::from(&v.path))
+                .collect(),
+            watchdog_fd: Some(std::os::unix::io::AsRawFd::as_raw_fd(&shim_wd_fd)),
+            sandbox: None,
+            resource_limits: None,
+        };
+        let result =
+            jail::spawn(&shim, &config_path, &jail_config, &self.state.id).map_err(|e| {
+                let _ = fs::remove_file(&config_path);
+                io::Error::new(
+                    e.kind(),
+                    format!("failed to restart {}: {e}", shim.display()),
+                )
+            })?;
+
+        #[allow(clippy::cast_possible_wrap)]
+        let child_pid = result.child.id() as i32;
+        drop(shim_wd_fd);
+
+        self.state.pid = child_pid;
+        self.state.status = Status::Running;
+        self.db.update_status(&self.state.id, Status::Running)?;
+        self.client = Client::new(&self.state.socket);
+        self._keepalive = Some(keepalive);
+
+        info!(vm_id = %self.state.id, pid = child_pid, "VM restarted");
+        if !ready_timeout.is_zero() {
+            let _ = self.wait_ready(ready_timeout).await;
+        }
+        Ok(())
     }
 
     /// Graceful shutdown with default 10 s timeout.
