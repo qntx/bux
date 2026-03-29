@@ -44,3 +44,7 @@
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 #[cfg(not(feature = "regenerate"))]
 include!("bindings.rs");
+
+unsafe extern "C" {
+    pub fn ext2fs_default_journal_size(num_blocks: __u64) -> ::core::ffi::c_int;
+}

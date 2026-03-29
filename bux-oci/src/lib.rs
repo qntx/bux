@@ -164,7 +164,10 @@ impl Oci {
     /// Opens the OCI manager with explicit configuration.
     pub fn open_with(config: OciConfig) -> Result<Self> {
         let store = Store::open(&config.store_dir)?;
-        let client = oci_client::Client::new(ClientConfig::default());
+        let client = oci_client::Client::new(ClientConfig {
+            platform_resolver: Some(Box::new(linux_platform_resolver)),
+            ..Default::default()
+        });
         Ok(Self {
             store,
             client,
@@ -333,6 +336,36 @@ fn parse_image_config(data: &str) -> Option<ImageConfig> {
         config: Option<ImageConfig>,
     }
     serde_json::from_str::<TopLevel>(data).ok()?.config
+}
+
+/// Platform resolver that always selects `linux/{arch}`.
+///
+/// VMs always run Linux regardless of the host OS, so we must pull Linux
+/// images even when running on macOS.
+fn linux_platform_resolver(platforms: &[oci_client::manifest::ImageIndexEntry]) -> Option<String> {
+    let target_arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        _ => "amd64",
+    };
+
+    // Prefer exact linux/{arch} match.
+    for entry in platforms {
+        if let Some(ref p) = entry.platform
+            && p.os.to_string() == "linux"
+            && p.architecture.to_string() == target_arch
+        {
+            return Some(entry.digest.clone());
+        }
+    }
+    // Fallback: first linux entry regardless of arch.
+    for entry in platforms {
+        if let Some(ref p) = entry.platform
+            && p.os.to_string() == "linux"
+        {
+            return Some(entry.digest.clone());
+        }
+    }
+    None
 }
 
 /// Returns the default store directory: `$BUX_HOME` or `<platform_data_dir>/bux`.
