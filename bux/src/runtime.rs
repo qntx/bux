@@ -250,7 +250,7 @@ impl Runtime {
         }
 
         builder = configure(builder);
-        let handle = self.spawn(builder, Some(image.to_owned()), name, opts.auto_remove)?;
+        let handle = self.spawn(&builder, Some(image.to_owned()), name, opts.auto_remove)?;
 
         if !opts.ready_timeout.is_zero() {
             let _ = handle.wait_ready(opts.ready_timeout).await;
@@ -273,7 +273,7 @@ impl Runtime {
     /// Spawns a VM in a child process via `bux-shim` and returns a handle.
     pub fn spawn(
         &self,
-        builder: VmBuilder,
+        builder: &VmBuilder,
         image: Option<String>,
         name: Option<String>,
         auto_remove: bool,
