@@ -36,7 +36,7 @@ jobs:
 
       - name: Install build dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install lld
+        run: brew install llvm lld
 
       - name: Build libkrunfw (macOS)
         if: runner.os == 'macOS'
@@ -52,6 +52,9 @@ jobs:
       - name: Build libkrun from source (macOS)
         if: runner.os == 'macOS'
         run: |
+          LLVM_PREFIX="$(brew --prefix llvm)"
+          export PATH="${LLVM_PREFIX}/bin:$PATH"
+          export LIBCLANG_PATH="${LLVM_PREFIX}/lib"
           export PKG_CONFIG_PATH="${{ github.workspace }}/prefix/lib/pkgconfig"
           git clone --depth 1 --branch "v${LIBKRUN_VERSION}" --recurse-submodules \
             https://github.com/containers/libkrun.git libkrun-src
@@ -65,7 +68,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential patchelf libfdt-dev \
-            clang libclang-dev
+            clang libclang-dev libcap-ng-dev
 
       - name: Download libkrunfw (Linux)
         if: runner.os == 'Linux'
