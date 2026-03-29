@@ -100,8 +100,6 @@ fn default_data_dir() -> PathBuf {
 pub struct Runtime {
     /// SQLite state database.
     db: Arc<StateDb>,
-    /// Root data directory for this runtime.
-    data_dir: PathBuf,
     /// Directory for Unix sockets (`{data_dir}/socks/`).
     socks_dir: PathBuf,
     /// Disk image manager.
@@ -151,7 +149,6 @@ impl Runtime {
         #[allow(clippy::arc_with_non_send_sync)]
         let rt = Self {
             db: Arc::new(db),
-            data_dir: base.to_path_buf(),
             socks_dir,
             disk,
             oci,
@@ -173,17 +170,11 @@ impl Runtime {
     /// Returns an error if runtime initialization fails (filesystem,
     /// lock, database).
     pub fn global() -> Result<&'static Self> {
-        // OnceLock doesn't support fallible init that returns the error,
-        // so we use get_or_init with a nested Result.
         if let Some(rt) = DEFAULT_RUNTIME.get() {
             return Ok(rt);
         }
 
-        let rt = Self::open(default_data_dir())?;
-
-        // Store — race-safe: if another thread beat us, just return theirs.
-        let _ = DEFAULT_RUNTIME.set(rt);
-        let rt = DEFAULT_RUNTIME.get().expect("just set");
+        let _ = DEFAULT_RUNTIME.set(Self::open(default_data_dir())?);
 
         // Register atexit handler (once).
         if ATEXIT_INSTALLED
@@ -196,7 +187,9 @@ impl Runtime {
             }
         }
 
-        Ok(rt)
+        // SAFETY: we just called .set() above; if another thread raced us,
+        // .get() still returns their value — either way it's Some.
+        Ok(DEFAULT_RUNTIME.get().unwrap_or_else(|| unreachable!()))
     }
 
     /// Returns a reference to the disk image manager.
@@ -257,9 +250,7 @@ impl Runtime {
         }
 
         builder = configure(builder);
-        let handle = self
-            .spawn(builder, Some(image.to_owned()), name, opts.auto_remove)
-            .await?;
+        let handle = self.spawn(builder, Some(image.to_owned()), name, opts.auto_remove)?;
 
         if !opts.ready_timeout.is_zero() {
             let _ = handle.wait_ready(opts.ready_timeout).await;
@@ -280,7 +271,7 @@ impl Runtime {
     }
 
     /// Spawns a VM in a child process via `bux-shim` and returns a handle.
-    pub async fn spawn(
+    pub fn spawn(
         &self,
         builder: VmBuilder,
         image: Option<String>,
@@ -450,10 +441,7 @@ impl Runtime {
     /// `SIGKILL` any survivors. Called by the atexit handler and
     /// can be called manually for coordinated shutdown.
     pub fn shutdown_sync(&self) {
-        let vms = match self.db.list() {
-            Ok(v) => v,
-            Err(_) => return,
-        };
+        let Ok(vms) = self.db.list() else { return };
 
         for vm in vms {
             if !vm.status.is_active() || !is_pid_alive(vm.pid) {
@@ -551,7 +539,7 @@ pub struct VmHandle {
     client: Client,
     /// Watchdog keepalive — dropping this signals the shim to shut down.
     /// `None` when reconnecting to a VM spawned in a previous session.
-    _keepalive: Option<Keepalive>,
+    keepalive: Option<Keepalive>,
 }
 
 impl VmHandle {
@@ -568,7 +556,7 @@ impl VmHandle {
             db,
             disk,
             client,
-            _keepalive: keepalive,
+            keepalive,
         }
     }
 
@@ -663,7 +651,7 @@ impl VmHandle {
         self.state.status = Status::Running;
         self.db.update_status(&self.state.id, Status::Running)?;
         self.client = Client::new(&self.state.socket);
-        self._keepalive = Some(keepalive);
+        self.keepalive = Some(keepalive);
 
         info!(vm_id = %self.state.id, pid = child_pid, "VM restarted");
         if !ready_timeout.is_zero() {
