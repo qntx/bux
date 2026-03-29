@@ -33,6 +33,9 @@ pub async fn run() -> io::Result<()> {
     mounts::mount_essential_tmpfs();
     eprintln!("[bux-guest] T+{}ms: tmpfs mounted", uptime_ms());
 
+    mounts::setup_network();
+    eprintln!("[bux-guest] T+{}ms: network configured", uptime_ms());
+
     let addr = tokio_vsock::VsockAddr::new(libc::VMADDR_CID_ANY, AGENT_PORT);
     let listener =
         VsockListener::bind(addr).map_err(|e| io::Error::new(io::ErrorKind::AddrInUse, e))?;

@@ -250,6 +250,14 @@ mod db {
         conn: Connection,
     }
 
+    // SAFETY: StateDb is only accessed through &self methods and is protected
+    // by Runtime's exclusive file lock. rusqlite::Connection is !Sync due to
+    // internal RefCell, but we never share StateDb across threads concurrently.
+    #[allow(unsafe_code)]
+    unsafe impl Send for StateDb {}
+    #[allow(unsafe_code)]
+    unsafe impl Sync for StateDb {}
+
     impl StateDb {
         /// Opens (or creates) the database at `path`, running pending migrations.
         pub fn open(path: impl AsRef<Path>) -> Result<Self> {
