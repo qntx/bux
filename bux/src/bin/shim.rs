@@ -25,17 +25,19 @@ fn main() {
         std::process::exit(1);
     };
 
-    // Start watchdog thread if the parent passed a pipe FD.
+    // Derive exit file path from config path: {id}.json → {id}.exit
+    let exit_path = std::path::Path::new(&config_path).with_extension("exit");
+    install_crash_capture(&exit_path);
+
     start_watchdog();
 
-    // Read and immediately delete the temp config file.
     let json = match std::fs::read_to_string(&config_path) {
         Ok(j) => {
             let _ = std::fs::remove_file(&config_path);
             j
         }
         Err(e) => {
-            eprintln!("[bux-shim] failed to read config {config_path}: {e}");
+            write_exit_error(&exit_path, &format!("failed to read config: {e}"));
             std::process::exit(1);
         }
     };
@@ -43,7 +45,7 @@ fn main() {
     let config: bux::VmConfig = match serde_json::from_str(&json) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[bux-shim] invalid config JSON: {e}");
+            write_exit_error(&exit_path, &format!("invalid config JSON: {e}"));
             std::process::exit(1);
         }
     };
@@ -51,12 +53,97 @@ fn main() {
     let builder = bux::VmBuilder::from_config(&config);
 
     match builder.build().and_then(bux::Vm::start) {
-        // start() never returns on success — the process becomes the VM.
         Ok(()) => unreachable!(),
         Err(e) => {
-            eprintln!("[bux-shim] VM start failed: {e}");
+            write_exit_error(&exit_path, &format!("VM start failed: {e}"));
             std::process::exit(1);
         }
+    }
+}
+
+/// Writes an [`ExitInfo::Error`] JSON to the exit file.
+#[cfg(unix)]
+fn write_exit_error(path: &std::path::Path, message: &str) {
+    eprintln!("[bux-shim] {message}");
+    let info = bux::ExitInfo::Error {
+        exit_code: 1,
+        message: message.to_owned(),
+    };
+    if let Ok(json) = serde_json::to_string(&info) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+/// Global exit file path for signal handlers (must be static — signal handlers
+/// cannot capture closures).
+#[cfg(unix)]
+static SIGNAL_EXIT_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Signal handler that writes [`ExitInfo::Signal`] JSON to the exit file.
+#[cfg(unix)]
+extern "C" fn handle_crash_signal(sig: libc::c_int) {
+    let name = match sig {
+        libc::SIGABRT => "SIGABRT",
+        libc::SIGSEGV => "SIGSEGV",
+        libc::SIGBUS => "SIGBUS",
+        libc::SIGILL => "SIGILL",
+        _ => "UNKNOWN",
+    };
+    if let Some(path) = SIGNAL_EXIT_PATH.get() {
+        let info = bux::ExitInfo::Signal {
+            exit_code: bux::exit_info::SIGNAL_EXIT_BASE + sig,
+            signal: name.to_owned(),
+        };
+        if let Ok(json) = serde_json::to_string(&info) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
+/// Installs panic hook and signal handlers that write [`ExitInfo`] JSON.
+#[cfg(unix)]
+fn install_crash_capture(exit_path: &std::path::Path) {
+    // Panic hook — writes ExitInfo::Panic.
+    let panic_path = exit_path.to_path_buf();
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".into());
+        let location = info.location().map_or_else(
+            || "unknown".into(),
+            |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
+        );
+
+        let exit = bux::ExitInfo::Panic {
+            exit_code: bux::exit_info::PANIC_EXIT_CODE,
+            message,
+            location,
+        };
+        if let Ok(json) = serde_json::to_string(&exit) {
+            let _ = std::fs::write(&panic_path, json);
+        }
+        default_hook(info);
+    }));
+
+    // Signal handlers — write ExitInfo::Signal for fatal signals.
+    let _ = SIGNAL_EXIT_PATH.set(exit_path.to_path_buf());
+
+    #[allow(unsafe_code, function_casts_as_integer)]
+    unsafe {
+        let h = handle_crash_signal as libc::sighandler_t;
+        libc::signal(libc::SIGABRT, h);
+        libc::signal(libc::SIGSEGV, h);
+        libc::signal(libc::SIGBUS, h);
+        libc::signal(libc::SIGILL, h);
     }
 }
 

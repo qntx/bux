@@ -48,6 +48,7 @@
 mod client;
 mod disk;
 mod error;
+pub mod exit_info;
 #[cfg(unix)]
 mod jail;
 #[cfg(unix)]
@@ -65,6 +66,7 @@ pub use client::{Client, ExecHandle, ExecOutput, PongInfo};
 pub use disk::{Disk, DiskManager};
 pub use disk::{DiskFormat, QcowHeader};
 pub use error::{Error, Result};
+pub use exit_info::ExitInfo;
 #[cfg(unix)]
 pub use jail::{JailConfig, NoopSandbox, ResourceLimits, Sandbox};
 #[cfg(unix)]
