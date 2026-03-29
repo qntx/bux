@@ -213,22 +213,38 @@ impl Runtime {
         configure: impl FnOnce(VmBuilder) -> VmBuilder,
         name: Option<String>,
     ) -> Result<VmHandle> {
-        self.run_opts(image, configure, name, &RunOptions::default())
+        self.run_opts(image, configure, name, &RunOptions::default(), |_| {})
             .await
     }
 
-    /// Like [`run`](Self::run) but with explicit options.
+    /// Like [`run`](Self::run) but with explicit options and progress callback.
     pub async fn run_opts(
         &self,
         image: &str,
         configure: impl FnOnce(VmBuilder) -> VmBuilder,
         name: Option<String>,
         opts: &RunOptions,
+        on_progress: impl Fn(&str),
     ) -> Result<VmHandle> {
-        let pull = self.oci.ensure(image, |_| {}).await?;
+        let pull = self.oci.ensure(image, &on_progress).await?;
 
         // Convert rootfs directory → ext4 base image (idempotent, cached by digest).
-        let base_path = self.ensure_base_disk(&pull)?;
+        // Runs in spawn_blocking because ext4 creation is CPU-bound.
+        let base_path = {
+            let disk = self.disk.clone();
+            let rootfs = pull.rootfs.clone();
+            let digest = pull.digest.replace(':', "-");
+            let reference = pull.reference.clone();
+            tokio::task::spawn_blocking(move || -> Result<PathBuf> {
+                if disk.has_base(&digest) {
+                    return Ok(disk.base_path(&digest));
+                }
+                info!(image = %reference, "creating ext4 base image from rootfs");
+                disk.create_base(&rootfs, &digest)
+            })
+            .await
+            .map_err(io::Error::other)??
+        };
 
         let mut builder = Vm::builder().base_disk(base_path.to_string_lossy());
 
@@ -256,18 +272,6 @@ impl Runtime {
             let _ = handle.wait_ready(opts.ready_timeout).await;
         }
         Ok(handle)
-    }
-
-    /// Converts an OCI rootfs directory into a shared ext4 base image.
-    ///
-    /// Cached under `disks/bases/{digest}.raw` — no-op when already present.
-    fn ensure_base_disk(&self, pull: &bux_oci::PullResult) -> Result<PathBuf> {
-        let digest = pull.digest.replace(':', "-");
-        if self.disk.has_base(&digest) {
-            return Ok(self.disk.base_path(&digest));
-        }
-        info!(image = %pull.reference, "creating ext4 base image from rootfs");
-        self.disk.create_base(&pull.rootfs, &digest)
     }
 
     /// Spawns a VM in a child process via `bux-shim` and returns a handle.
@@ -308,37 +312,12 @@ impl Runtime {
         }
 
         let config_path = self.socks_dir.join(format!("{id}.json"));
-        let json = serde_json::to_string(&config)?;
-        fs::write(&config_path, &json)?;
-
-        let (shim_wd_fd, keepalive) = watchdog::create()?;
-
-        let shim = find_shim()?;
-        let jail_config = JailConfig {
-            rootfs: config.rootfs.as_deref().map(PathBuf::from),
-            root_disk: config.root_disk.as_deref().map(PathBuf::from),
-            socks_dir: self.socks_dir.clone(),
-            virtiofs_paths: config
-                .virtiofs
-                .iter()
-                .map(|v| PathBuf::from(&v.path))
-                .collect(),
-            watchdog_fd: Some(std::os::unix::io::AsRawFd::as_raw_fd(&shim_wd_fd)),
-            sandbox: None,
-            resource_limits: None,
-        };
-        let result = jail::spawn(&shim, &config_path, &jail_config, &id).map_err(|e| {
-            let _ = fs::remove_file(&config_path);
-            io::Error::new(e.kind(), format!("failed to spawn {}: {e}", shim.display()))
-        })?;
-
-        #[allow(clippy::cast_possible_wrap)]
-        let child_pid = result.child.id() as i32;
+        let shim = spawn_shim(&config, &config_path, &self.socks_dir, &id)?;
 
         let vm_state = VmState {
             id: id.clone(),
             name,
-            pid: child_pid,
+            pid: shim.pid,
             image,
             socket,
             status: Status::Running,
@@ -346,15 +325,14 @@ impl Runtime {
             created_at: SystemTime::now(),
         };
         self.db.insert(&vm_state)?;
-        drop(shim_wd_fd);
 
-        info!(vm_id = %id, pid = child_pid, "VM spawned");
+        info!(vm_id = %id, pid = shim.pid, "VM spawned");
 
         Ok(VmHandle::new(
             vm_state,
             Arc::clone(&self.db),
             self.disk.clone(),
-            Some(keepalive),
+            Some(shim.keepalive),
         ))
     }
 
@@ -428,7 +406,7 @@ impl Runtime {
             )));
         }
 
-        let _ = fs::remove_file(&state.socket);
+        clean_vm_files(&state.socket);
         let _ = self.disk.remove_vm_disk(&state.id);
         self.db.delete(&state.id)?;
         info!(vm_id = %state.id, "VM removed");
@@ -485,7 +463,7 @@ impl Runtime {
         for vm in &vms {
             // Phase 1: auto-remove stopped VMs.
             if vm.status == Status::Stopped && vm.config.auto_remove {
-                let _ = fs::remove_file(&vm.socket);
+                clean_vm_files(&vm.socket);
                 let _ = self.disk.remove_vm_disk(&vm.id);
                 let _ = self.db.delete(&vm.id);
                 cleaned += 1;
@@ -496,9 +474,9 @@ impl Runtime {
             if vm.status.is_active() && !is_pid_alive(vm.pid) {
                 warn!(vm_id = %vm.id, pid = vm.pid, "recovery: marking dead VM as stopped");
                 let _ = self.db.update_status(&vm.id, Status::Stopped);
-                let _ = fs::remove_file(&vm.socket);
 
                 if vm.config.auto_remove {
+                    clean_vm_files(&vm.socket);
                     let _ = self.disk.remove_vm_disk(&vm.id);
                     let _ = self.db.delete(&vm.id);
                     cleaned += 1;
@@ -506,14 +484,21 @@ impl Runtime {
             }
         }
 
-        // Phase 3: clean orphaned socket files.
+        // Phase 3: clean orphaned files (.sock, .exit, .json, .stderr).
         let known_ids: HashSet<&str> = vms.iter().map(|v| v.id.as_str()).collect();
+        let orphan_exts = [".sock", ".exit", ".json", ".stderr"];
         if let Ok(entries) = fs::read_dir(&self.socks_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name();
-                if let Some(id) = name.to_str().and_then(|s| s.strip_suffix(".sock"))
-                    && !known_ids.contains(id)
-                {
+                let Some(name_str) = name.to_str() else {
+                    continue;
+                };
+                let is_orphan = orphan_exts.iter().any(|ext| {
+                    name_str
+                        .strip_suffix(ext)
+                        .is_some_and(|id| !known_ids.contains(id))
+                });
+                if is_orphan {
                     let _ = fs::remove_file(entry.path());
                     cleaned += 1;
                 }
@@ -613,47 +598,16 @@ impl VmHandle {
             .state
             .socket
             .with_file_name(format!("{}.json", self.state.id));
-        let json = serde_json::to_string(&self.state.config)?;
-        fs::write(&config_path, &json)?;
-
-        let (shim_wd_fd, keepalive) = watchdog::create()?;
-        let shim = find_shim()?;
         let socks_dir = self.state.socket.parent().unwrap_or_else(|| Path::new("."));
-        let jail_config = JailConfig {
-            rootfs: self.state.config.rootfs.as_deref().map(PathBuf::from),
-            root_disk: self.state.config.root_disk.as_deref().map(PathBuf::from),
-            socks_dir: socks_dir.to_path_buf(),
-            virtiofs_paths: self
-                .state
-                .config
-                .virtiofs
-                .iter()
-                .map(|v| PathBuf::from(&v.path))
-                .collect(),
-            watchdog_fd: Some(std::os::unix::io::AsRawFd::as_raw_fd(&shim_wd_fd)),
-            sandbox: None,
-            resource_limits: None,
-        };
-        let result =
-            jail::spawn(&shim, &config_path, &jail_config, &self.state.id).map_err(|e| {
-                let _ = fs::remove_file(&config_path);
-                io::Error::new(
-                    e.kind(),
-                    format!("failed to restart {}: {e}", shim.display()),
-                )
-            })?;
+        let shim = spawn_shim(&self.state.config, &config_path, socks_dir, &self.state.id)?;
 
-        #[allow(clippy::cast_possible_wrap)]
-        let child_pid = result.child.id() as i32;
-        drop(shim_wd_fd);
-
-        self.state.pid = child_pid;
+        self.state.pid = shim.pid;
         self.state.status = Status::Running;
         self.db.update_status(&self.state.id, Status::Running)?;
         self.client = Client::new(&self.state.socket);
-        self.keepalive = Some(keepalive);
+        self.keepalive = Some(shim.keepalive);
 
-        info!(vm_id = %self.state.id, pid = child_pid, "VM restarted");
+        info!(vm_id = %self.state.id, pid = shim.pid, "VM restarted");
         if !ready_timeout.is_zero() {
             let _ = self.wait_ready(ready_timeout).await;
         }
@@ -752,9 +706,10 @@ impl VmHandle {
     /// Waits for the guest agent to become reachable.
     ///
     /// Races handshake probes against shim process death detection.
+    /// On failure, reads the shim's exit file for structured diagnostics.
     pub async fn wait_ready(&self, timeout: Duration) -> io::Result<()> {
         let pid = self.state.pid;
-        let console_output = self.state.config.console_output.clone();
+        let exit_file = self.state.socket.with_extension("exit");
 
         tokio::time::timeout(timeout, async {
             let handshake_loop = async {
@@ -769,13 +724,7 @@ impl VmHandle {
             let process_monitor = async {
                 loop {
                     if !is_pid_alive(pid) {
-                        let console_hint = console_output
-                            .as_deref()
-                            .map(|p| format!("\n  console log: {p}"))
-                            .unwrap_or_default();
-                        let msg = format!(
-                            "VM process (pid {pid}) exited before guest agent became ready{console_hint}"
-                        );
+                        let msg = shim_death_message(pid, &exit_file);
                         return Err(io::Error::new(io::ErrorKind::BrokenPipe, msg));
                     }
                     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -844,13 +793,47 @@ impl VmHandle {
         self.state.status = Status::Stopped;
 
         if self.state.config.auto_remove {
-            let _ = fs::remove_file(&self.state.socket);
+            clean_vm_files(&self.state.socket);
             let _ = self.disk.remove_vm_disk(&self.state.id);
             self.db.delete(&self.state.id)?;
         } else {
             self.db.update_status(&self.state.id, Status::Stopped)?;
         }
         Ok(())
+    }
+}
+
+/// Builds a diagnostic message when the shim process dies before the guest agent is ready.
+///
+/// Combines structured [`ExitInfo`] JSON and the last few lines of the shim's
+/// stderr file into a single actionable error message.
+fn shim_death_message(pid: i32, exit_file: &Path) -> String {
+    let detail = crate::ExitInfo::from_file(exit_file)
+        .map_or_else(|| "unknown reason".into(), |info| info.summary());
+
+    let stderr_path = exit_file.with_extension("stderr");
+    let stderr_hint = fs::read_to_string(&stderr_path)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let total = s.lines().count();
+            let skip = total.saturating_sub(5);
+            let tail: String = s.lines().skip(skip).collect::<Vec<_>>().join("\n");
+            format!("\n  stderr:\n    {}", tail.replace('\n', "\n    "))
+        })
+        .unwrap_or_default();
+
+    format!("VM process (pid {pid}) died before ready: {detail}{stderr_hint}")
+}
+
+/// Removes all transient files associated with a VM socket path.
+///
+/// Cleans `.sock`, `.exit`, `.json`, and `.stderr` files that share the
+/// same stem as the socket.
+fn clean_vm_files(socket: &Path) {
+    let _ = fs::remove_file(socket);
+    for ext in ["exit", "json", "stderr"] {
+        let _ = fs::remove_file(socket.with_extension(ext));
     }
 }
 
@@ -871,6 +854,61 @@ fn wait_for_exit(pid: i32) {
     while is_pid_alive(pid) {
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Result of spawning a shim subprocess.
+struct ShimSpawnResult {
+    /// Child PID (as i32 for nix compatibility).
+    pid: i32,
+    /// Parent-side watchdog keepalive.
+    keepalive: Keepalive,
+}
+
+/// Writes config JSON, creates watchdog pipe, and spawns `bux-shim` inside a sandbox.
+///
+/// Shared by [`Runtime::spawn()`] and [`VmHandle::start()`].
+fn spawn_shim(
+    config: &state::VmConfig,
+    config_path: &Path,
+    socks_dir: &Path,
+    vm_id: &str,
+) -> io::Result<ShimSpawnResult> {
+    let json =
+        serde_json::to_string(config).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    fs::write(config_path, &json)?;
+
+    // Capture shim stderr to a file for post-mortem diagnostics.
+    let stderr_path = config_path.with_extension("stderr");
+    let stderr_file = fs::File::create(&stderr_path)?;
+
+    let (shim_wd_fd, keepalive) = watchdog::create()?;
+    let shim = find_shim()?;
+
+    let jail_config = JailConfig {
+        rootfs: config.rootfs.as_deref().map(PathBuf::from),
+        root_disk: config.root_disk.as_deref().map(PathBuf::from),
+        socks_dir: socks_dir.to_path_buf(),
+        virtiofs_paths: config
+            .virtiofs
+            .iter()
+            .map(|v| PathBuf::from(&v.path))
+            .collect(),
+        watchdog_fd: Some(std::os::unix::io::AsRawFd::as_raw_fd(&shim_wd_fd)),
+        sandbox: None,
+        resource_limits: None,
+        stderr_file: Some(stderr_file),
+    };
+
+    let result = jail::spawn(&shim, config_path, jail_config, vm_id).map_err(|e| {
+        let _ = fs::remove_file(config_path);
+        io::Error::new(e.kind(), format!("failed to spawn {}: {e}", shim.display()))
+    })?;
+
+    #[allow(clippy::cast_possible_wrap)]
+    let pid = result.child.id() as i32;
+    drop(shim_wd_fd);
+
+    Ok(ShimSpawnResult { pid, keepalive })
 }
 
 /// Locates the `bux-shim` binary.

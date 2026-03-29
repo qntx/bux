@@ -93,6 +93,8 @@ pub struct JailConfig {
     pub sandbox: Option<Box<dyn Sandbox>>,
     /// cgroup v2 resource limits (Linux only; ignored on other platforms).
     pub resource_limits: Option<ResourceLimits>,
+    /// File to redirect child stderr to. When `None`, stderr is inherited.
+    pub stderr_file: Option<std::fs::File>,
 }
 
 /// Result of spawning a shim process inside a sandbox.
@@ -115,11 +117,14 @@ pub struct SpawnResult {
 pub fn spawn(
     shim: &Path,
     config_path: &Path,
-    config: &JailConfig,
+    config: JailConfig,
     vm_id: &str,
 ) -> io::Result<SpawnResult> {
-    let mut cmd = build_command(shim, config_path, config);
+    let mut cmd = build_command(shim, config_path, &config);
     cmd.stdin(Stdio::null());
+    if let Some(file) = config.stderr_file {
+        cmd.stderr(Stdio::from(file));
+    }
 
     // Pass watchdog FD number to the shim via environment variable.
     if let Some(fd) = config.watchdog_fd {
