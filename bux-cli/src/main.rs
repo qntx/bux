@@ -257,9 +257,7 @@ fn info(format: OutputFormat) -> Result<()> {
 
 #[cfg(unix)]
 fn disk_cmd(action: DiskAction) -> Result<()> {
-    let data_dir = dirs::data_dir()
-        .ok_or_else(|| anyhow::anyhow!("no platform data directory"))?
-        .join("bux");
+    let data_dir = bux::default_data_dir();
     let dm = bux::DiskManager::open(&data_dir)?;
 
     match action {

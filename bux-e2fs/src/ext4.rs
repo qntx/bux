@@ -161,9 +161,11 @@ impl Filesystem {
             let mut fs: sys::ext2_filsys = std::ptr::null_mut();
             let mut param: sys::ext2_super_block = std::mem::zeroed();
             param.s_blocks_count = blocks as u32;
+            param.s_blocks_count_hi = (blocks >> 32) as u32;
             param.s_log_block_size = bs as u32;
             param.s_rev_level = sys::EXT2_DYNAMIC_REV;
             param.s_r_blocks_count = reserved as u32;
+            param.s_r_blocks_count_hi = (reserved >> 32) as u32;
 
             check(
                 "ext2fs_initialize",
@@ -300,10 +302,18 @@ impl Filesystem {
             let superblock = (*self.inner).super_;
             let blocks = u64::from((*superblock).s_blocks_count)
                 | (u64::from((*superblock).s_blocks_count_hi) << 32);
-            let journal_blocks = sys::ext2fs_default_journal_size(blocks).max(0) as u32;
+            let journal_blocks = sys::ext2fs_default_journal_size(blocks);
+            if journal_blocks <= 0 {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "ext2fs_default_journal_size returned {journal_blocks} for filesystem with {blocks} blocks"
+                    ),
+                )));
+            }
             check(
                 "ext2fs_add_journal_inode",
-                sys::ext2fs_add_journal_inode(self.inner, journal_blocks, 0),
+                sys::ext2fs_add_journal_inode(self.inner, journal_blocks as u32, 0),
             )
         }
     }
@@ -476,11 +486,10 @@ fn str_to_cstring(s: &str) -> Result<CString> {
 fn walk(dir: &Path, f: &mut impl FnMut(&std::fs::Metadata)) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
-        if let Ok(meta) = path.symlink_metadata() {
-            f(&meta);
-            if meta.is_dir() {
-                walk(&path, f)?;
-            }
+        let meta = path.symlink_metadata()?;
+        f(&meta);
+        if meta.is_dir() {
+            walk(&path, f)?;
         }
     }
     Ok(())

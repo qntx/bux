@@ -29,8 +29,17 @@ pub type Result<T> = std::result::Result<T, Error>;
 ///
 /// Error codes are defined in `ext2_err.h` (base 2133571328 = 0x7F2C0000).
 fn describe_ext2fs_error(code: i64) -> String {
-    // ext2fs error table base: EXT2_ET_BASE = 2133571328
     const BASE: i64 = 2_133_571_328;
+    if let Ok(errno) = i32::try_from(code)
+        && errno > 0
+        && code < BASE
+    {
+        return format!(
+            "{} (errno {errno})",
+            std::io::Error::from_raw_os_error(errno)
+        );
+    }
+
     match code - BASE {
         1 => "bad magic number in superblock".into(),
         2 => "filesystem revision too high".into(),
@@ -51,6 +60,7 @@ fn describe_ext2fs_error(code: i64) -> String {
         25 => "short read".into(),
         26 => "short write".into(),
         28 => "filesystem too large".into(),
+        85 => "journal too small".into(),
         _ => format!("libext2fs error {code:#x}"),
     }
 }

@@ -84,7 +84,7 @@ extern "C" fn shutdown_on_exit() {
 /// Checks `$BUX_HOME` first, then falls back to platform conventions:
 /// - Linux: `$XDG_DATA_HOME/bux` or `~/.local/share/bux`
 /// - macOS: `~/Library/Application Support/bux`
-fn default_data_dir() -> PathBuf {
+pub fn default_data_dir() -> PathBuf {
     if let Ok(home) = std::env::var("BUX_HOME") {
         return PathBuf::from(home);
     }
