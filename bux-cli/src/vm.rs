@@ -154,9 +154,7 @@ pub struct RenameArgs {
 /// Opens the bux runtime from the platform data directory.
 #[cfg(unix)]
 pub fn open_runtime() -> Result<bux::Runtime> {
-    let data_dir = dirs::data_dir()
-        .context("no platform data directory")?
-        .join("bux");
+    let data_dir = bux::default_data_dir();
     Ok(bux::Runtime::open(data_dir)?)
 }
 

@@ -294,7 +294,7 @@ impl Oci {
             let config = self
                 .store
                 .load_image_config(&ref_str)?
-                .and_then(|json| serde_json::from_str(&json).ok());
+                .and_then(|json| parse_image_config(&json));
             return Ok(PullResult {
                 reference: ref_str,
                 digest,
@@ -343,10 +343,7 @@ fn parse_image_config(data: &str) -> Option<ImageConfig> {
 /// VMs always run Linux regardless of the host OS, so we must pull Linux
 /// images even when running on macOS.
 fn linux_platform_resolver(platforms: &[oci_client::manifest::ImageIndexEntry]) -> Option<String> {
-    let target_arch = match std::env::consts::ARCH {
-        "aarch64" => "arm64",
-        _ => "amd64",
-    };
+    let target_arch = target_oci_arch();
 
     // Prefer exact linux/{arch} match.
     for entry in platforms {
@@ -366,6 +363,14 @@ fn linux_platform_resolver(platforms: &[oci_client::manifest::ImageIndexEntry]) 
         }
     }
     None
+}
+
+fn target_oci_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    }
 }
 
 /// Returns the default store directory: `$BUX_HOME` or `<platform_data_dir>/bux`.

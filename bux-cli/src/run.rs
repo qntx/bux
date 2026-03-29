@@ -2,8 +2,18 @@
 //!
 //! Follows the Docker CLI convention: `bux run [OPTIONS] IMAGE [COMMAND] [ARG...]`
 
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use bux::{LogLevel, Vm};
+#[cfg(unix)]
+use sha2::{Digest, Sha256};
+
+struct ResolvedRootfs {
+    path: String,
+    oci_cfg: Option<bux_oci::ImageConfig>,
+    disk_cache_key: Option<String>,
+}
 
 /// Arguments for `bux run`.
 ///
@@ -110,7 +120,10 @@ pub struct RunArgs {
 
 impl RunArgs {
     pub async fn run(self) -> Result<()> {
-        let (rootfs, oci_cfg) = self.resolve_rootfs().await?;
+        let resolved = self.resolve_rootfs().await?;
+        let rootfs = resolved.path;
+        let oci_cfg = resolved.oci_cfg;
+        let disk_cache_key = resolved.disk_cache_key;
 
         let image = self.image.clone();
         let name = self.name;
@@ -129,7 +142,7 @@ impl RunArgs {
             b = b.root_disk(disk);
         } else if image.is_some() || use_disk {
             // OCI images always get a writable QCOW2 overlay so pip/apt work.
-            let base_path = create_disk_from_rootfs(&rootfs)?;
+            let base_path = create_disk_from_rootfs(&rootfs, disk_cache_key.as_deref())?;
             b = b.base_disk(base_path);
         } else {
             b = b.root(&rootfs);
@@ -221,15 +234,30 @@ impl RunArgs {
     }
 
     /// Resolves rootfs path and optional OCI config.
-    async fn resolve_rootfs(&self) -> Result<(String, Option<bux_oci::ImageConfig>)> {
+    async fn resolve_rootfs(&self) -> Result<ResolvedRootfs> {
         match (&self.image, &self.root, &self.root_disk) {
             (Some(img), None, None) => {
                 let oci = bux_oci::Oci::open()?;
                 let r = oci.ensure(img, |msg| eprintln!("{msg}")).await?;
-                Ok((r.rootfs.to_string_lossy().into_owned(), r.config))
+                Ok(ResolvedRootfs {
+                    path: r.rootfs.to_string_lossy().into_owned(),
+                    oci_cfg: r.config,
+                    disk_cache_key: Some(r.digest.replace(':', "-")),
+                })
             }
-            (None, Some(root), None) => Ok((root.clone(), None)),
-            (None, None, Some(_)) => Ok((String::new(), None)),
+            (None, Some(root), None) => Ok(ResolvedRootfs {
+                path: root.clone(),
+                oci_cfg: None,
+                disk_cache_key: self
+                    .disk
+                    .then(|| rootfs_cache_key(Path::new(root)))
+                    .transpose()?,
+            }),
+            (None, None, Some(_)) => Ok(ResolvedRootfs {
+                path: String::new(),
+                oci_cfg: None,
+                disk_cache_key: None,
+            }),
             _ => unreachable!("clap validation"),
         }
     }
@@ -262,26 +290,79 @@ pub fn parse_user(spec: &str) -> Result<(u32, Option<u32>)> {
 
 /// Creates an ext4 disk image from an OCI rootfs directory.
 #[cfg(unix)]
-fn create_disk_from_rootfs(rootfs: &str) -> Result<String> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let data_dir = dirs::data_dir()
-        .ok_or_else(|| anyhow::anyhow!("no platform data directory"))?
-        .join("bux");
-    let dm = bux::DiskManager::open(&data_dir)?;
-
-    let mut h = DefaultHasher::new();
-    rootfs.hash(&mut h);
-    let digest = format!("{:016x}", h.finish());
-
-    let base = dm.create_base(std::path::Path::new(rootfs), &digest)?;
+fn create_disk_from_rootfs(rootfs: &str, cache_key: Option<&str>) -> Result<String> {
+    let dm = bux::DiskManager::open(bux::default_data_dir())?;
+    let digest = match cache_key {
+        Some(digest) => digest.to_owned(),
+        None => rootfs_cache_key(Path::new(rootfs))?,
+    };
+    let base = dm.create_base(Path::new(rootfs), &digest)?;
     Ok(base.to_string_lossy().into_owned())
 }
 
 #[cfg(not(unix))]
-fn create_disk_from_rootfs(_rootfs: &str) -> Result<String> {
+fn create_disk_from_rootfs(_rootfs: &str, _cache_key: Option<&str>) -> Result<String> {
     anyhow::bail!("Disk image creation requires Linux or macOS")
+}
+
+#[cfg(unix)]
+fn rootfs_cache_key(rootfs: &Path) -> Result<String> {
+    use std::fmt::Write;
+
+    let root = std::fs::canonicalize(rootfs).unwrap_or_else(|_| rootfs.to_path_buf());
+    let mut hasher = Sha256::new();
+    hash_rootfs_entry(&root, &root, &mut hasher)?;
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    Ok(hex)
+}
+
+#[cfg(not(unix))]
+fn rootfs_cache_key(_rootfs: &Path) -> Result<String> {
+    anyhow::bail!("Disk image creation requires Linux or macOS")
+}
+
+#[cfg(unix)]
+fn hash_rootfs_entry(root: &Path, path: &Path, hasher: &mut Sha256) -> Result<()> {
+    use std::io::Read;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+
+    let meta = std::fs::symlink_metadata(path)?;
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    hasher.update(rel.as_os_str().as_bytes());
+    hasher.update(meta.mode().to_le_bytes());
+
+    if meta.is_file() {
+        hasher.update([b'f']);
+        let mut file = std::fs::File::open(path)?;
+        let mut buf = [0_u8; 8192];
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+    } else if meta.is_dir() {
+        hasher.update([b'd']);
+        let mut entries = std::fs::read_dir(path)?.collect::<std::result::Result<Vec<_>, _>>()?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            hash_rootfs_entry(root, &entry.path(), hasher)?;
+        }
+    } else if meta.is_symlink() {
+        hasher.update([b'l']);
+        let target = std::fs::read_link(path)?;
+        hasher.update(target.as_os_str().as_bytes());
+    } else {
+        hasher.update([b'o']);
+    }
+
+    Ok(())
 }
 
 #[cfg(unix)]

@@ -70,7 +70,7 @@ pub use exit_info::ExitInfo;
 #[cfg(unix)]
 pub use jail::{JailConfig, NoopSandbox, ResourceLimits, Sandbox};
 #[cfg(unix)]
-pub use runtime::{HealthStatus, RunOptions, Runtime, VmHandle};
+pub use runtime::{HealthStatus, RunOptions, Runtime, VmHandle, default_data_dir};
 #[cfg(unix)]
 pub use state::StateDb;
 pub use state::{Status, VirtioFs, VmConfig, VmState, VsockPort};
