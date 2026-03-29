@@ -293,7 +293,7 @@ async fn spawn_vm(
     auto_remove: bool,
 ) -> Result<()> {
     let rt = crate::vm::open_runtime()?;
-    let mut handle = rt.spawn(builder, image, name, auto_remove).await?;
+    let mut handle = rt.spawn(builder, image, name, auto_remove)?;
 
     let id = handle.state().id.clone();
     if detach {
