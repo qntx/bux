@@ -16,6 +16,7 @@
 )]
 
 use std::ffi::CString;
+use std::fs::OpenOptions;
 use std::path::Path;
 
 use crate::error::{Error, Result};
@@ -139,6 +140,18 @@ impl Filesystem {
     ///
     /// Equivalent to `mke2fs -t ext4 -b <block_size> -m <reserved> <path> <size>`.
     pub fn create(path: &Path, size_bytes: u64, opts: &CreateOptions) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let image = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?;
+        image.set_len(size_bytes)?;
+        drop(image);
+
         let c_path = to_cstring(path)?;
         let bs = opts.block_size;
         let blocks = size_bytes / u64::from(bs.bytes());
@@ -168,6 +181,15 @@ impl Filesystem {
             check(
                 "ext2fs_allocate_tables",
                 sys::ext2fs_allocate_tables(this.inner),
+            )?;
+            check(
+                "ext2fs_mkdir(root)",
+                sys::ext2fs_mkdir(
+                    this.inner,
+                    sys::EXT2_ROOT_INO,
+                    sys::EXT2_ROOT_INO,
+                    std::ptr::null(),
+                ),
             )?;
             Ok(this)
         }
@@ -275,9 +297,13 @@ impl Filesystem {
     /// Adds an ext3/4 journal (size auto-calculated by libext2fs).
     pub fn add_journal(&mut self) -> Result<()> {
         unsafe {
+            let superblock = (*self.inner).super_;
+            let blocks = u64::from((*superblock).s_blocks_count)
+                | (u64::from((*superblock).s_blocks_count_hi) << 32);
+            let journal_blocks = sys::ext2fs_default_journal_size(blocks).max(0) as u32;
             check(
                 "ext2fs_add_journal_inode",
-                sys::ext2fs_add_journal_inode(self.inner, 0, 0),
+                sys::ext2fs_add_journal_inode(self.inner, journal_blocks, 0),
             )
         }
     }
@@ -382,14 +408,14 @@ impl Filesystem {
 /// ```
 pub fn create_from_dir(source_dir: &Path, output: &Path, size_bytes: u64) -> Result<()> {
     let mut fs = Filesystem::create(output, size_bytes, &CreateOptions::default())?;
-    fs.populate(source_dir)?;
     fs.add_journal()?;
+    fs.populate(source_dir)?;
     Ok(())
 }
 
 /// Injects a single host file into an existing ext4 image.
 ///
-/// Equivalent to `debugfs -w -R "write <host_file> <guest_path>" <image>`.
+/// Equivalent to `debugfs -w -R "write <host_file> <guest_path>"`.
 pub fn inject_file(image: &Path, host_file: &Path, guest_path: &str) -> Result<()> {
     let mut fs = Filesystem::open(image)?;
     fs.write_file(host_file, guest_path)
