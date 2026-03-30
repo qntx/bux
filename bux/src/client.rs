@@ -14,7 +14,7 @@ mod inner {
         ControlReq, ControlResp, ExecIn, ExecOut, ExecStart, Hello, HelloAck, PROTOCOL_VERSION,
         STREAM_CHUNK_SIZE, UploadResult,
     };
-    use tokio::io::{AsyncRead, AsyncWrite};
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
     use tokio::net::UnixStream;
     use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
@@ -69,6 +69,46 @@ mod inner {
     }
 
     impl ExecHandle {
+        #[allow(clippy::missing_docs_in_private_items)]
+        async fn collect_output(
+            exec_id: String,
+            pid: i32,
+            reader: &mut OwnedReadHalf,
+            mut on: impl FnMut(&ExecOut),
+        ) -> io::Result<ExecOutput> {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            loop {
+                let msg = bux_proto::recv(reader).await?;
+                on(&msg);
+                match msg {
+                    ExecOut::Stdout(d) => stdout.extend(d),
+                    ExecOut::Stderr(d) => stderr.extend(d),
+                    ExecOut::Exit {
+                        code,
+                        signal,
+                        timed_out,
+                        duration_ms,
+                        error_message,
+                    } => {
+                        return Ok(ExecOutput {
+                            exec_id,
+                            pid,
+                            stdout,
+                            stderr,
+                            code,
+                            signal,
+                            timed_out,
+                            duration_ms,
+                            error_message,
+                        });
+                    }
+                    ExecOut::Error(e) => return Err(io::Error::other(e)),
+                    _ => {}
+                }
+            }
+        }
+
         /// Unique execution identifier.
         pub fn exec_id(&self) -> &str {
             &self.exec_id
@@ -117,71 +157,70 @@ mod inner {
         }
 
         /// Waits for the process to exit, collecting all output.
-        pub async fn wait_with_output(mut self) -> io::Result<ExecOutput> {
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            loop {
-                match self.next_output().await? {
-                    ExecOut::Stdout(d) => stdout.extend(d),
-                    ExecOut::Stderr(d) => stderr.extend(d),
-                    ExecOut::Exit {
-                        code,
-                        signal,
-                        timed_out,
-                        duration_ms,
-                        error_message,
-                    } => {
-                        return Ok(ExecOutput {
-                            exec_id: self.exec_id,
-                            pid: self.pid,
-                            stdout,
-                            stderr,
-                            code,
-                            signal,
-                            timed_out,
-                            duration_ms,
-                            error_message,
-                        });
-                    }
-                    ExecOut::Error(e) => return Err(io::Error::other(e)),
-                    _ => {}
-                }
-            }
+        pub async fn wait_with_output(self) -> io::Result<ExecOutput> {
+            let Self {
+                exec_id,
+                pid,
+                mut reader,
+                writer: _,
+            } = self;
+            Self::collect_output(exec_id, pid, &mut reader, |_| {}).await
         }
 
         /// Streams output via callback, returns collected output.
-        pub async fn stream(mut self, mut on: impl FnMut(&ExecOut)) -> io::Result<ExecOutput> {
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            loop {
-                let msg = self.next_output().await?;
-                on(&msg);
-                match msg {
-                    ExecOut::Stdout(d) => stdout.extend(d),
-                    ExecOut::Stderr(d) => stderr.extend(d),
-                    ExecOut::Exit {
-                        code,
-                        signal,
-                        timed_out,
-                        duration_ms,
-                        error_message,
-                    } => {
-                        return Ok(ExecOutput {
-                            exec_id: self.exec_id,
-                            pid: self.pid,
-                            stdout,
-                            stderr,
-                            code,
-                            signal,
-                            timed_out,
-                            duration_ms,
-                            error_message,
-                        });
+        pub async fn stream(self, on: impl FnMut(&ExecOut)) -> io::Result<ExecOutput> {
+            let Self {
+                exec_id,
+                pid,
+                mut reader,
+                writer: _,
+            } = self;
+            Self::collect_output(exec_id, pid, &mut reader, on).await
+        }
+
+        #[allow(missing_docs)]
+        pub async fn stream_with_input<R>(
+            self,
+            mut input: R,
+            on: impl FnMut(&ExecOut),
+        ) -> io::Result<ExecOutput>
+        where
+            R: AsyncRead + Unpin + Send + 'static,
+        {
+            let Self {
+                exec_id,
+                pid,
+                mut reader,
+                mut writer,
+            } = self;
+            let stdin_task = tokio::spawn(async move {
+                let mut buf = [0_u8; 8192];
+                loop {
+                    let n = input.read(&mut buf).await?;
+                    if n == 0 {
+                        return bux_proto::send(&mut writer, &ExecIn::StdinClose).await;
                     }
-                    ExecOut::Error(e) => return Err(io::Error::other(e)),
-                    _ => {}
+                    bux_proto::send(&mut writer, &ExecIn::Stdin(buf[..n].to_vec())).await?;
                 }
+            });
+
+            let output = Self::collect_output(exec_id, pid, &mut reader, on).await;
+            stdin_task.abort();
+            match stdin_task.await {
+                Ok(Err(err))
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::BrokenPipe
+                            | io::ErrorKind::ConnectionAborted
+                            | io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::UnexpectedEof
+                    ) => {}
+                Ok(Err(err)) if output.is_ok() => return Err(err),
+                Err(join_err) if join_err.is_cancelled() => {}
+                Err(join_err) if output.is_ok() => return Err(io::Error::other(join_err)),
+                Ok(Ok(()) | Err(_)) | Err(_) => {}
             }
+            output
         }
     }
 

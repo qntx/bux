@@ -24,6 +24,7 @@ use tracing::{info, warn};
 use crate::Result;
 use crate::client::{Client, ExecHandle, ExecOutput, PongInfo};
 use crate::disk::DiskManager;
+use crate::guest::ManagedGuestBinary;
 use crate::jail::{self, JailConfig};
 use crate::state::{self, StateDb, Status, VmState, VsockPort};
 use crate::vm::{Vm, VmBuilder};
@@ -236,34 +237,14 @@ impl Runtime {
             let digest = pull.digest.replace(':', "-");
             let reference = pull.reference.clone();
             tokio::task::spawn_blocking(move || -> Result<PathBuf> {
-                if disk.has_base(&digest) {
-                    return Ok(disk.base_path(&digest));
-                }
                 info!(image = %reference, "creating ext4 base image from rootfs");
-                disk.create_base(&rootfs, &digest)
+                disk.create_managed_base(&rootfs, &digest)
             })
             .await
             .map_err(io::Error::other)??
         };
 
         let mut builder = Vm::builder().base_disk(base_path.to_string_lossy());
-
-        if let Some(ref cfg) = pull.config {
-            let cmd = cfg.command();
-            if !cmd.is_empty() {
-                let args: Vec<&str> = cmd[1..].iter().map(String::as_str).collect();
-                builder = builder.exec(&cmd[0], &args);
-            }
-            if let Some(ref env) = cfg.env {
-                let refs: Vec<&str> = env.iter().map(String::as_str).collect();
-                builder = builder.env(&refs);
-            }
-            if let Some(ref wd) = cfg.working_dir
-                && !wd.is_empty()
-            {
-                builder = builder.workdir(wd);
-            }
-        }
 
         builder = configure(builder);
         let handle = self.spawn(&builder, Some(image.to_owned()), name, opts.auto_remove)?;
@@ -282,6 +263,29 @@ impl Runtime {
         name: Option<String>,
         auto_remove: bool,
     ) -> Result<VmHandle> {
+        self.spawn_impl(builder, image, name, auto_remove, true)
+    }
+
+    #[allow(missing_docs)]
+    pub fn spawn_detached(
+        &self,
+        builder: &VmBuilder,
+        image: Option<String>,
+        name: Option<String>,
+        auto_remove: bool,
+    ) -> Result<VmHandle> {
+        self.spawn_impl(builder, image, name, auto_remove, false)
+    }
+
+    #[allow(clippy::missing_docs_in_private_items)]
+    fn spawn_impl(
+        &self,
+        builder: &VmBuilder,
+        image: Option<String>,
+        name: Option<String>,
+        auto_remove: bool,
+        watch_parent: bool,
+    ) -> Result<VmHandle> {
         if let Some(ref n) = name
             && self.db.get_by_name(n)?.is_some()
         {
@@ -295,6 +299,35 @@ impl Runtime {
         let socket_str = socket.to_string_lossy().into_owned();
 
         let mut config = builder.to_config();
+        let guest = ManagedGuestBinary::resolve()?;
+        if config.exec_path.is_some() {
+            return Err(crate::Error::InvalidConfig(
+                "managed runtime no longer supports boot-time exec; start the VM, then run commands through bux exec".to_owned(),
+            ));
+        }
+        if config.workdir.is_some()
+            || config.uid.is_some()
+            || config.gid.is_some()
+            || config.env.as_ref().is_some_and(|env| !env.is_empty())
+        {
+            return Err(crate::Error::InvalidConfig(
+                "managed runtime options env/workdir/user now apply only to guest exec requests, not VM boot".to_owned(),
+            ));
+        }
+        if config.root_disk.is_some() && config.rootfs.is_none() && config.base_disk.is_none() {
+            return Err(crate::Error::InvalidConfig(
+                "managed runtime does not yet support direct root_disk boot without a managed guest-rootfs preparation step".to_owned(),
+            ));
+        }
+        if let Some(rootfs) = config.rootfs.as_deref() {
+            guest.inject_into_rootfs(Path::new(rootfs))?;
+        }
+        config.exec_path = Some(ManagedGuestBinary::exec_path().to_owned());
+        config.exec_args.clear();
+        config.env = None;
+        config.workdir = None;
+        config.uid = None;
+        config.gid = None;
         config.auto_remove = auto_remove;
         config.vsock_ports.push(VsockPort {
             port: AGENT_PORT,
@@ -312,7 +345,7 @@ impl Runtime {
         }
 
         let config_path = self.socks_dir.join(format!("{id}.json"));
-        let shim = spawn_shim(&config, &config_path, &self.socks_dir, &id)?;
+        let shim = spawn_shim(&config, &config_path, &self.socks_dir, &id, watch_parent)?;
 
         let vm_state = VmState {
             id: id.clone(),
@@ -332,7 +365,7 @@ impl Runtime {
             vm_state,
             Arc::clone(&self.db),
             self.disk.clone(),
-            Some(shim.keepalive),
+            shim.keepalive,
         ))
     }
 
@@ -599,13 +632,19 @@ impl VmHandle {
             .socket
             .with_file_name(format!("{}.json", self.state.id));
         let socks_dir = self.state.socket.parent().unwrap_or_else(|| Path::new("."));
-        let shim = spawn_shim(&self.state.config, &config_path, socks_dir, &self.state.id)?;
+        let shim = spawn_shim(
+            &self.state.config,
+            &config_path,
+            socks_dir,
+            &self.state.id,
+            true,
+        )?;
 
         self.state.pid = shim.pid;
         self.state.status = Status::Running;
         self.db.update_status(&self.state.id, Status::Running)?;
         self.client = Client::new(&self.state.socket);
-        self.keepalive = Some(shim.keepalive);
+        self.keepalive = shim.keepalive;
 
         info!(vm_id = %self.state.id, pid = shim.pid, "VM restarted");
         if !ready_timeout.is_zero() {
@@ -861,7 +900,7 @@ struct ShimSpawnResult {
     /// Child PID (as i32 for nix compatibility).
     pid: i32,
     /// Parent-side watchdog keepalive.
-    keepalive: Keepalive,
+    keepalive: Option<Keepalive>,
 }
 
 /// Writes config JSON, creates watchdog pipe, and spawns `bux-shim` inside a sandbox.
@@ -872,6 +911,7 @@ fn spawn_shim(
     config_path: &Path,
     socks_dir: &Path,
     vm_id: &str,
+    watch_parent: bool,
 ) -> io::Result<ShimSpawnResult> {
     let json =
         serde_json::to_string(config).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -881,8 +921,15 @@ fn spawn_shim(
     let stderr_path = config_path.with_extension("stderr");
     let stderr_file = fs::File::create(&stderr_path)?;
 
-    let (shim_wd_fd, keepalive) = watchdog::create()?;
+    let (shim_wd_fd, keepalive) = if watch_parent {
+        let (fd, keepalive) = watchdog::create()?;
+        (Some(fd), Some(keepalive))
+    } else {
+        (None, None)
+    };
     let shim = find_shim()?;
+    #[cfg(target_os = "macos")]
+    ensure_shim_dylib_aliases(&shim)?;
 
     let jail_config = JailConfig {
         rootfs: config.rootfs.as_deref().map(PathBuf::from),
@@ -893,7 +940,9 @@ fn spawn_shim(
             .iter()
             .map(|v| PathBuf::from(&v.path))
             .collect(),
-        watchdog_fd: Some(std::os::unix::io::AsRawFd::as_raw_fd(&shim_wd_fd)),
+        watchdog_fd: shim_wd_fd
+            .as_ref()
+            .map(std::os::unix::io::AsRawFd::as_raw_fd),
         sandbox: None,
         resource_limits: None,
         stderr_file: Some(stderr_file),
@@ -947,4 +996,35 @@ fn find_shim() -> io::Result<PathBuf> {
         io::ErrorKind::NotFound,
         format!("'{NAME}' not found; install it next to the bux binary or in $PATH"),
     ))
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::missing_docs_in_private_items)]
+fn ensure_shim_dylib_aliases(shim: &Path) -> io::Result<()> {
+    let Some(shim_dir) = shim.parent() else {
+        return Ok(());
+    };
+
+    for (src, alias) in [
+        ("libkrun.dylib", "libkrun.1.dylib"),
+        ("libkrunfw.dylib", "libkrunfw.5.dylib"),
+    ] {
+        let src_path = shim_dir.join(src);
+        let alias_path = shim_dir.join(alias);
+        if alias_path.exists() {
+            continue;
+        }
+        if !src_path.exists() {
+            continue;
+        }
+        match std::os::unix::fs::symlink(src, &alias_path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(_) => {
+                fs::copy(&src_path, &alias_path)?;
+            }
+        }
+    }
+
+    Ok(())
 }

@@ -25,6 +25,8 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(unix)]
 use crate::Result;
+#[cfg(unix)]
+use crate::guest::ManagedGuestBinary;
 
 /// Parsed QCOW2 header information extracted via `qemu-img info`.
 #[non_exhaustive]
@@ -249,6 +251,38 @@ impl DiskManager {
         Ok(path)
     }
 
+    #[allow(missing_docs)]
+    pub fn create_managed_base(&self, rootfs: &Path, digest: &str) -> Result<PathBuf> {
+        let guest = ManagedGuestBinary::resolve()?;
+        let versioned = guest.versioned_cache_key(digest);
+        let path = self.base_path(&versioned);
+        if path.exists() {
+            return Ok(path);
+        }
+
+        let size = bux_e2fs::estimate_image_size(rootfs)?
+            .saturating_add(guest.image_size_overhead_bytes());
+        let tmp = self.bases_dir.join(format!("{versioned}.raw.tmp"));
+
+        let staged = (|| -> Result<()> {
+            bux_e2fs::create_from_dir(rootfs, &tmp, size)?;
+            guest.inject_into_disk(&tmp)?;
+            Ok(())
+        })();
+
+        if let Err(err) = staged {
+            let _ = fs::remove_file(&tmp);
+            return Err(err);
+        }
+
+        if let Err(err) = fs::rename(&tmp, &path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(err.into());
+        }
+
+        Ok(path)
+    }
+
     /// Creates a QCOW2 overlay for a VM, backed by a shared base image.
     ///
     /// The overlay is ~256 KiB initially, regardless of `base` size.
@@ -327,6 +361,60 @@ impl DiskManager {
             fs::remove_file(&path)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(unix)]
+#[allow(clippy::missing_docs_in_private_items)]
+pub fn readonly_disk_paths(path: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for backing in read_backing_chain(path) {
+        if let Some(parent) = backing.parent().filter(|p| p.exists()) {
+            push_unique_path(&mut paths, parent.to_path_buf());
+        }
+        push_unique_path(&mut paths, backing);
+    }
+    paths
+}
+
+#[cfg(unix)]
+#[allow(clippy::missing_docs_in_private_items)]
+pub fn read_backing_chain(path: &Path) -> Vec<PathBuf> {
+    const MAX_BACKING_CHAIN_DEPTH: usize = 16;
+
+    let mut chain = Vec::new();
+    let mut current = path.to_path_buf();
+
+    for _ in 0..MAX_BACKING_CHAIN_DEPTH {
+        let Ok(Some(backing)) = qcow2::read_backing_file(&current) else {
+            break;
+        };
+
+        let backing_path = PathBuf::from(&backing);
+        let resolved = if backing_path.is_absolute() {
+            backing_path
+        } else if let Some(parent) = current.parent() {
+            parent.join(backing_path)
+        } else {
+            PathBuf::from(backing)
+        };
+
+        if !resolved.exists() {
+            break;
+        }
+
+        chain.push(resolved.clone());
+        current = resolved;
+    }
+
+    chain
+}
+
+#[cfg(unix)]
+#[allow(clippy::missing_docs_in_private_items)]
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|p| p == &path) {
+        paths.push(path);
     }
 }
 

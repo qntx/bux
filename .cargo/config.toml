@@ -11,3 +11,11 @@ rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN"]
 
 [target.aarch64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN"]
+
+[target.x86_64-unknown-linux-musl]
+linker = "x86_64-linux-musl-gcc"
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=-static", "-C", "link-arg=-Wl,-z,stack-size=2097152"]
+
+[target.aarch64-unknown-linux-musl]
+linker = "aarch64-linux-musl-gcc"
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=-static", "-C", "link-arg=-Wl,-z,stack-size=2097152"]

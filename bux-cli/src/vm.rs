@@ -4,6 +4,58 @@ use anyhow::{Context, Result};
 
 use crate::OutputFormat;
 
+pub fn apply_exec_options(
+    mut req: bux::ExecStart,
+    env: Vec<String>,
+    workdir: Option<&str>,
+    user: Option<&str>,
+    interactive: bool,
+    tty: bool,
+) -> Result<bux::ExecStart> {
+    if !env.is_empty() {
+        req = req.env(env);
+    }
+    if let Some(wd) = workdir.filter(|wd| !wd.is_empty()) {
+        req = req.cwd(wd);
+    }
+    if let Some(user_spec) = user {
+        let (uid, gid) = crate::run::parse_user(user_spec)?;
+        req = req.user(uid, gid.unwrap_or(uid));
+    }
+    if interactive {
+        req = req.with_stdin();
+    }
+    if tty {
+        req = req.tty(24, 80);
+    }
+    Ok(req)
+}
+
+pub async fn stream_exec_output(
+    handle: bux::ExecHandle,
+    interactive: bool,
+) -> Result<bux::ExecOutput> {
+    use std::io::Write;
+
+    let on_output = |msg: &bux_proto::ExecOut| match msg {
+        bux_proto::ExecOut::Stdout(d) => {
+            let _ = std::io::stdout().write_all(d);
+        }
+        bux_proto::ExecOut::Stderr(d) => {
+            let _ = std::io::stderr().write_all(d);
+        }
+        _ => {}
+    };
+
+    if interactive {
+        Ok(handle
+            .stream_with_input(tokio::io::stdin(), on_output)
+            .await?)
+    } else {
+        Ok(handle.stream(on_output).await?)
+    }
+}
+
 /// Arguments for `bux exec`.
 ///
 /// Usage: `bux exec [OPTIONS] CONTAINER COMMAND [ARG...]`
@@ -316,7 +368,9 @@ pub fn rm(args: &RmArgs) -> Result<()> {
 
 #[cfg(unix)]
 pub async fn exec(args: ExecArgs) -> Result<()> {
-    use std::io::Write;
+    if args.detach {
+        anyhow::bail!("detached exec is not supported")
+    }
 
     let rt = open_runtime()?;
     let handle = rt.get(&args.target)?;
@@ -330,30 +384,16 @@ pub async fn exec(args: ExecArgs) -> Result<()> {
         env_vars.extend(read_env_file(path)?);
     }
     env_vars.extend(args.env);
-    if !env_vars.is_empty() {
-        req = req.env(env_vars);
-    }
-    if let Some(ref wd) = args.workdir {
-        req = req.cwd(wd);
-    }
-    if let Some(ref user_spec) = args.user {
-        let (uid, gid) = crate::run::parse_user(user_spec)?;
-        req = req.user(uid, gid.unwrap_or(uid));
-    }
+    req = apply_exec_options(
+        req,
+        env_vars,
+        args.workdir.as_deref(),
+        args.user.as_deref(),
+        args.interactive,
+        args.tty,
+    )?;
 
-    let output = handle
-        .exec(req)
-        .await?
-        .stream(|msg| match msg {
-            bux_proto::ExecOut::Stdout(d) => {
-                let _ = std::io::stdout().write_all(d);
-            }
-            bux_proto::ExecOut::Stderr(d) => {
-                let _ = std::io::stderr().write_all(d);
-            }
-            _ => {}
-        })
-        .await?;
+    let output = stream_exec_output(handle.exec(req).await?, args.interactive).await?;
 
     if output.code != 0 {
         std::process::exit(output.code);

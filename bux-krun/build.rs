@@ -125,7 +125,9 @@ fn generate_bindings(header: &Path, out_dir: &Path) {
 fn obtain_libraries(target: &str, out_dir: &Path) -> PathBuf {
     if let Ok(dir) = env::var("BUX_DEPS_DIR") {
         eprintln!("bux-krun: using local deps: {dir}");
-        return PathBuf::from(dir);
+        let lib_dir = PathBuf::from(dir);
+        create_versioned_symlinks(&lib_dir, target);
+        return lib_dir;
     }
 
     let version = env::var("BUX_DEPS_VERSION")
@@ -135,6 +137,7 @@ fn obtain_libraries(target: &str, out_dir: &Path) -> PathBuf {
     if !lib_dir.join(lib_filename(target)).exists() {
         download_libs(&version, target, &lib_dir);
     }
+    create_versioned_symlinks(&lib_dir, target);
     lib_dir
 }
 
@@ -186,19 +189,21 @@ fn major_version(version: &str) -> &str {
 /// Create versioned symlinks (e.g. `libkrunfw.so.5 -> libkrunfw.so`) so that
 /// `dlopen("libkrunfw.so.5")` succeeds at runtime.
 fn create_versioned_symlinks(dir: &Path, target: &str) {
-    if target.contains("apple") {
-        // macOS uses unversioned dylib names — no symlinks needed.
-        return;
-    }
-
     // Derive major version from pinned version strings for soname symlinks.
     let krun_major = major_version(LIBKRUN_VERSION);
     let krunfw_major = major_version(LIBKRUNFW_VERSION);
 
-    let pairs = [
-        ("libkrun.so", format!("libkrun.so.{krun_major}")),
-        ("libkrunfw.so", format!("libkrunfw.so.{krunfw_major}")),
-    ];
+    let pairs = if target.contains("apple") {
+        [
+            ("libkrun.dylib", format!("libkrun.{krun_major}.dylib")),
+            ("libkrunfw.dylib", format!("libkrunfw.{krunfw_major}.dylib")),
+        ]
+    } else {
+        [
+            ("libkrun.so", format!("libkrun.so.{krun_major}")),
+            ("libkrunfw.so", format!("libkrunfw.so.{krunfw_major}")),
+        ]
+    };
 
     for (src, link) in &pairs {
         let src_path = dir.join(src);

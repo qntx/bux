@@ -20,10 +20,14 @@ bux-proto.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
+libc.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tar.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-std"] }
+
+[build-dependencies]
+ureq.workspace = true
 
 [lints]
 workspace = true
