@@ -120,6 +120,12 @@ pub struct RunArgs {
 
 impl RunArgs {
     pub async fn run(self) -> Result<()> {
+        if self.root_disk.is_some() {
+            anyhow::bail!(
+                "managed bux run no longer supports direct --root-disk boot; use --root/--disk or an OCI image so the runtime can prepare a managed guest rootfs"
+            )
+        }
+
         let resolved = self.resolve_rootfs().await?;
         let rootfs = resolved.path;
         let oci_cfg = resolved.oci_cfg;
@@ -128,9 +134,12 @@ impl RunArgs {
         let image = self.image.clone();
         let name = self.name;
         let detach = self.detach;
+        let interactive = self.interactive;
+        let tty = self.tty;
         let auto_remove = self.rm;
         let root_disk = self.root_disk.clone();
         let use_disk = self.disk;
+        let user = self.user;
 
         let mut b = Vm::builder()
             .vcpus(self.cpus)
@@ -149,13 +158,10 @@ impl RunArgs {
         }
 
         // Working directory: CLI flag > OCI config > none.
-        if let Some(ref wd) = self
+        let workdir = self
             .workdir
             .or_else(|| oci_cfg.as_ref()?.working_dir.clone())
-            .filter(|w| !w.is_empty())
-        {
-            b = b.workdir(wd);
-        }
+            .filter(|w| !w.is_empty());
 
         // Command: --entrypoint override > CLI args > OCI ENTRYPOINT+CMD.
         let cmd = if let Some(ep) = self.entrypoint {
@@ -170,10 +176,6 @@ impl RunArgs {
         } else {
             self.command
         };
-        if !cmd.is_empty() {
-            let args: Vec<&str> = cmd[1..].iter().map(String::as_str).collect();
-            b = b.exec(&cmd[0], &args);
-        }
 
         // Environment: OCI defaults + --env-file + CLI -e overrides.
         let mut env_file_vars = Vec::new();
@@ -188,10 +190,6 @@ impl RunArgs {
             .chain(env_file_vars)
             .chain(self.env)
             .collect();
-        if !merged_env.is_empty() {
-            let refs: Vec<&str> = merged_env.iter().map(String::as_str).collect();
-            b = b.env(&refs);
-        }
 
         // Ports: -p hostPort:guestPort[/proto]
         for spec in &self.publish {
@@ -211,15 +209,6 @@ impl RunArgs {
             b = b.rlimit(ul);
         }
 
-        // User: --user uid[:gid]
-        if let Some(ref user_spec) = self.user {
-            let (uid, gid) = parse_user(user_spec)?;
-            b = b.uid(uid);
-            if let Some(g) = gid {
-                b = b.gid(g);
-            }
-        }
-
         if self.nested_virt {
             b = b.nested_virt(true);
         }
@@ -230,7 +219,42 @@ impl RunArgs {
             b = b.console_output(path);
         }
 
-        spawn_vm(b, image, name, detach, auto_remove).await
+        let has_exec_options =
+            workdir.is_some() || user.is_some() || !merged_env.is_empty() || interactive || tty;
+        let exec_req = if cmd.is_empty() {
+            None
+        } else {
+            let args = cmd[1..].to_vec();
+            let req = bux::ExecStart::new(&cmd[0]).args(args);
+            Some(crate::vm::apply_exec_options(
+                req,
+                merged_env,
+                workdir.as_deref(),
+                user.as_deref(),
+                interactive,
+                tty,
+            )?)
+        };
+
+        if exec_req.is_none() && has_exec_options {
+            anyhow::bail!(
+                "env/workdir/user/interactive options require an initial command or image entrypoint under the managed runtime"
+            )
+        }
+
+        if detach {
+            if interactive || tty {
+                anyhow::bail!("detached run does not support -i/-t")
+            }
+            if exec_req.is_some() {
+                anyhow::bail!(
+                    "detached run with an initial command is not supported by the managed runtime; start the VM detached, then run the command with bux exec"
+                )
+            }
+            spawn_vm(b, image, name, true, auto_remove).await
+        } else {
+            run_foreground_vm(b, image, name, auto_remove, exec_req, interactive).await
+        }
     }
 
     /// Resolves rootfs path and optional OCI config.
@@ -260,6 +284,69 @@ impl RunArgs {
             }),
             _ => unreachable!("clap validation"),
         }
+    }
+}
+
+#[cfg(unix)]
+async fn run_foreground_vm(
+    builder: bux::VmBuilder,
+    image: Option<String>,
+    name: Option<String>,
+    auto_remove: bool,
+    exec_req: Option<bux::ExecStart>,
+    interactive: bool,
+) -> Result<()> {
+    let rt = crate::vm::open_runtime()?;
+    let mut handle = rt.spawn(&builder, image, name, auto_remove)?;
+    handle
+        .wait_ready(std::time::Duration::from_secs(30))
+        .await?;
+    let id = handle.state().id.clone();
+
+    let run = async move {
+        if let Some(req) = exec_req {
+            let exec_handle = handle.exec(req).await?;
+            let output = crate::vm::stream_exec_output(exec_handle, interactive).await?;
+            let code = output.code;
+            handle.stop().await?;
+            Ok::<i32, anyhow::Error>(code)
+        } else {
+            handle.wait().await?;
+            Ok::<i32, anyhow::Error>(0)
+        }
+    };
+
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+
+    let exit_code = tokio::select! {
+        result = run => result?,
+        _ = sigterm.recv() => {
+            stop_vm(&id).await?;
+            128 + libc::SIGTERM
+        }
+        _ = sigint.recv() => {
+            stop_vm(&id).await?;
+            128 + libc::SIGINT
+        }
+    };
+
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn stop_vm(id: &str) -> Result<()> {
+    let rt = crate::vm::open_runtime()?;
+    let mut handle = rt.get(id)?;
+    match handle.stop().await {
+        Err(_) if handle.is_alive() => {
+            let _ = handle.kill();
+            Ok(())
+        }
+        Ok(()) | Err(_) => Ok(()),
     }
 }
 
@@ -296,7 +383,7 @@ fn create_disk_from_rootfs(rootfs: &str, cache_key: Option<&str>) -> Result<Stri
         Some(digest) => digest.to_owned(),
         None => rootfs_cache_key(Path::new(rootfs))?,
     };
-    let base = dm.create_base(Path::new(rootfs), &digest)?;
+    let base = dm.create_managed_base(Path::new(rootfs), &digest)?;
     Ok(base.to_string_lossy().into_owned())
 }
 
@@ -374,7 +461,11 @@ async fn spawn_vm(
     auto_remove: bool,
 ) -> Result<()> {
     let rt = crate::vm::open_runtime()?;
-    let mut handle = rt.spawn(&builder, image, name, auto_remove)?;
+    let mut handle = if detach {
+        rt.spawn_detached(&builder, image, name, auto_remove)?
+    } else {
+        rt.spawn(&builder, image, name, auto_remove)?
+    };
 
     let id = handle.state().id.clone();
     if detach {

@@ -50,6 +50,8 @@ mod disk;
 mod error;
 pub mod exit_info;
 #[cfg(unix)]
+mod guest;
+#[cfg(unix)]
 mod jail;
 #[cfg(unix)]
 mod runtime;

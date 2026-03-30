@@ -196,6 +196,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "signal-hook",
  "thiserror 2.0.18",
  "tokio",
@@ -221,10 +222,12 @@ dependencies = [
  "bux-proto",
  "clap",
  "clap_complete",
+ "libc",
  "serde_json",
  "sha2 0.11.0",
  "tar",
  "tokio",
+ "ureq",
 ]
 
 [[package]]

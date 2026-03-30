@@ -12,7 +12,42 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  guest:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { guest_target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { guest_target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "${{ matrix.guest_target }}" }
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Build bux-guest
+        shell: bash
+        run: |
+          env_var="CARGO_TARGET_$(echo "${{ matrix.guest_target }}" | tr '[:lower:]-' '[:upper:]_')_LINKER"
+          export "$env_var=musl-gcc"
+          cargo build --release --target "${{ matrix.guest_target }}" -p bux-guest
+          cp "target/${{ matrix.guest_target }}/release/bux-guest" "bux-guest-${{ matrix.guest_target }}"
+          file "bux-guest-${{ matrix.guest_target }}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: guest-${{ matrix.guest_target }}
+          path: bux-guest-${{ matrix.guest_target }}
+
   build:
+    needs: guest
     strategy:
       fail-fast: false
       matrix:
@@ -35,6 +70,11 @@ jobs:
         with: { targets: "${{ matrix.target }}" }
       - uses: Swatinem/rust-cache@v2
         with: { key: "${{ matrix.target }}" }
+      - uses: actions/download-artifact@v8
+        with:
+          path: .guest
+          pattern: guest-*
+          merge-multiple: true
 
       # Cross-compile for Linux ARM64 on the x86_64 runner.
       # The Azure apt mirror lacks arm64 packages (actions/runner-images#10901),
@@ -57,6 +97,8 @@ jobs:
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
 
       - run: cargo build --release --target ${{ matrix.target }} -p bux-cli
+        env:
+          BUX_GUEST_DIR: ${{ github.workspace }}/.guest
 
       - name: Package
         shell: bash
@@ -67,8 +109,21 @@ jobs:
           target="${{ matrix.target }}"
           staging="$bin-$ver-$target"
 
+          case "$target" in
+            x86_64-*) guest_target="x86_64-unknown-linux-musl" ;;
+            aarch64-*) guest_target="aarch64-unknown-linux-musl" ;;
+            *) guest_target="" ;;
+          esac
+
           mkdir "$staging"
           cp "target/$target/release/$bin" LICENSE-MIT LICENSE-APACHE "$staging/"
+          if [ -n "$guest_target" ]; then
+            if [ -f "target/$target/release/bux-guest-$guest_target" ]; then
+              cp "target/$target/release/bux-guest-$guest_target" "$staging/"
+            elif [ -f ".guest/bux-guest-$guest_target" ]; then
+              cp ".guest/bux-guest-$guest_target" "$staging/"
+            fi
+          fi
 
           tar czf "$staging.tar.gz" -C "$staging" .
 
@@ -79,7 +134,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: dist-${{ matrix.target }}
-          path: bux-*.*
+          path: |
+            bux-*.tar.gz
+            bux-*.sha256
 
   release:
     needs: build
@@ -103,3 +160,4 @@ jobs:
           files: |
             bux-*.tar.gz
             bux-*.sha256
+            bux-guest-*

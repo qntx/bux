@@ -26,6 +26,10 @@ pub enum Error {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
+    /// Invalid VM, runtime, or managed-guest configuration.
+    #[error("{0}")]
+    InvalidConfig(String),
+
     /// A VM or resource was not found.
     #[error("{0}")]
     NotFound(String),
