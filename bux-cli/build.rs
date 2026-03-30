@@ -42,7 +42,7 @@ fn stage_guest_binary() {
     let dest = bin_dir.join(format!("bux-guest-{guest_target}"));
     let Some(source) = find_guest_binary(guest_target, &profile) else {
         println!(
-            "cargo:warning=no Linux bux-guest binary found for {guest_target}; build one and point BUX_GUEST_DIR at it, or run cargo build --target {guest_target} -p bux-guest"
+            "cargo:warning=no Linux bux-guest binary found for {guest_target}; build one and point BUX_GUEST_DIR at it, run cargo build --target {guest_target} -p bux-guest, or set BUX_GUEST_DOWNLOAD=1 to fetch a release artifact"
         );
         return;
     };

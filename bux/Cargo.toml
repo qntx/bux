@@ -35,5 +35,8 @@ rusqlite.workspace = true
 signal-hook.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "time", "sync"] }
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true
