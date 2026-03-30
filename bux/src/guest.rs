@@ -277,3 +277,84 @@ fn short_hash(data: &[u8]) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_elf(machine: u16, with_interp: bool) -> Vec<u8> {
+        let mut data = vec![0_u8; 128];
+        data[0..4].copy_from_slice(&ELF_MAGIC);
+        data[4] = 2;
+        data[5] = 1;
+        data[6] = 1;
+        data[18..20].copy_from_slice(&machine.to_le_bytes());
+        if with_interp {
+            data[32..40].copy_from_slice(&64_u64.to_le_bytes());
+            data[54..56].copy_from_slice(&56_u16.to_le_bytes());
+            data[56..58].copy_from_slice(&1_u16.to_le_bytes());
+            data[64..68].copy_from_slice(&PT_INTERP.to_le_bytes());
+        }
+        data
+    }
+
+    #[test]
+    fn accepts_static_elf_for_host_arch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bux-guest");
+        let machine = expected_machine().unwrap();
+        fs::write(&path, make_elf(machine, false)).unwrap();
+        assert!(ManagedGuestBinary::from_path(&path).is_ok());
+    }
+
+    #[test]
+    fn rejects_non_elf_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bux-guest");
+        fs::write(&path, b"not-elf").unwrap();
+        let err = ManagedGuestBinary::from_path(&path)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("valid ELF") || err.contains("Linux ELF"));
+    }
+
+    #[test]
+    fn rejects_wrong_arch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bux-guest");
+        let machine = match expected_machine().unwrap() {
+            EM_X86_64 => EM_AARCH64,
+            EM_AARCH64 => EM_X86_64,
+            other => other,
+        };
+        fs::write(&path, make_elf(machine, false)).unwrap();
+        let err = ManagedGuestBinary::from_path(&path)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("targets"));
+    }
+
+    #[test]
+    fn rejects_dynamic_elf() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bux-guest");
+        fs::write(&path, make_elf(expected_machine().unwrap(), true)).unwrap();
+        let err = ManagedGuestBinary::from_path(&path)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("dynamically linked"));
+    }
+
+    #[test]
+    fn versioned_cache_key_includes_guest_hash() {
+        let guest = ManagedGuestBinary {
+            host_path: PathBuf::from("/tmp/bux-guest"),
+            cache_key: "deadbeefcafebabe".to_owned(),
+            size_bytes: 123,
+        };
+        assert_eq!(
+            guest.versioned_cache_key("rootfs-digest"),
+            "rootfs-digest-guest-deadbeefcafebabe"
+        );
+    }
+}

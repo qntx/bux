@@ -299,35 +299,7 @@ impl Runtime {
         let socket_str = socket.to_string_lossy().into_owned();
 
         let mut config = builder.to_config();
-        let guest = ManagedGuestBinary::resolve()?;
-        if config.exec_path.is_some() {
-            return Err(crate::Error::InvalidConfig(
-                "managed runtime no longer supports boot-time exec; start the VM, then run commands through bux exec".to_owned(),
-            ));
-        }
-        if config.workdir.is_some()
-            || config.uid.is_some()
-            || config.gid.is_some()
-            || config.env.as_ref().is_some_and(|env| !env.is_empty())
-        {
-            return Err(crate::Error::InvalidConfig(
-                "managed runtime options env/workdir/user now apply only to guest exec requests, not VM boot".to_owned(),
-            ));
-        }
-        if config.root_disk.is_some() && config.rootfs.is_none() && config.base_disk.is_none() {
-            return Err(crate::Error::InvalidConfig(
-                "managed runtime does not yet support direct root_disk boot without a managed guest-rootfs preparation step".to_owned(),
-            ));
-        }
-        if let Some(rootfs) = config.rootfs.as_deref() {
-            guest.inject_into_rootfs(Path::new(rootfs))?;
-        }
-        config.exec_path = Some(ManagedGuestBinary::exec_path().to_owned());
-        config.exec_args.clear();
-        config.env = None;
-        config.workdir = None;
-        config.uid = None;
-        config.gid = None;
+        prepare_managed_config(&mut config)?;
         config.auto_remove = auto_remove;
         config.vsock_ports.push(VsockPort {
             port: AGENT_PORT,
@@ -627,6 +599,8 @@ impl VmHandle {
             )));
         }
 
+        prepare_managed_config(&mut self.state.config)?;
+
         let config_path = self
             .state
             .socket
@@ -901,6 +875,43 @@ struct ShimSpawnResult {
     pid: i32,
     /// Parent-side watchdog keepalive.
     keepalive: Option<Keepalive>,
+}
+
+fn prepare_managed_config(config: &mut state::VmConfig) -> Result<()> {
+    let guest = ManagedGuestBinary::resolve()?;
+
+    if let Some(exec_path) = config.exec_path.as_deref()
+        && exec_path != ManagedGuestBinary::exec_path()
+    {
+        return Err(crate::Error::InvalidConfig(
+            "managed runtime no longer supports boot-time exec; start the VM, then run commands through bux exec".to_owned(),
+        ));
+    }
+    if config.workdir.is_some()
+        || config.uid.is_some()
+        || config.gid.is_some()
+        || config.env.as_ref().is_some_and(|env| !env.is_empty())
+    {
+        return Err(crate::Error::InvalidConfig(
+            "managed runtime options env/workdir/user now apply only to guest exec requests, not VM boot".to_owned(),
+        ));
+    }
+    if config.root_disk.is_some() && config.rootfs.is_none() && config.base_disk.is_none() {
+        return Err(crate::Error::InvalidConfig(
+            "managed runtime does not yet support direct root_disk boot without a managed guest-rootfs preparation step".to_owned(),
+        ));
+    }
+    if let Some(rootfs) = config.rootfs.as_deref() {
+        guest.inject_into_rootfs(Path::new(rootfs))?;
+    }
+
+    config.exec_path = Some(ManagedGuestBinary::exec_path().to_owned());
+    config.exec_args.clear();
+    config.env = None;
+    config.workdir = None;
+    config.uid = None;
+    config.gid = None;
+    Ok(())
 }
 
 /// Writes config JSON, creates watchdog pipe, and spawns `bux-shim` inside a sandbox.
