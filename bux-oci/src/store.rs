@@ -43,11 +43,14 @@ pub struct ImageMeta {
 }
 
 /// Content-addressed OCI image store with SQLite indexing.
+///
+/// The SQLite connection is wrapped in a `Mutex` so that `Store` is
+/// `Send + Sync` without requiring unsafe.
 pub struct Store {
     /// Root directory for the store.
     root: PathBuf,
-    /// SQLite database connection.
-    db: Connection,
+    /// SQLite database connection, protected by a mutex.
+    db: std::sync::Mutex<Connection>,
 }
 
 impl std::fmt::Debug for Store {
@@ -99,8 +102,18 @@ impl Store {
 
         Ok(Self {
             root: root.to_path_buf(),
-            db,
+            db: std::sync::Mutex::new(db),
         })
+    }
+
+    /// Acquires the database connection lock.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the mutex is poisoned (prior panic during DB operation).
+    #[allow(clippy::expect_used)]
+    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.db.lock().expect("Store db mutex poisoned")
     }
 
     /// Returns the path to a layer tarball on disk.
@@ -134,7 +147,7 @@ impl Store {
         let final_path = self.layer_path(digest);
         fs::rename(&staging, &final_path)?;
 
-        self.db
+        self.lock()
             .execute(
                 "INSERT INTO layers (digest, media_type, size)
                  VALUES (?1, ?2, ?3)
@@ -224,7 +237,8 @@ impl Store {
         config_digest: &str,
         layer_digests: &[String],
     ) -> crate::Result<()> {
-        let tx = self.db.unchecked_transaction().db()?;
+        let conn = self.lock();
+        let tx = conn.unchecked_transaction().db()?;
 
         // Load config JSON from blob store for embedding in the DB.
         let config_json = fs::read_to_string(self.config_path(config_digest)).ok();
@@ -272,8 +286,8 @@ impl Store {
 
     /// Lists all stored images.
     pub fn list_images(&self) -> crate::Result<Vec<ImageMeta>> {
-        let mut stmt = self
-            .db
+        let conn = self.lock();
+        let mut stmt = conn
             .prepare("SELECT reference, digest, size, created FROM images ORDER BY created DESC")
             .db()?;
 
@@ -297,11 +311,12 @@ impl Store {
 
     /// Loads the stored image config JSON for a reference.
     pub fn load_image_config(&self, reference: &str) -> crate::Result<Option<String>> {
-        match self.db.query_row(
+        let result = self.lock().query_row(
             "SELECT config FROM images WHERE reference = ?1",
             params![reference],
             |row| row.get(0),
-        ) {
+        );
+        match result {
             Ok(json) => Ok(Some(json)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(crate::Error::Db(e.to_string())),
@@ -310,7 +325,7 @@ impl Store {
 
     /// Looks up the manifest digest for a reference, if cached.
     pub fn get_digest(&self, reference: &str) -> crate::Result<Option<String>> {
-        let result: rusqlite::Result<String> = self.db.query_row(
+        let result: rusqlite::Result<String> = self.lock().query_row(
             "SELECT digest FROM images WHERE reference = ?1",
             params![reference],
             |row| row.get(0),
@@ -328,17 +343,18 @@ impl Store {
         // Look up digest for rootfs cleanup.
         let digest = self.get_digest(reference)?;
 
+        let conn = self.lock();
+
         // Decrement layer ref counts and collect orphans.
         let layer_digests: Vec<String> = {
-            let mut stmt = self
-                .db
+            let mut stmt = conn
                 .prepare("SELECT layer_digest FROM image_layers WHERE image_ref = ?1")
                 .db()?;
             let rows = stmt.query_map(params![reference], |row| row.get(0)).db()?;
             rows.filter_map(Result::ok).collect()
         };
 
-        let tx = self.db.unchecked_transaction().db()?;
+        let tx = conn.unchecked_transaction().db()?;
 
         for ld in &layer_digests {
             tx.execute(
@@ -372,6 +388,7 @@ impl Store {
         tx.commit().db()?;
 
         // Remove rootfs directory.
+        drop(conn);
         if let Some(ref d) = digest {
             let rootfs = self.rootfs_path(d);
             if rootfs.exists() {

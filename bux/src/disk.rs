@@ -362,6 +362,53 @@ impl DiskManager {
         }
         Ok(())
     }
+
+    /// Returns the total disk usage of all bases and VM overlays in bytes.
+    pub fn disk_usage(&self) -> io::Result<u64> {
+        let bases = dir_size(&self.bases_dir)?;
+        let vms = dir_size(&self.vms_dir)?;
+        Ok(bases + vms)
+    }
+
+    /// Checks if at least `needed_bytes` of free space is available
+    /// on the filesystem where the disk storage is located.
+    ///
+    /// Returns `Ok(())` if sufficient space exists, or an error if not.
+    pub fn check_space(&self, needed_bytes: u64) -> io::Result<()> {
+        let stat = nix::sys::statvfs::statvfs(&self.bases_dir)?;
+        let frag: u64 = stat.fragment_size();
+        let blocks: u64 = stat.blocks_available().into();
+        let available = frag * blocks;
+        if available < needed_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                format!(
+                    "insufficient disk space: need {needed_bytes} bytes, only {available} available",
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Calculates total size of all regular files in a directory (non-recursive).
+#[cfg(unix)]
+fn dir_size(dir: &Path) -> io::Result<u64> {
+    let mut total = 0_u64;
+    match fs::read_dir(dir) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata()
+                    && meta.is_file()
+                {
+                    total += meta.len();
+                }
+            }
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    Ok(total)
 }
 
 #[cfg(unix)]

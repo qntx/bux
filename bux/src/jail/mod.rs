@@ -11,6 +11,7 @@
 //! [bubblewrap]: https://github.com/containers/bubblewrap
 //! [seatbelt]: https://developer.apple.com/documentation/sandbox
 
+pub mod checks;
 mod pre_exec;
 
 #[cfg(target_os = "linux")]
@@ -31,6 +32,20 @@ pub use bwrap::BwrapSandbox;
 #[cfg(target_os = "macos")]
 pub use seatbelt::SeatbeltSandbox;
 
+/// Describes the isolation features provided by a [`Sandbox`] implementation.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct SandboxCapabilities {
+    /// Whether the sandbox provides namespace isolation (mount, PID, net, etc.).
+    pub namespaces: bool,
+    /// Whether the sandbox applies seccomp BPF syscall filtering.
+    pub seccomp: bool,
+    /// Whether mandatory access control is enforced (AppArmor/SELinux/Seatbelt).
+    pub mandatory_access_control: bool,
+    /// Whether cgroup-based resource limits are enforced.
+    pub cgroups: bool,
+}
+
 /// Trait for platform-specific process sandboxing.
 ///
 /// Implementations wrap a `Command` with isolation primitives (namespaces,
@@ -42,6 +57,13 @@ pub trait Sandbox: std::fmt::Debug + Send + Sync {
     /// inside the sandbox, or `None` if the sandbox is not available on
     /// this system (e.g. bwrap binary not installed).
     fn wrap(&self, shim: &Path, config_path: &Path, jail: &JailConfig) -> Option<Command>;
+
+    /// Returns the isolation capabilities this sandbox provides.
+    ///
+    /// Used for security auditing and reporting.
+    fn capabilities(&self) -> SandboxCapabilities {
+        SandboxCapabilities::default()
+    }
 }
 
 /// No-op sandbox: runs the shim directly with no additional isolation.
