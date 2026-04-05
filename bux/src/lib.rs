@@ -11,7 +11,7 @@
 //! # async fn example() -> bux::Result<()> {
 //! use bux::{Runtime, ExecStart};
 //!
-//! let rt = Runtime::global()?;
+//! let rt = Runtime::open(bux::default_data_dir())?;
 //! let mut vm = rt.run("python:slim", |b| b.vcpus(2).ram_mib(1024), None).await?;
 //!
 //! // Each VM gets a writable QCOW2 overlay — install packages, write files, etc.
@@ -22,6 +22,7 @@
 //! // Stop preserves disk state; start resumes from the same overlay.
 //! vm.stop().await?;
 //! vm.start(std::time::Duration::from_secs(30)).await?;
+//! // Runtime::drop() gracefully stops all active VMs.
 //! # Ok(())
 //! # }
 //! ```
@@ -48,13 +49,19 @@
 mod client;
 mod disk;
 mod error;
+pub mod events;
 pub mod exit_info;
 #[cfg(unix)]
 mod guest;
 #[cfg(unix)]
+pub mod health;
+#[cfg(unix)]
 mod jail;
+pub mod metrics;
 #[cfg(unix)]
 mod runtime;
+#[cfg(unix)]
+pub mod snapshot;
 mod state;
 mod sys;
 mod vm;
@@ -68,13 +75,23 @@ pub use client::{Client, ExecHandle, ExecOutput, PongInfo};
 pub use disk::{Disk, DiskManager};
 pub use disk::{DiskFormat, QcowHeader};
 pub use error::{Error, Result};
+pub use events::{
+    AuditEvent, AuditEventKind, CopyDirection, EventDispatcher, EventListener, RingBufferListener,
+};
 pub use exit_info::ExitInfo;
 #[cfg(unix)]
-pub use jail::{JailConfig, NoopSandbox, ResourceLimits, Sandbox};
+pub use health::{HealthCheckConfig, HealthCheckHandle};
+pub use metrics::{BoxMetrics, RuntimeMetrics};
+#[cfg(unix)]
+pub use jail::checks::{HostCapabilities, audit_isolation, check_guest_binary, check_host};
+#[cfg(unix)]
+pub use jail::{JailConfig, NoopSandbox, ResourceLimits, Sandbox, SandboxCapabilities};
 #[cfg(unix)]
 pub use runtime::{HealthStatus, RunOptions, Runtime, VmHandle, default_data_dir};
 #[cfg(unix)]
-pub use state::StateDb;
-pub use state::{Status, VirtioFs, VmConfig, VmState, VsockPort};
+pub use snapshot::{SnapshotInfo, SnapshotManager};
+#[cfg(unix)]
+pub use state::{BaseDiskRow, QuotaRow, SnapshotRow, StateDb};
+pub use state::{HealthState, Status, VirtioFs, VmConfig, VmState, VsockPort};
 pub use sys::{Feature, KernelFormat, LogStyle, SyncMode};
 pub use vm::{LogLevel, Vm, VmBuilder};

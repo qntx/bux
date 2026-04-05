@@ -222,6 +222,7 @@ const fn machine_name(machine: u16) -> &'static str {
     }
 }
 
+#[allow(clippy::cast_possible_truncation)]
 fn has_pt_interp(data: &[u8]) -> bool {
     if data.len() < 64 {
         return false;
@@ -279,6 +280,7 @@ fn short_hash(data: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

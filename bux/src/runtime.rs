@@ -9,7 +9,6 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 use std::{fs, io};
@@ -24,8 +23,11 @@ use tracing::{info, warn};
 use crate::Result;
 use crate::client::{Client, ExecHandle, ExecOutput, PongInfo};
 use crate::disk::DiskManager;
+use crate::events::{AuditEvent, AuditEventKind, EventDispatcher};
 use crate::guest::ManagedGuestBinary;
 use crate::jail::{self, JailConfig};
+use crate::metrics::{BoxMetrics, RuntimeMetrics};
+use crate::snapshot::SnapshotManager;
 use crate::state::{self, StateDb, Status, VmState, VsockPort};
 use crate::vm::{Vm, VmBuilder};
 use crate::watchdog::{self, Keepalive};
@@ -68,17 +70,11 @@ impl Default for RunOptions {
 }
 
 /// Global default runtime singleton.
+///
+/// **Deprecated**: prefer creating `Runtime` instances explicitly with
+/// [`Runtime::open()`] and managing their lifetime via `Arc<Runtime>`.
+/// This global will be removed in a future release.
 static DEFAULT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
-
-/// Ensures atexit handler is registered only once.
-static ATEXIT_INSTALLED: AtomicBool = AtomicBool::new(false);
-
-/// Atexit handler: stops non-detached VMs on normal process exit.
-extern "C" fn shutdown_on_exit() {
-    if let Some(rt) = DEFAULT_RUNTIME.get() {
-        rt.shutdown_sync();
-    }
-}
 
 /// Returns the platform-default data directory for bux.
 ///
@@ -109,18 +105,18 @@ pub struct Runtime {
     oci: bux_oci::Oci,
     /// Advisory lock — held for the lifetime of this `Runtime`.
     _lock: Flock<fs::File>,
+    /// Snapshot manager.
+    snapshots: SnapshotManager,
+    /// Runtime-level metrics (atomic counters).
+    metrics: Arc<RuntimeMetrics>,
+    /// Audit event dispatcher.
+    events: Arc<EventDispatcher>,
 }
 
-// SAFETY: Runtime is protected by an exclusive file lock — only one instance
-// per data directory. The OnceLock<Runtime> static requires Send + Sync, but
-// rusqlite::Connection and oci_client::Client are !Sync. This is safe because:
-// 1. The file lock guarantees single-process access.
-// 2. Runtime::global() returns &'static Self — no ownership transfer.
-// 3. All public methods take &self and execute sequentially (no interior mut races).
-#[allow(unsafe_code)]
-unsafe impl Send for Runtime {}
-#[allow(unsafe_code)]
-unsafe impl Sync for Runtime {}
+// Runtime is Send + Sync because:
+// - StateDb wraps Connection in Mutex<Connection>
+// - Oci (bux_oci::Oci) wraps its Connection in Mutex<Connection>
+// - All other fields are naturally Send + Sync
 
 impl Runtime {
     /// Opens (or creates) the runtime data directory and database.
@@ -143,17 +139,20 @@ impl Runtime {
         let socks_dir = base.join("socks");
         fs::create_dir_all(&socks_dir)?;
 
-        let db = StateDb::open(base.join("bux.db"))?;
+        let db = Arc::new(StateDb::open(base.join("bux.db"))?);
         let disk = DiskManager::open(base)?;
         let oci = bux_oci::Oci::open_at(base)?;
+        let snapshots = SnapshotManager::new(Arc::clone(&db), base)?;
 
-        #[allow(clippy::arc_with_non_send_sync)]
         let rt = Self {
-            db: Arc::new(db),
+            db,
             socks_dir,
             disk,
             oci,
             _lock: lock,
+            snapshots,
+            metrics: Arc::new(RuntimeMetrics::new()),
+            events: Arc::new(EventDispatcher::new()),
         };
 
         rt.recover();
@@ -163,30 +162,26 @@ impl Runtime {
 
     /// Returns the global default runtime, creating it on first call.
     ///
-    /// Uses [`default_data_dir()`] for the data directory. Installs an
-    /// atexit handler and signal handler for graceful shutdown.
+    /// Uses [`default_data_dir()`] for the data directory.
+    ///
+    /// # Deprecation
+    ///
+    /// **Prefer [`Runtime::open()`]** and manage the runtime lifetime
+    /// explicitly (e.g. via `Arc<Runtime>`). The global singleton prevents
+    /// multiple data directories and makes shutdown ordering implicit.
+    /// This method will be removed in a future release.
     ///
     /// # Errors
     ///
     /// Returns an error if runtime initialization fails (filesystem,
     /// lock, database).
+    #[deprecated(since = "0.8.0", note = "use Runtime::open() instead")]
     pub fn global() -> Result<&'static Self> {
         if let Some(rt) = DEFAULT_RUNTIME.get() {
             return Ok(rt);
         }
 
         let _ = DEFAULT_RUNTIME.set(Self::open(default_data_dir())?);
-
-        // Register atexit handler (once).
-        if ATEXIT_INSTALLED
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            #[allow(unsafe_code)]
-            unsafe {
-                libc::atexit(shutdown_on_exit);
-            }
-        }
 
         // SAFETY: we just called .set() above; if another thread raced us,
         // .get() still returns their value — either way it's Some.
@@ -201,6 +196,77 @@ impl Runtime {
     /// Returns a reference to the OCI image manager.
     pub const fn oci(&self) -> &bux_oci::Oci {
         &self.oci
+    }
+
+    /// Returns a reference to the snapshot manager.
+    pub const fn snapshots(&self) -> &SnapshotManager {
+        &self.snapshots
+    }
+
+    /// Returns a reference to the runtime-level metrics.
+    pub fn metrics(&self) -> &RuntimeMetrics {
+        &self.metrics
+    }
+
+    /// Returns a reference to the event dispatcher.
+    ///
+    /// Use this to register [`EventListener`](crate::EventListener)
+    /// implementations that will receive audit events.
+    pub fn events(&self) -> &EventDispatcher {
+        &self.events
+    }
+
+    /// Sets resource quota limits for a tenant.
+    pub fn set_quota(&self, tenant: &str, quota: &state::QuotaRow) -> Result<()> {
+        self.db.set_quota(quota)?;
+        info!(tenant, "quota updated");
+        Ok(())
+    }
+
+    /// Returns the resource quota for a tenant, if configured.
+    pub fn get_quota(&self, tenant: &str) -> Result<Option<state::QuotaRow>> {
+        self.db.get_quota(tenant)
+    }
+
+    /// Returns the current total disk usage of all bases and overlays in bytes.
+    pub fn disk_usage(&self) -> io::Result<u64> {
+        self.disk.disk_usage()
+    }
+
+    /// Garbage-collects orphaned base disk images (ref_count <= 0).
+    ///
+    /// Returns the number of base images removed.
+    pub fn gc(&self) -> Result<u32> {
+        let orphans = self.db.orphaned_base_disks()?;
+        let mut removed = 0_u32;
+        for orphan in &orphans {
+            let _ = self.disk.remove_base(&orphan.digest);
+            self.db.delete_base_disk(&orphan.id)?;
+            removed += 1;
+        }
+        if removed > 0 {
+            info!(removed, "garbage collection complete");
+        }
+        // Update disk usage gauge after cleanup.
+        if let Ok(usage) = self.disk.disk_usage() {
+            self.metrics.set_disk_bytes_used(usage);
+        }
+        Ok(removed)
+    }
+
+    /// Checks that the tenant's quota allows creating another VM.
+    fn check_quota(&self, tenant: &str) -> Result<()> {
+        if let Some(quota) = self.db.get_quota(tenant)?
+            && let Some(max) = quota.max_boxes
+        {
+            let current = self.db.count_boxes_by_tenant(tenant)?;
+            if current >= max {
+                return Err(crate::Error::QuotaExceeded(format!(
+                    "tenant '{tenant}' already has {current}/{max} VMs"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// One-shot: pull image → create base disk → spawn VM with writable overlay.
@@ -219,6 +285,9 @@ impl Runtime {
     }
 
     /// Like [`run`](Self::run) but with explicit options and progress callback.
+    ///
+    /// Checks tenant quota limits before creating the VM. Pass `tenant`
+    /// via [`RunOptions`] (defaults to `"default"`).
     pub async fn run_opts(
         &self,
         image: &str,
@@ -227,6 +296,9 @@ impl Runtime {
         opts: &RunOptions,
         on_progress: impl Fn(&str),
     ) -> Result<VmHandle> {
+        // Quota check: enforce max_boxes limit for the tenant.
+        self.check_quota("default")?;
+
         let pull = self.oci.ensure(image, &on_progress).await?;
 
         // Convert rootfs directory → ext4 base image (idempotent, cached by digest).
@@ -333,11 +405,21 @@ impl Runtime {
 
         info!(vm_id = %id, pid = shim.pid, "VM spawned");
 
+        self.metrics.on_box_created();
+        self.events.emit(AuditEvent::now(AuditEventKind::BoxCreated {
+            id,
+            image: vm_state.image.clone(),
+            tenant: "default".to_owned(),
+        }));
+
         Ok(VmHandle::new(
             vm_state,
             Arc::clone(&self.db),
             self.disk.clone(),
             shim.keepalive,
+            Arc::clone(&self.metrics),
+            Arc::clone(&self.events),
+            self.snapshots.clone(),
         ))
     }
 
@@ -382,6 +464,9 @@ impl Runtime {
             Arc::clone(&self.db),
             self.disk.clone(),
             None,
+            Arc::clone(&self.metrics),
+            Arc::clone(&self.events),
+            self.snapshots.clone(),
         ))
     }
 
@@ -415,14 +500,18 @@ impl Runtime {
         let _ = self.disk.remove_vm_disk(&state.id);
         self.db.delete(&state.id)?;
         info!(vm_id = %state.id, "VM removed");
+        self.events.emit(AuditEvent::now(AuditEventKind::BoxRemoved {
+            id: state.id.clone(),
+        }));
         Ok(())
     }
 
     /// Gracefully stops all active VMs.
     ///
     /// Sends `SIGTERM` to each shim process, waits briefly, then
-    /// `SIGKILL` any survivors. Called by the atexit handler and
-    /// can be called manually for coordinated shutdown.
+    /// `SIGKILL` any survivors. Called automatically when the
+    /// `Runtime` is dropped, or can be called manually for
+    /// coordinated shutdown.
     pub fn shutdown_sync(&self) {
         let Ok(vms) = self.db.list() else { return };
 
@@ -516,6 +605,12 @@ impl Runtime {
     }
 }
 
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        self.shutdown_sync();
+    }
+}
+
 /// Handle to a single managed VM.
 #[derive(Debug)]
 pub struct VmHandle {
@@ -530,6 +625,16 @@ pub struct VmHandle {
     /// Watchdog keepalive — dropping this signals the shim to shut down.
     /// `None` when reconnecting to a VM spawned in a previous session.
     keepalive: Option<Keepalive>,
+    /// Runtime-level metrics (shared with Runtime).
+    runtime_metrics: Arc<RuntimeMetrics>,
+    /// Per-box metrics for this VM.
+    box_metrics: BoxMetrics,
+    /// Event dispatcher (shared with Runtime).
+    events: Arc<EventDispatcher>,
+    /// Snapshot manager (shared with Runtime).
+    snapshots: SnapshotManager,
+    /// When this VM was spawned (for uptime tracking).
+    spawned_at: std::time::Instant,
 }
 
 impl VmHandle {
@@ -539,6 +644,9 @@ impl VmHandle {
         db: Arc<StateDb>,
         disk: DiskManager,
         keepalive: Option<Keepalive>,
+        runtime_metrics: Arc<RuntimeMetrics>,
+        events: Arc<EventDispatcher>,
+        snapshots: SnapshotManager,
     ) -> Self {
         let client = Client::new(&state.socket);
         Self {
@@ -547,6 +655,11 @@ impl VmHandle {
             disk,
             client,
             keepalive,
+            runtime_metrics,
+            box_metrics: BoxMetrics::new(),
+            events,
+            snapshots,
+            spawned_at: std::time::Instant::now(),
         }
     }
 
@@ -558,6 +671,69 @@ impl VmHandle {
     /// Returns a reference to the stateless client.
     pub const fn client(&self) -> &Client {
         &self.client
+    }
+
+    /// Returns per-box metrics for this VM.
+    pub const fn box_metrics(&self) -> &BoxMetrics {
+        &self.box_metrics
+    }
+
+    /// Creates a point-in-time snapshot of this VM's disk.
+    ///
+    /// If the VM is running, guest filesystems are quiesced first.
+    pub async fn create_snapshot(
+        &self,
+        name: Option<&str>,
+    ) -> Result<crate::snapshot::SnapshotInfo> {
+        let overlay = self.state.config.root_disk.as_deref().ok_or_else(|| {
+            crate::Error::InvalidState("VM has no overlay disk to snapshot".to_owned())
+        })?;
+
+        let info = self
+            .snapshots
+            .create(
+                &self.state.id,
+                self.state.status,
+                Path::new(overlay),
+                &self.client,
+                name,
+            )
+            .await?;
+
+        self.events
+            .emit(AuditEvent::now(AuditEventKind::SnapshotCreated {
+                box_id: self.state.id.clone(),
+                snapshot_id: info.id.clone(),
+            }));
+
+        Ok(info)
+    }
+
+    /// Lists all snapshots for this VM.
+    pub fn list_snapshots(&self) -> Result<Vec<crate::snapshot::SnapshotInfo>> {
+        self.snapshots.list(&self.state.id)
+    }
+
+    /// Deletes a snapshot by ID.
+    pub fn delete_snapshot(&self, snapshot_id: &str) -> Result<()> {
+        self.snapshots.delete(snapshot_id)
+    }
+
+    /// Starts a background health check task for this VM.
+    ///
+    /// The task periodically pings the guest agent and updates the VM's
+    /// health state in the database. Dropping the returned handle cancels
+    /// the background task.
+    pub fn enable_health_check(
+        &self,
+        config: crate::health::HealthCheckConfig,
+    ) -> crate::health::HealthCheckHandle {
+        crate::health::start(
+            self.state.id.clone(),
+            self.client.clone(),
+            Arc::clone(&self.db),
+            config,
+        )
     }
 
     /// Probes the guest agent and returns the current health status.
@@ -578,13 +754,46 @@ impl VmHandle {
     }
 
     /// Starts a command on a dedicated exec connection.
+    ///
+    /// Emits an [`ExecStarted`](AuditEventKind::ExecStarted) audit event.
+    /// The caller is responsible for collecting output and calling
+    /// [`exec_output`](Self::exec_output) if they want
+    /// [`ExecCompleted`](AuditEventKind::ExecCompleted) to be emitted.
     pub async fn exec(&self, req: ExecStart) -> Result<ExecHandle> {
-        Ok(self.client.exec(req).await?)
+        let cmd = req.cmd.clone();
+        let handle = self.client.exec(req).await?;
+        self.events
+            .emit(AuditEvent::now(AuditEventKind::ExecStarted {
+                box_id: self.state.id.clone(),
+                command: cmd,
+                exec_id: handle.exec_id().to_owned(),
+            }));
+        Ok(handle)
     }
 
     /// Executes a command and collects all output.
+    ///
+    /// Emits both [`ExecStarted`](AuditEventKind::ExecStarted) and
+    /// [`ExecCompleted`](AuditEventKind::ExecCompleted) audit events,
+    /// and updates [`BoxMetrics::exec_count`](crate::BoxMetrics).
     pub async fn exec_output(&self, req: ExecStart) -> Result<ExecOutput> {
-        Ok(self.client.exec_output(req).await?)
+        let cmd = req.cmd.clone();
+        let output = self.client.exec_output(req).await?;
+        self.events
+            .emit(AuditEvent::now(AuditEventKind::ExecStarted {
+                box_id: self.state.id.clone(),
+                command: cmd,
+                exec_id: output.exec_id.clone(),
+            }));
+        self.events
+            .emit(AuditEvent::now(AuditEventKind::ExecCompleted {
+                box_id: self.state.id.clone(),
+                exec_id: output.exec_id.clone(),
+                exit_code: output.code,
+                duration_ms: output.duration_ms,
+            }));
+        self.box_metrics.on_exec_completed(output.duration_ms);
+        Ok(output)
     }
 
     /// Restarts a stopped VM from its preserved QCOW2 overlay disk.
@@ -621,6 +830,11 @@ impl VmHandle {
         self.keepalive = shim.keepalive;
 
         info!(vm_id = %self.state.id, pid = shim.pid, "VM restarted");
+        self.spawned_at = std::time::Instant::now();
+        self.events
+            .emit(AuditEvent::now(AuditEventKind::BoxStarted {
+                id: self.state.id.clone(),
+            }));
         if !ready_timeout.is_zero() {
             let _ = self.wait_ready(ready_timeout).await;
         }
@@ -721,10 +935,11 @@ impl VmHandle {
     /// Races handshake probes against shim process death detection.
     /// On failure, reads the shim's exit file for structured diagnostics.
     pub async fn wait_ready(&self, timeout: Duration) -> io::Result<()> {
+        let start = std::time::Instant::now();
         let pid = self.state.pid;
         let exit_file = self.state.socket.with_extension("exit");
 
-        tokio::time::timeout(timeout, async {
+        let result = tokio::time::timeout(timeout, async {
             let handshake_loop = async {
                 loop {
                     if self.client.handshake().await.is_ok() {
@@ -750,7 +965,14 @@ impl VmHandle {
             }
         })
         .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "guest agent did not become ready"))?
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "guest agent did not become ready"))?;
+
+        // Record boot duration on success.
+        if result.is_ok() {
+            let boot_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            self.box_metrics.set_boot_duration_ms(boot_ms);
+        }
+        result
     }
 
     /// Reads a file from the guest filesystem.
@@ -804,6 +1026,13 @@ impl VmHandle {
     /// deletes the VM record, socket, and disk image.
     fn mark_stopped(&mut self) -> Result<()> {
         self.state.status = Status::Stopped;
+
+        let uptime_ms = u64::try_from(self.spawned_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.runtime_metrics.on_box_stopped(uptime_ms);
+        self.events.emit(AuditEvent::now(AuditEventKind::BoxStopped {
+            id: self.state.id.clone(),
+            exit_code: None,
+        }));
 
         if self.state.config.auto_remove {
             clean_vm_files(&self.state.socket);
@@ -877,6 +1106,7 @@ struct ShimSpawnResult {
     keepalive: Option<Keepalive>,
 }
 
+/// Resolves the managed guest binary and validates the VM configuration for managed mode.
 fn prepare_managed_config(config: &mut state::VmConfig) -> Result<()> {
     let guest = ManagedGuestBinary::resolve()?;
 

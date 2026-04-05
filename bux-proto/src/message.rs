@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Wire protocol version. Bumped on every incompatible change.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Default chunk size for streaming transfers (1 MiB).
 pub const STREAM_CHUNK_SIZE: usize = 1 << 20;
@@ -96,6 +96,12 @@ pub enum ControlReq {
     Quiesce,
     /// Thaw previously frozen filesystems (`FITHAW`).
     Thaw,
+    /// Request guest resource metrics (CPU, memory, disk I/O).
+    Metrics,
+    /// Run a deep health check (beyond simple ping).
+    HealthCheck,
+    /// Prepare for an external snapshot (quiesce + sync + signal ready).
+    PrepareSnapshot,
 }
 
 /// Guest → host on a control connection.
@@ -121,6 +127,24 @@ pub enum ControlResp {
         /// Number of filesystems thawed.
         thawed_count: u32,
     },
+    /// Reply to [`ControlReq::Metrics`]: guest resource usage.
+    MetricsData {
+        /// CPU usage as a percentage (0.0–100.0+).
+        cpu_percent: f32,
+        /// RSS memory usage in bytes.
+        memory_bytes: u64,
+        /// Total disk read bytes since boot.
+        disk_read_bytes: u64,
+        /// Total disk write bytes since boot.
+        disk_write_bytes: u64,
+    },
+    /// Reply to [`ControlReq::HealthCheck`]: deep health check passed.
+    HealthOk {
+        /// Number of checks that passed.
+        checks_passed: u32,
+    },
+    /// Reply to [`ControlReq::PrepareSnapshot`]: guest is snapshot-ready.
+    SnapshotPrepared,
     /// Control request failed.
     Error(ErrorInfo),
 }
