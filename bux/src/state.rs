@@ -76,7 +76,10 @@ impl Status {
         matches!(
             (self, target),
             (Self::Creating | Self::Paused | Self::Stopped, Self::Running)
-                | (Self::Creating | Self::Running | Self::Paused | Self::Stopping, Self::Stopped)
+                | (
+                    Self::Creating | Self::Running | Self::Paused | Self::Stopping,
+                    Self::Stopped
+                )
                 | (Self::Running, Self::Paused | Self::Stopping)
                 | (Self::Paused, Self::Stopping)
         )
@@ -556,12 +559,7 @@ mod db {
         // ---- Base disk CRUD ----
 
         /// Inserts or returns an existing base disk by digest.
-        pub fn upsert_base_disk(
-            &self,
-            id: &str,
-            digest: &str,
-            path: &str,
-        ) -> Result<()> {
+        pub fn upsert_base_disk(&self, id: &str, digest: &str, path: &str) -> Result<()> {
             self.lock().execute(
                 "INSERT INTO base_disks (id, digest, path, ref_count, created_at)
                  VALUES (?1, ?2, ?3, 0, ?4)
@@ -634,7 +632,13 @@ mod db {
                     max_disk_bytes = excluded.max_disk_bytes,
                     max_vcpus = excluded.max_vcpus,
                     max_ram_mib = excluded.max_ram_mib",
-                params![q.tenant, q.max_boxes, q.max_disk_bytes, q.max_vcpus, q.max_ram_mib],
+                params![
+                    q.tenant,
+                    q.max_boxes,
+                    q.max_disk_bytes,
+                    q.max_vcpus,
+                    q.max_ram_mib
+                ],
             )?;
             Ok(())
         }
@@ -676,9 +680,8 @@ mod db {
         /// Lists VMs filtered by tenant.
         pub fn list_by_tenant(&self, tenant: &str) -> Result<Vec<VmState>> {
             let conn = self.lock();
-            let mut stmt = conn.prepare(
-                "SELECT * FROM vms WHERE tenant = ?1 ORDER BY created_at DESC",
-            )?;
+            let mut stmt =
+                conn.prepare("SELECT * FROM vms WHERE tenant = ?1 ORDER BY created_at DESC")?;
             let rows = stmt.query_map(params![tenant], row_to_state)?;
             Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
         }

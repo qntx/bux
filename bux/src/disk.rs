@@ -221,6 +221,11 @@ impl DiskManager {
         Ok(Self { bases_dir, vms_dir })
     }
 
+    /// Returns the directory where base disk images are stored.
+    pub fn bases_dir(&self) -> &Path {
+        &self.bases_dir
+    }
+
     /// Returns `true` if a base image for the given digest already exists.
     pub fn has_base(&self, digest: &str) -> bool {
         self.base_path(digest).exists()

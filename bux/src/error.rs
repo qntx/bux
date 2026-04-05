@@ -103,10 +103,7 @@ impl Error {
     pub const fn is_user_error(&self) -> bool {
         matches!(
             self,
-            Self::InvalidConfig(_)
-                | Self::NotFound(_)
-                | Self::Ambiguous(_)
-                | Self::InvalidState(_)
+            Self::InvalidConfig(_) | Self::NotFound(_) | Self::Ambiguous(_) | Self::InvalidState(_)
         )
     }
 

@@ -539,6 +539,98 @@ fn parse_signal(name: &str) -> Result<i32> {
     }
 }
 
+// ---- New commands: restart, stats, clone, export ----
+
+/// Arguments for `bux restart`.
+#[derive(clap::Args)]
+pub struct RestartArgs {
+    /// VM ID or name.
+    pub vm: String,
+    /// Ready timeout in seconds.
+    #[arg(long, default_value = "30")]
+    pub timeout: u64,
+}
+
+/// Arguments for `bux stats`.
+#[derive(clap::Args)]
+pub struct StatsArgs {
+    /// VM ID or name.
+    pub vm: String,
+}
+
+/// Arguments for `bux clone`.
+#[derive(clap::Args)]
+pub struct CloneArgs {
+    /// Source VM ID or name.
+    pub source: String,
+    /// Optional name for the clone.
+    #[arg(long)]
+    pub name: Option<String>,
+}
+
+/// Arguments for `bux export`.
+#[derive(clap::Args)]
+pub struct ExportArgs {
+    /// VM ID or name.
+    pub vm: String,
+    /// Output file path.
+    pub output: String,
+}
+
+#[cfg(unix)]
+pub async fn restart(args: RestartArgs) -> Result<()> {
+    let rt = open_runtime()?;
+    let mut handle = rt.get(&args.vm)?;
+    if handle.state().status == bux::Status::Running {
+        handle.stop().await?;
+    }
+    handle
+        .start(std::time::Duration::from_secs(args.timeout))
+        .await?;
+    println!("{}", handle.state().id);
+    Ok(())
+}
+
+#[cfg(unix)]
+pub async fn stats(args: &StatsArgs) -> Result<()> {
+    let rt = open_runtime()?;
+    let handle = rt.get(&args.vm)?;
+    let state = handle.state();
+    let health = handle.health().await;
+    let bm = handle.box_metrics();
+    println!("ID:             {}", state.id);
+    println!("Name:           {}", state.name.as_deref().unwrap_or("-"));
+    println!("Status:         {:?}", state.status);
+    println!("Health:         {health:?}");
+    println!("PID:            {}", state.pid);
+    println!("Boot time:      {} ms", bm.boot_duration_ms());
+    println!("Exec count:     {}", bm.exec_count());
+    println!("Last exec:      {} ms", bm.last_exec_duration_ms());
+    Ok(())
+}
+
+#[cfg(unix)]
+pub fn clone_box(args: &CloneArgs) -> Result<()> {
+    let rt = open_runtime()?;
+    let handle = rt.clone_box(
+        &args.source,
+        args.name.clone(),
+        |b| b,
+        &bux::RunOptions::default(),
+    )?;
+    println!("{}", handle.state().id);
+    Ok(())
+}
+
+#[cfg(unix)]
+pub fn export(args: &ExportArgs) -> Result<()> {
+    let rt = open_runtime()?;
+    let handle = rt.get(&args.vm)?;
+    handle.export(std::path::Path::new(&args.output))?;
+    println!("Exported to {}", args.output);
+    Ok(())
+}
+
 /// Reads environment variables from a file (one `KEY=VALUE` per line).
 /// Blank lines and lines starting with `#` are skipped.
 pub fn read_env_file(path: &str) -> Result<Vec<String>> {
@@ -579,6 +671,8 @@ unix_only_stub! {
     inspect(args: InspectArgs);
     prune();
     rename(args: RenameArgs);
+    clone_box(args: CloneArgs);
+    export(args: ExportArgs);
 }
 
 #[cfg(not(unix))]
@@ -588,4 +682,6 @@ unix_only_stub! {
     exec(args: ExecArgs);
     cp(args: CpArgs);
     wait(args: WaitArgs);
+    restart(args: RestartArgs);
+    stats(args: StatsArgs);
 }
