@@ -81,11 +81,15 @@ pub use events::{
 pub use exit_info::ExitInfo;
 #[cfg(unix)]
 pub use health::{HealthCheckConfig, HealthCheckHandle};
-pub use metrics::{BoxMetrics, RuntimeMetrics};
 #[cfg(unix)]
 pub use jail::checks::{HostCapabilities, audit_isolation, check_guest_binary, check_host};
+#[cfg(target_os = "linux")]
+pub use jail::credentials::CredentialConfig;
+#[cfg(target_os = "linux")]
+pub use jail::seccomp::SeccompError;
 #[cfg(unix)]
 pub use jail::{JailConfig, NoopSandbox, ResourceLimits, Sandbox, SandboxCapabilities};
+pub use metrics::{BoxMetrics, RuntimeMetrics};
 #[cfg(unix)]
 pub use runtime::{HealthStatus, RunOptions, Runtime, VmHandle, default_data_dir};
 #[cfg(unix)]

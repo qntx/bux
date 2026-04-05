@@ -51,14 +51,11 @@ pub fn audit_isolation(caps: &HostCapabilities) -> Vec<String> {
         );
     }
     if !caps.seccomp {
-        warnings.push(
-            "seccomp BPF not available — shim runs without syscall filtering".to_owned(),
-        );
+        warnings.push("seccomp BPF not available — shim runs without syscall filtering".to_owned());
     }
     if !caps.mandatory_access_control {
-        warnings.push(
-            "no MAC (AppArmor/SELinux/Seatbelt) — no mandatory access control".to_owned(),
-        );
+        warnings
+            .push("no MAC (AppArmor/SELinux/Seatbelt) — no mandatory access control".to_owned());
     }
     if !caps.cgroups {
         warnings.push("cgroups v2 not available — no resource limits enforcement".to_owned());
@@ -144,9 +141,7 @@ fn check_seccomp() -> bool {
     #[cfg(target_os = "linux")]
     {
         // Check for seccomp support via prctl.
-        Path::new("/proc/sys/kernel/seccomp").exists()
-            || Path::new("/proc/self/status")
-                .exists()
+        Path::new("/proc/sys/kernel/seccomp").exists() || Path::new("/proc/self/status").exists()
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -159,8 +154,7 @@ fn check_mac() -> bool {
     #[cfg(target_os = "linux")]
     {
         // AppArmor check.
-        Path::new("/sys/kernel/security/apparmor").exists()
-            || Path::new("/sys/fs/selinux").exists()
+        Path::new("/sys/kernel/security/apparmor").exists() || Path::new("/sys/fs/selinux").exists()
     }
     #[cfg(target_os = "macos")]
     {

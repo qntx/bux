@@ -269,6 +269,48 @@ impl Runtime {
         Ok(())
     }
 
+    /// Creates a new VM by cloning an existing VM's disk state.
+    ///
+    /// Flattens the source VM's QCOW2 overlay into a new standalone base
+    /// image, then creates a fresh overlay on top. The new VM has all the
+    /// same installed packages and files as the source, but is independent.
+    ///
+    /// The source VM can be running or stopped.
+    pub fn clone_box(
+        &self,
+        source_id: &str,
+        name: Option<String>,
+        configure: impl FnOnce(VmBuilder) -> VmBuilder,
+        opts: &RunOptions,
+    ) -> Result<VmHandle> {
+        self.check_quota("default")?;
+
+        let source = self.get(source_id)?;
+        let source_state = source.state();
+
+        // Flatten source overlay → new base disk.
+        let clone_id = state::gen_id();
+        let clone_base = self.disk.bases_dir().join(format!("clone-{clone_id}.raw"));
+        self.disk.flatten_vm_disk(&source_state.id, &clone_base)?;
+
+        // Build the new VM using the cloned base.
+        let mut builder = Vm::builder().base_disk(clone_base.to_string_lossy());
+        builder = builder
+            .vcpus(source_state.config.vcpus)
+            .ram_mib(source_state.config.ram_mib);
+        builder = configure(builder);
+
+        let handle = self.spawn(&builder, source_state.image.clone(), name, opts.auto_remove)?;
+
+        info!(
+            source_id = %source_state.id,
+            clone_id = %handle.state().id,
+            "VM cloned"
+        );
+
+        Ok(handle)
+    }
+
     /// One-shot: pull image → create base disk → spawn VM with writable overlay.
     ///
     /// Flow: OCI pull → ext4 base image (cached by digest) → per-VM QCOW2
@@ -406,11 +448,12 @@ impl Runtime {
         info!(vm_id = %id, pid = shim.pid, "VM spawned");
 
         self.metrics.on_box_created();
-        self.events.emit(AuditEvent::now(AuditEventKind::BoxCreated {
-            id,
-            image: vm_state.image.clone(),
-            tenant: "default".to_owned(),
-        }));
+        self.events
+            .emit(AuditEvent::now(AuditEventKind::BoxCreated {
+                id,
+                image: vm_state.image.clone(),
+                tenant: "default".to_owned(),
+            }));
 
         Ok(VmHandle::new(
             vm_state,
@@ -500,9 +543,10 @@ impl Runtime {
         let _ = self.disk.remove_vm_disk(&state.id);
         self.db.delete(&state.id)?;
         info!(vm_id = %state.id, "VM removed");
-        self.events.emit(AuditEvent::now(AuditEventKind::BoxRemoved {
-            id: state.id.clone(),
-        }));
+        self.events
+            .emit(AuditEvent::now(AuditEventKind::BoxRemoved {
+                id: state.id.clone(),
+            }));
         Ok(())
     }
 
@@ -717,6 +761,18 @@ impl VmHandle {
     /// Deletes a snapshot by ID.
     pub fn delete_snapshot(&self, snapshot_id: &str) -> Result<()> {
         self.snapshots.delete(snapshot_id)
+    }
+
+    /// Exports this VM's disk as a standalone QCOW2 image.
+    ///
+    /// Flattens the QCOW2 overlay chain (overlay + backing base) into a
+    /// single self-contained file at `dest`. The source VM is unaffected.
+    /// If the VM is running, consider creating a snapshot first.
+    pub fn export(&self, dest: &Path) -> Result<()> {
+        let vm_id = &self.state.id;
+        self.disk.flatten_vm_disk(vm_id, dest)?;
+        info!(vm_id = %vm_id, dest = %dest.display(), "VM disk exported");
+        Ok(())
     }
 
     /// Starts a background health check task for this VM.
@@ -1029,10 +1085,11 @@ impl VmHandle {
 
         let uptime_ms = u64::try_from(self.spawned_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.runtime_metrics.on_box_stopped(uptime_ms);
-        self.events.emit(AuditEvent::now(AuditEventKind::BoxStopped {
-            id: self.state.id.clone(),
-            exit_code: None,
-        }));
+        self.events
+            .emit(AuditEvent::now(AuditEventKind::BoxStopped {
+                id: self.state.id.clone(),
+                exit_code: None,
+            }));
 
         if self.state.config.auto_remove {
             clean_vm_files(&self.state.socket);

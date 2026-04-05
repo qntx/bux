@@ -12,7 +12,11 @@
 //! [seatbelt]: https://developer.apple.com/documentation/sandbox
 
 pub mod checks;
+#[cfg(target_os = "linux")]
+pub mod credentials;
 mod pre_exec;
+#[cfg(target_os = "linux")]
+pub mod seccomp;
 
 #[cfg(target_os = "linux")]
 mod bwrap;

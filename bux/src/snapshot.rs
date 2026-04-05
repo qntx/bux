@@ -88,9 +88,7 @@ mod inner {
             name: Option<&str>,
         ) -> Result<SnapshotInfo> {
             let snapshot_id = crate::state::gen_id();
-            let dest = self
-                .snapshots_dir
-                .join(format!("{snapshot_id}.qcow2"));
+            let dest = self.snapshots_dir.join(format!("{snapshot_id}.qcow2"));
 
             // Quiesce if running.
             let quiesced = if vm_status == Status::Running {
@@ -111,11 +109,10 @@ mod inner {
             // Copy the overlay disk.
             let src = overlay_path.to_path_buf();
             let dst = dest.clone();
-            let disk_bytes = tokio::task::spawn_blocking(move || -> io::Result<u64> {
-                fs::copy(&src, &dst)
-            })
-            .await
-            .map_err(io::Error::other)??;
+            let disk_bytes =
+                tokio::task::spawn_blocking(move || -> io::Result<u64> { fs::copy(&src, &dst) })
+                    .await
+                    .map_err(io::Error::other)??;
 
             // Thaw if we quiesced.
             if quiesced {

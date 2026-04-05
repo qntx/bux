@@ -128,10 +128,7 @@ pub struct EventDispatcher {
 
 impl std::fmt::Debug for EventDispatcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let count = self
-            .listeners
-            .lock()
-            .map_or(0, |l| l.len());
+        let count = self.listeners.lock().map_or(0, |l| l.len());
         f.debug_struct("EventDispatcher")
             .field("listener_count", &count)
             .finish()
@@ -247,7 +244,8 @@ impl EventListener for RingBufferListener {
         if let Ok(mut buffer) = self.buffer.lock() {
             let pos = self.write_pos.load(Ordering::Relaxed);
             buffer[pos % self.capacity] = Some(event.clone());
-            self.write_pos.store((pos + 1) % self.capacity, Ordering::Relaxed);
+            self.write_pos
+                .store((pos + 1) % self.capacity, Ordering::Relaxed);
             self.total.fetch_add(1, Ordering::Relaxed);
         }
     }

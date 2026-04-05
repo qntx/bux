@@ -59,6 +59,24 @@ enum Command {
     /// Rename a VM.
     Rename(vm::RenameArgs),
 
+    /// Restart a stopped or running VM.
+    Restart(vm::RestartArgs),
+
+    /// Display real-time resource statistics for a running VM.
+    Stats(vm::StatsArgs),
+
+    /// Manage VM snapshots.
+    Snapshot {
+        #[command(subcommand)]
+        action: SnapshotAction,
+    },
+
+    /// Clone a VM (creates an independent copy with the same disk state).
+    Clone(vm::CloneArgs),
+
+    /// Export a VM's disk as a standalone QCOW2 image.
+    Export(vm::ExportArgs),
+
     /// Pull an OCI image from a registry.
     Pull {
         /// Image reference (e.g., ubuntu:latest).
@@ -97,6 +115,30 @@ enum Command {
     Completion {
         /// Target shell.
         shell: Shell,
+    },
+}
+
+/// Subcommands for `bux snapshot`.
+#[derive(Subcommand)]
+enum SnapshotAction {
+    /// Create a snapshot of a VM's disk state.
+    Create {
+        /// VM ID or name.
+        vm: String,
+        /// Optional snapshot name.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List snapshots for a VM.
+    #[command(visible_alias = "ls")]
+    List {
+        /// VM ID or name.
+        vm: String,
+    },
+    /// Delete a snapshot.
+    Rm {
+        /// Snapshot ID.
+        id: String,
     },
 }
 
@@ -152,6 +194,11 @@ impl Cli {
             Command::Wait(args) => vm::wait(args).await,
             Command::Prune => vm::prune(),
             Command::Rename(ref args) => vm::rename(args),
+            Command::Restart(args) => vm::restart(args).await,
+            Command::Stats(ref args) => vm::stats(args).await,
+            Command::Snapshot { action } => snapshot_cmd(action).await,
+            Command::Clone(ref args) => vm::clone_box(args),
+            Command::Export(ref args) => vm::export(args),
             Command::Pull { image } => pull(&image).await,
             Command::Images { format } => images(format),
             Command::Rmi { images } => rmi(&images),
@@ -163,6 +210,39 @@ impl Cli {
             }
         }
     }
+}
+
+async fn snapshot_cmd(action: SnapshotAction) -> Result<()> {
+    let rt = vm::open_runtime()?;
+    match action {
+        SnapshotAction::Create { vm, name } => {
+            let handle = rt.get(&vm)?;
+            let info = handle.create_snapshot(name.as_deref()).await?;
+            println!("{}", info.id);
+        }
+        SnapshotAction::List { vm } => {
+            let handle = rt.get(&vm)?;
+            let snaps = handle.list_snapshots()?;
+            if snaps.is_empty() {
+                println!("No snapshots.");
+            } else {
+                println!("{:<14} {:<20} {:>12}", "ID", "NAME", "SIZE");
+                for s in &snaps {
+                    println!(
+                        "{:<14} {:<20} {:>12}",
+                        s.id,
+                        s.name.as_deref().unwrap_or("-"),
+                        human_size(s.disk_bytes),
+                    );
+                }
+            }
+        }
+        SnapshotAction::Rm { id } => {
+            rt.snapshots().delete(&id)?;
+            println!("{id}");
+        }
+    }
+    Ok(())
 }
 
 async fn pull(image: &str) -> Result<()> {

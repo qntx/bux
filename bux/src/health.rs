@@ -7,8 +7,8 @@
 #[cfg(unix)]
 /// Unix health-check implementation using tokio background tasks.
 mod inner {
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
 
     use tokio::sync::watch;
@@ -78,8 +78,7 @@ mod inner {
                     () = async { let _ = cancel_rx.changed().await; } => break,
                 }
 
-                let result =
-                    tokio::time::timeout(config.timeout, client.ping()).await;
+                let result = tokio::time::timeout(config.timeout, client.ping()).await;
 
                 match result {
                     Ok(Ok(_)) => {
