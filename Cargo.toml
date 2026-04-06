@@ -1,5 +1,5 @@
 [workspace]
-members = ["bux", "bux-bwrap", "bux-cli", "bux-e2fs", "bux-guest", "bux-krun", "bux-oci", "bux-proto"]
+members = ["bux", "bux-bwrap", "bux-cli", "bux-e2fs", "bux-guest", "bux-krun", "bux-net", "bux-oci", "bux-proto"]
 default-members = ["bux"]
 resolver = "3"
 
@@ -17,6 +17,7 @@ bux-proto = { version = "0.7", path = "bux-proto" }
 bux-bwrap = { version = "0.1", path = "bux-bwrap" }
 bux-krun = { version = "0.1", path = "bux-krun" }
 bux-e2fs = { version = "0.1.5", path = "bux-e2fs" }
+bux-net = { version = "0.1", path = "bux-net" }
 
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
