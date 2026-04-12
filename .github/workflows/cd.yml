@@ -154,7 +154,7 @@ jobs:
         uses: orhun/git-cliff-action@v4
         with: { args: "--latest --strip header" }
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           body: ${{ steps.cliff.outputs.content }}
           files: |
