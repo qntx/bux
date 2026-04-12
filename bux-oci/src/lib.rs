@@ -14,7 +14,10 @@
 //!  └── oci_client::Client (registry communication)
 //! ```
 
-#![allow(clippy::missing_docs_in_private_items)]
+#![allow(
+    clippy::missing_docs_in_private_items,
+    reason = "internal modules have self-explanatory fields"
+)]
 
 mod extract;
 mod store;
@@ -28,12 +31,12 @@ pub use store::ImageMeta;
 use store::Store;
 
 /// Result type for bux-oci operations.
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, OciError>;
 
 /// Errors from OCI image operations.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
+pub enum OciError {
     /// The image reference string could not be parsed.
     #[error("invalid image reference: {0}")]
     InvalidReference(String),
@@ -108,6 +111,7 @@ pub struct ImageConfig {
 
 impl ImageConfig {
     /// Returns the combined entrypoint + cmd as the final execution command.
+    #[must_use]
     pub fn command(&self) -> Vec<String> {
         let mut parts = Vec::new();
         if let Some(ref ep) = self.entrypoint {
@@ -130,13 +134,13 @@ pub struct PullResult {
     pub digest: String,
     /// Path to the extracted rootfs directory.
     pub rootfs: PathBuf,
-    /// Image configuration (Cmd, Env, WorkingDir, etc.).
+    /// Image configuration (Cmd, Env, `WorkingDir`, etc.).
     pub config: Option<ImageConfig>,
 }
 
 /// OCI image manager backed by a content-addressed store.
 ///
-/// All methods take `&self` — the underlying store uses SQLite (which serializes
+/// All methods take `&self` — the underlying store uses `SQLite` (which serializes
 /// writes internally) and content-addressed blobs (immutable files).
 pub struct Oci {
     /// Content-addressed image store.
@@ -157,11 +161,19 @@ impl std::fmt::Debug for Oci {
 
 impl Oci {
     /// Opens the OCI manager with default configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store directory cannot be created or the database fails to open.
     pub fn open() -> Result<Self> {
         Self::open_with(OciConfig::default())
     }
 
     /// Opens the OCI manager with explicit configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store directory cannot be created or the database fails to open.
     pub fn open_with(config: OciConfig) -> Result<Self> {
         let store = Store::open(&config.store_dir)?;
         let client = oci_client::Client::new(ClientConfig {
@@ -176,6 +188,10 @@ impl Oci {
     }
 
     /// Opens the OCI manager rooted at a specific directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store directory cannot be created or the database fails to open.
     pub fn open_at(store_dir: &Path) -> Result<Self> {
         Self::open_with(OciConfig {
             store_dir: store_dir.to_path_buf(),
@@ -186,9 +202,10 @@ impl Oci {
     /// Pulls an image from a registry, caches layers, extracts rootfs.
     ///
     /// Uses streaming downloads — each layer is written directly to disk
-    /// via `pull_blob`, keeping memory usage at O(chunk_size) instead of
-    /// O(total_image_size). `on_status` receives human-readable progress.
+    /// via `pull_blob`, keeping memory usage at `O(chunk_size)` instead of
+    /// `O(total_image_size)`. `on_status` receives human-readable progress.
     pub async fn pull(&self, image: &str, on_status: impl Fn(&str)) -> Result<PullResult> {
+        #![allow(clippy::missing_errors_doc, reason = "documented at module level")]
         let reference = parse_reference(image)?;
         let ref_str = reference.to_string();
 
@@ -198,7 +215,7 @@ impl Oci {
             .client
             .pull_manifest_and_config(&reference, &self.auth)
             .await
-            .map_err(|e| Error::Registry(e.to_string()))?;
+            .map_err(|e| OciError::Registry(e.to_string()))?;
 
         // 2. Stream each layer to disk — O(chunk) memory per layer.
         let layer_count = manifest.layers.len();
@@ -220,7 +237,7 @@ impl Oci {
                 self.client
                     .pull_blob(&reference, layer, &mut file)
                     .await
-                    .map_err(|e| Error::Registry(e.to_string()))?;
+                    .map_err(|e| OciError::Registry(e.to_string()))?;
                 self.store.commit_layer(digest, &layer.media_type, size)?;
             }
             total_size += size;
@@ -253,7 +270,7 @@ impl Oci {
                 extract::extract_layer_files(&layer_files, &staging_clone)
             })
             .await
-            .map_err(|e| Error::Io(std::io::Error::other(e)))??;
+            .map_err(|e| OciError::Io(std::io::Error::other(e)))??;
 
             self.store.commit_rootfs(&manifest_digest)?;
         }
@@ -282,6 +299,10 @@ impl Oci {
     /// This is the preferred entry point for `bux run <image>` — instant when
     /// cached. Uses [`rootfs_complete`](Store::rootfs_complete) to verify the
     /// extraction finished successfully (crash-safe).
+    /// # Errors
+    ///
+    /// Returns an error if the image reference is invalid, a pull or extraction fails,
+    /// or database access encounters an error.
     pub async fn ensure(&self, image: &str, on_status: impl Fn(&str)) -> Result<PullResult> {
         let reference = parse_reference(image)?;
         let ref_str = reference.to_string();
@@ -307,6 +328,10 @@ impl Oci {
     }
 
     /// Lists all locally stored images.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
     pub fn images(&self) -> Result<Vec<ImageMeta>> {
         self.store.list_images()
     }
@@ -314,6 +339,11 @@ impl Oci {
     /// Removes a locally stored image and its extracted rootfs.
     ///
     /// Layer blobs are ref-counted; only orphaned blobs are deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the image reference is invalid, the image is not found,
+    /// or a database/filesystem operation fails.
     pub fn remove(&self, image: &str) -> Result<()> {
         let reference = parse_reference(image)?;
         self.store.remove_image(&reference.to_string())
@@ -324,7 +354,7 @@ impl Oci {
 fn parse_reference(image: &str) -> Result<Reference> {
     image
         .parse()
-        .map_err(|e: oci_client::ParseError| Error::InvalidReference(e.to_string()))
+        .map_err(|e: oci_client::ParseError| OciError::InvalidReference(e.to_string()))
 }
 
 /// Deserializes the raw OCI config JSON blob into our minimal [`ImageConfig`].

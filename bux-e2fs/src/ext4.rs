@@ -8,11 +8,17 @@
 //! [`create_from_dir`] and [`inject_file`] compose `Filesystem` operations
 //! into single calls.
 
-#![allow(unsafe_code)]
+#![allow(unsafe_code, reason = "FFI wrapper over libext2fs")]
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
-    clippy::cast_sign_loss
+    clippy::cast_sign_loss,
+    reason = "ext4 sizes require casts between i/u 32/64"
+)]
+#![allow(
+    clippy::undocumented_unsafe_blocks,
+    clippy::multiple_unsafe_ops_per_block,
+    reason = "FFI calls to libext2fs are inherently unsafe with sequential operations"
 )]
 
 use std::ffi::CString;
@@ -139,6 +145,10 @@ impl Filesystem {
     /// Creates a new ext4 filesystem image at `path`.
     ///
     /// Equivalent to `mke2fs -t ext4 -b <block_size> -m <reserved> <path> <size>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if I/O, path conversion, or libext2fs initialization fails.
     pub fn create(path: &Path, size_bytes: u64, opts: &CreateOptions) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -198,6 +208,10 @@ impl Filesystem {
     }
 
     /// Opens an existing ext4 image for read-write operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the image does not exist or libext2fs fails to open it.
     pub fn open(path: &Path) -> Result<Self> {
         let c_path = to_cstring(path)?;
 
@@ -222,6 +236,10 @@ impl Filesystem {
     ///
     /// Recursively copies all files, directories, symlinks, and permissions
     /// from `source_dir` into the image root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if path conversion or the populate operation fails.
     pub fn populate(&mut self, source_dir: &Path) -> Result<()> {
         let c_src = to_cstring(source_dir)?;
         unsafe {
@@ -238,6 +256,10 @@ impl Filesystem {
     }
 
     /// Flushes all pending changes to disk without closing the filesystem.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the flush I/O fails.
     pub fn flush(&mut self) -> Result<()> {
         unsafe { check("ext2fs_flush", sys::ext2fs_flush(self.inner)) }
     }
@@ -245,6 +267,10 @@ impl Filesystem {
     /// Writes a single host file into the filesystem image.
     ///
     /// Equivalent to `debugfs -w -R "write <host_path> <guest_path>"`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if path conversion or the write operation fails.
     pub fn write_file(&mut self, host_path: &Path, guest_path: &str) -> Result<()> {
         let c_host = to_cstring(host_path)?;
         let c_guest = str_to_cstring(guest_path)?;
@@ -263,6 +289,10 @@ impl Filesystem {
     }
 
     /// Creates a directory inside the filesystem image.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the mkdir operation fails.
     pub fn mkdir(&mut self, name: &str) -> Result<()> {
         let c_name = str_to_cstring(name)?;
         unsafe {
@@ -279,6 +309,10 @@ impl Filesystem {
     }
 
     /// Creates a symlink inside the filesystem image.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the symlink creation fails.
     pub fn symlink(&mut self, name: &str, target: &str) -> Result<()> {
         let c_name = str_to_cstring(name)?;
         let c_target = str_to_cstring(target)?;
@@ -297,6 +331,10 @@ impl Filesystem {
     }
 
     /// Adds an ext3/4 journal (size auto-calculated by libext2fs).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if journal size calculation or creation fails.
     pub fn add_journal(&mut self) -> Result<()> {
         unsafe {
             let superblock = (*self.inner).super_;
@@ -319,6 +357,10 @@ impl Filesystem {
     }
 
     /// Creates a directory entry linking `name` to inode `ino` in directory `dir`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the link operation fails.
     pub fn link(&mut self, dir: u32, name: &str, ino: u32, file_type: FileType) -> Result<()> {
         let c_name = str_to_cstring(name)?;
         unsafe {
@@ -330,6 +372,10 @@ impl Filesystem {
     }
 
     /// Reads the on-disk inode structure for the given inode number.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the inode read fails.
     pub fn read_inode(&self, ino: u32) -> Result<sys::ext2_inode> {
         unsafe {
             let mut inode: sys::ext2_inode = std::mem::zeroed();
@@ -342,6 +388,10 @@ impl Filesystem {
     }
 
     /// Writes the inode structure back to the filesystem.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the inode write fails.
     pub fn write_inode(&mut self, ino: u32, inode: &sys::ext2_inode) -> Result<()> {
         unsafe {
             let mut copy = *inode;
@@ -353,6 +403,10 @@ impl Filesystem {
     }
 
     /// Writes a freshly allocated inode (initializes the on-disk slot).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the inode write fails.
     pub fn write_new_inode(&mut self, ino: u32, inode: &sys::ext2_inode) -> Result<()> {
         unsafe {
             let mut copy = *inode;
@@ -367,6 +421,10 @@ impl Filesystem {
     ///
     /// Updates the inode bitmap and allocation statistics automatically.
     /// Requires bitmaps to be loaded (always true after [`create`](Self::create)).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if inode allocation fails.
     pub fn alloc_inode(&mut self, dir: u32, mode: u16) -> Result<u32> {
         unsafe {
             let mut ino: sys::ext2_ino_t = 0;
@@ -385,6 +443,10 @@ impl Filesystem {
     ///
     /// Updates the block bitmap and allocation statistics automatically.
     /// Requires bitmaps to be loaded (always true after [`create`](Self::create)).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if block allocation fails.
     pub fn alloc_block(&mut self, goal: u64) -> Result<u64> {
         unsafe {
             let mut blk: sys::blk64_t = 0;
@@ -416,6 +478,10 @@ impl Filesystem {
 ///     size,
 /// ).unwrap();
 /// ```
+///
+/// # Errors
+///
+/// Returns an error if image creation, journal setup, or population fails.
 pub fn create_from_dir(source_dir: &Path, output: &Path, size_bytes: u64) -> Result<()> {
     let mut fs = Filesystem::create(output, size_bytes, &CreateOptions::default())?;
     fs.add_journal()?;
@@ -426,6 +492,10 @@ pub fn create_from_dir(source_dir: &Path, output: &Path, size_bytes: u64) -> Res
 /// Injects a single host file into an existing ext4 image.
 ///
 /// Equivalent to `debugfs -w -R "write <host_file> <guest_path>"`.
+///
+/// # Errors
+///
+/// Returns an error if the image cannot be opened or the write fails.
 pub fn inject_file(image: &Path, host_file: &Path, guest_path: &str) -> Result<()> {
     let mut fs = Filesystem::open(image)?;
     fs.write_file(host_file, guest_path)
@@ -435,6 +505,10 @@ pub fn inject_file(image: &Path, host_file: &Path, guest_path: &str) -> Result<(
 ///
 /// Accounts for file content, inode overhead, ext4 metadata, and journal.
 /// Returns the recommended image size in bytes (minimum 256 MiB).
+///
+/// # Errors
+///
+/// Returns an error if directory traversal fails.
 pub fn estimate_image_size(dir: &Path) -> Result<u64> {
     let mut total_bytes: u64 = 0;
     let mut inode_count: u64 = 0;

@@ -19,7 +19,7 @@ use nix::unistd::pipe;
 /// When this value is dropped, the write end of the pipe closes,
 /// causing `POLLHUP` on the shim's read end — signaling it to shut down.
 #[derive(Debug)]
-pub struct Keepalive(#[allow(dead_code)] OwnedFd);
+pub struct Keepalive(#[allow(dead_code, reason = "dropped to trigger pipe close")] OwnedFd);
 
 /// Creates a watchdog pipe pair.
 ///
@@ -28,6 +28,10 @@ pub struct Keepalive(#[allow(dead_code)] OwnedFd);
 ///   `O_CLOEXEC` so it survives `exec`.
 /// - `keepalive`: write end — held by the parent. Has `O_CLOEXEC` set so
 ///   it does not leak into the child.
+///
+/// # Errors
+///
+/// Returns an error if `pipe()` or `fcntl()` fails.
 pub fn create() -> io::Result<(OwnedFd, Keepalive)> {
     let (read_fd, write_fd) = pipe()?;
 

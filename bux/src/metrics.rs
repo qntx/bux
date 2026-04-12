@@ -5,7 +5,7 @@
 //! gauges (running, disk usage) can go up and down.
 //!
 //! Callers are responsible for computing deltas when needed —
-//! this matches the Prometheus / Tokio RuntimeMetrics convention.
+//! this matches the Prometheus / Tokio `RuntimeMetrics` convention.
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
@@ -35,6 +35,7 @@ impl Default for RuntimeMetrics {
 
 impl RuntimeMetrics {
     /// Creates a new metrics instance with all counters at zero.
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             boxes_created: AtomicU64::new(0),
@@ -125,6 +126,7 @@ impl Default for BoxMetrics {
 
 impl BoxMetrics {
     /// Creates a new per-box metrics instance.
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             boot_duration_ms: AtomicU64::new(0),
@@ -166,7 +168,7 @@ impl BoxMetrics {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, reason = "tests use unwrap for clarity")]
 mod tests {
     use super::*;
 

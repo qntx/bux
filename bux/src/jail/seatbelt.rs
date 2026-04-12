@@ -17,7 +17,7 @@ const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// Generates a deny-default SBPL profile allowing only the minimal
 /// filesystem and process access needed by bux-shim.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct SeatbeltSandbox;
+pub(crate) struct SeatbeltSandbox;
 
 impl Sandbox for SeatbeltSandbox {
     fn wrap(&self, shim: &Path, config_path: &Path, jail: &JailConfig) -> Option<Command> {
@@ -126,7 +126,7 @@ fn allow_readwrite(profile: &mut String, path: &str) {
     allow_path(profile, path, true);
 }
 
-#[allow(clippy::missing_docs_in_private_items)]
+#[allow(clippy::missing_docs_in_private_items, reason = "private helper")]
 fn allow_path(profile: &mut String, path: &str, write: bool) {
     emit_path_rule(profile, path, write);
     if let Ok(canonical_path) = std::fs::canonicalize(path) {
@@ -137,28 +137,31 @@ fn allow_path(profile: &mut String, path: &str, write: bool) {
     }
 }
 
-#[allow(clippy::missing_docs_in_private_items)]
+#[allow(clippy::missing_docs_in_private_items, reason = "private helper")]
 fn emit_path_rule(profile: &mut String, path: &str, write: bool) {
     if Path::new(path).is_dir() {
         if write {
-            let _ = writeln!(
+            writeln!(
                 profile,
                 "(allow file-read* file-write* (literal \"{path}\"))"
-            );
-            let _ = writeln!(
+            )
+            .ok();
+            writeln!(
                 profile,
                 "(allow file-read* file-write* (subpath \"{path}\"))"
-            );
+            )
+            .ok();
         } else {
-            let _ = writeln!(profile, "(allow file-read* (literal \"{path}\"))");
-            let _ = writeln!(profile, "(allow file-read* (subpath \"{path}\"))");
+            writeln!(profile, "(allow file-read* (literal \"{path}\"))").ok();
+            writeln!(profile, "(allow file-read* (subpath \"{path}\"))").ok();
         }
     } else if write {
-        let _ = writeln!(
+        writeln!(
             profile,
             "(allow file-read* file-write* (literal \"{path}\"))"
-        );
+        )
+        .ok();
     } else {
-        let _ = writeln!(profile, "(allow file-read* (literal \"{path}\"))");
+        writeln!(profile, "(allow file-read* (literal \"{path}\"))").ok();
     }
 }

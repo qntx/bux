@@ -6,7 +6,7 @@
 //! 2. **FD cleanup** — close all inherited file descriptors ≥ 3, except for
 //!    an optionally preserved FD (used by the watchdog pipe).
 
-#![allow(unsafe_code)] // pre_exec requires unsafe
+#![allow(unsafe_code, reason = "pre_exec requires unsafe for fork/exec safety")]
 
 use std::process::Command;
 
@@ -21,7 +21,7 @@ pub fn apply(_cmd: &mut Command, _preserve_fd: Option<i32>) {}
 
 /// Install pre-exec hooks on the command.
 #[cfg(unix)]
-pub fn apply(cmd: &mut Command, preserve_fd: Option<i32>) {
+pub(super) fn apply(cmd: &mut Command, preserve_fd: Option<i32>) {
     use std::os::unix::process::CommandExt;
 
     // SAFETY: all operations inside are async-signal-safe syscalls.
@@ -44,7 +44,7 @@ pub fn apply(cmd: &mut Command, preserve_fd: Option<i32>) {
 ///
 /// # Note
 ///
-/// This runs in a pre_exec context (between fork/exec). Only
+/// This runs in a `pre_exec` context (between fork/exec). Only
 /// async-signal-safe functions may be called. Raw libc is intentional
 /// here — nix wrappers allocate and are not async-signal-safe.
 #[cfg(unix)]
@@ -61,6 +61,7 @@ fn close_all_fds() {
     // Try close_range(3, u32::MAX, 0) — available on Linux 5.9+.
     #[cfg(target_os = "linux")]
     {
+        // SAFETY: close_range is a valid syscall on Linux 5.9+; arguments are well-formed.
         let ret = unsafe { libc::syscall(libc::SYS_close_range, 3_u32, u32::MAX, 0_u32) };
         if ret == 0 {
             return;
@@ -77,8 +78,10 @@ fn close_all_fds() {
 fn close_fds_preserving(keep: i32) {
     #[cfg(target_os = "linux")]
     {
-        #[allow(clippy::cast_sign_loss)]
+        #[allow(clippy::cast_sign_loss, reason = "keep FD is always non-negative")]
         let keep_u = keep as u32;
+        // SAFETY: close_range is a valid syscall; arguments specify FD ranges that
+        // exclude the preserved FD.
         unsafe {
             if keep > 3 {
                 libc::syscall(libc::SYS_close_range, 3_u32, keep_u - 1, 0_u32);
@@ -88,11 +91,15 @@ fn close_fds_preserving(keep: i32) {
         return;
     }
 
-    #[allow(unreachable_code)]
+    #[allow(
+        unreachable_code,
+        reason = "fallback path after platform-specific early return"
+    )]
     {
         let end = max_fd();
         for fd in 3..end {
             if fd != keep {
+                // SAFETY: fd is a valid file descriptor number in range.
                 unsafe { libc::close(fd) };
             }
         }
@@ -102,8 +109,12 @@ fn close_fds_preserving(keep: i32) {
 /// Upper bound on FD numbers from `sysconf(_SC_OPEN_MAX)`.
 #[cfg(unix)]
 fn max_fd() -> i32 {
+    // SAFETY: sysconf with _SC_OPEN_MAX is always safe and returns a valid long.
     let n = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "sysconf result fits in i32"
+    )]
     if n > 0 { n as i32 } else { 1024 }
 }
 
@@ -111,6 +122,7 @@ fn max_fd() -> i32 {
 #[cfg(unix)]
 fn close_fd_range(start: i32, end: i32) {
     for fd in start..end {
+        // SAFETY: fd is a valid file descriptor number in [start, end).
         unsafe { libc::close(fd) };
     }
 }

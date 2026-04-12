@@ -18,7 +18,8 @@
     clippy::panic,
     clippy::print_stderr,
     clippy::unwrap_used,
-    missing_docs
+    missing_docs,
+    reason = "build script uses expect/panic for unrecoverable failures"
 )]
 
 use std::env;

@@ -57,7 +57,10 @@ impl Default for CredentialConfig {
 pub fn drop_privileges(config: &CredentialConfig) -> io::Result<()> {
     // 1. Clear supplementary groups.
     if config.gid.is_some() {
-        #[allow(unsafe_code)]
+        #[allow(
+            unsafe_code,
+            reason = "credential manipulation requires raw libc calls"
+        )]
         let rc = unsafe { libc::setgroups(0, std::ptr::null()) };
         if rc != 0 {
             return Err(io::Error::last_os_error());
@@ -66,7 +69,10 @@ pub fn drop_privileges(config: &CredentialConfig) -> io::Result<()> {
 
     // 2. Switch GID.
     if let Some(gid) = config.gid {
-        #[allow(unsafe_code)]
+        #[allow(
+            unsafe_code,
+            reason = "credential manipulation requires raw libc calls"
+        )]
         let rc = unsafe { libc::setresgid(gid, gid, gid) };
         if rc != 0 {
             return Err(io::Error::last_os_error());
@@ -75,7 +81,10 @@ pub fn drop_privileges(config: &CredentialConfig) -> io::Result<()> {
 
     // 3. Switch UID.
     if let Some(uid) = config.uid {
-        #[allow(unsafe_code)]
+        #[allow(
+            unsafe_code,
+            reason = "credential manipulation requires raw libc calls"
+        )]
         let rc = unsafe { libc::setresuid(uid, uid, uid) };
         if rc != 0 {
             return Err(io::Error::last_os_error());
@@ -88,7 +97,10 @@ pub fn drop_privileges(config: &CredentialConfig) -> io::Result<()> {
     }
 
     // 5. PR_SET_NO_NEW_PRIVS — prevent re-escalation via execve of suid binaries.
-    #[allow(unsafe_code)]
+    #[allow(
+        unsafe_code,
+        reason = "credential manipulation requires raw libc calls"
+    )]
     let rc = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
     if rc != 0 {
         return Err(io::Error::last_os_error());
@@ -136,7 +148,7 @@ fn clear_caps() -> io::Result<()> {
         },
     ];
 
-    #[allow(unsafe_code)]
+    #[allow(unsafe_code, reason = "capset requires raw syscall")]
     let rc = unsafe { libc::syscall(libc::SYS_capset, &header as *const CapHeader, data.as_ptr()) };
     if rc != 0 {
         return Err(io::Error::last_os_error());
@@ -146,7 +158,7 @@ fn clear_caps() -> io::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, reason = "tests use unwrap for clarity")]
 mod tests {
     use super::*;
 
@@ -161,7 +173,7 @@ mod tests {
     #[test]
     fn no_new_privs_succeeds() {
         // PR_SET_NO_NEW_PRIVS should always succeed (even in containers).
-        #[allow(unsafe_code)]
+        #[allow(unsafe_code, reason = "test exercises raw prctl")]
         let rc = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
         assert_eq!(rc, 0);
     }

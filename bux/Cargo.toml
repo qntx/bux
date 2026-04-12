@@ -32,7 +32,6 @@ dirs.workspace = true
 libc.workspace = true
 nix.workspace = true
 rusqlite.workspace = true
-signal-hook.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "time", "sync"] }
 
 [dev-dependencies]

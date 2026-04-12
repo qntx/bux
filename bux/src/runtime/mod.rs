@@ -1,11 +1,14 @@
 //! VM lifecycle management: spawn, list, stop, kill, remove.
 //!
-//! The [`Runtime`] manages VM state in a SQLite database, OCI images, and
+//! The [`Runtime`] manages VM state in a `SQLite` database, OCI images, and
 //! spawns VMs as child processes via the `bux-shim` binary.
 //!
 //! # Platform
 //!
 //! This module is only available on Unix (Linux / macOS).
+
+/// Per-VM runtime handles and async event processing.
+mod handle;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -13,7 +16,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 use std::{fs, io};
 
-use bux_proto::{AGENT_PORT, ExecStart};
+use bux_proto::AGENT_PORT;
+pub use handle::VmHandle;
 use nix::fcntl::{Flock, FlockArg};
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{WaitStatus, waitpid};
@@ -21,12 +25,11 @@ use nix::unistd::Pid;
 use tracing::{info, warn};
 
 use crate::Result;
-use crate::client::{Client, ExecHandle, ExecOutput, PongInfo};
 use crate::disk::DiskManager;
 use crate::events::{AuditEvent, AuditEventKind, EventDispatcher};
 use crate::guest::ManagedGuestBinary;
 use crate::jail::{self, JailConfig};
-use crate::metrics::{BoxMetrics, RuntimeMetrics};
+use crate::metrics::RuntimeMetrics;
 use crate::snapshot::SnapshotManager;
 use crate::state::{self, StateDb, Status, VmState, VsockPort};
 use crate::vm::{Vm, VmBuilder};
@@ -81,6 +84,7 @@ static DEFAULT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 /// Checks `$BUX_HOME` first, then falls back to platform conventions:
 /// - Linux: `$XDG_DATA_HOME/bux` or `~/.local/share/bux`
 /// - macOS: `~/Library/Application Support/bux`
+#[must_use]
 pub fn default_data_dir() -> PathBuf {
     if let Ok(home) = std::env::var("BUX_HOME") {
         return PathBuf::from(home);
@@ -95,7 +99,7 @@ pub fn default_data_dir() -> PathBuf {
 /// `Runtime` instances from operating on the same data directory.
 #[derive(Debug)]
 pub struct Runtime {
-    /// SQLite state database.
+    /// `SQLite` state database.
     db: Arc<StateDb>,
     /// Directory for Unix sockets (`{data_dir}/socks/`).
     socks_dir: PathBuf,
@@ -123,6 +127,11 @@ impl Runtime {
     ///
     /// Runs crash recovery to reconcile stale state from previous runs.
     /// Acquires an exclusive file lock to prevent concurrent access.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the data directory cannot be created, the lock
+    /// is already held, or the database fails to open.
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self> {
         let base = data_dir.as_ref();
         fs::create_dir_all(base)?;
@@ -181,7 +190,7 @@ impl Runtime {
             return Ok(rt);
         }
 
-        let _ = DEFAULT_RUNTIME.set(Self::open(default_data_dir())?);
+        drop(DEFAULT_RUNTIME.set(Self::open(default_data_dir())?));
 
         // SAFETY: we just called .set() above; if another thread raced us,
         // .get() still returns their value — either way it's Some.
@@ -217,6 +226,10 @@ impl Runtime {
     }
 
     /// Sets resource quota limits for a tenant.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database update fails.
     pub fn set_quota(&self, tenant: &str, quota: &state::QuotaRow) -> Result<()> {
         self.db.set_quota(quota)?;
         info!(tenant, "quota updated");
@@ -224,23 +237,35 @@ impl Runtime {
     }
 
     /// Returns the resource quota for a tenant, if configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
     pub fn get_quota(&self, tenant: &str) -> Result<Option<state::QuotaRow>> {
         self.db.get_quota(tenant)
     }
 
     /// Returns the current total disk usage of all bases and overlays in bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if filesystem stat operations fail.
     pub fn disk_usage(&self) -> io::Result<u64> {
         self.disk.disk_usage()
     }
 
-    /// Garbage-collects orphaned base disk images (ref_count <= 0).
+    /// Garbage-collects orphaned base disk images (`ref_count` <= 0).
     ///
     /// Returns the number of base images removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query or a deletion fails.
     pub fn gc(&self) -> Result<u32> {
         let orphans = self.db.orphaned_base_disks()?;
         let mut removed = 0_u32;
         for orphan in &orphans {
-            let _ = self.disk.remove_base(&orphan.digest);
+            drop(self.disk.remove_base(&orphan.digest));
             self.db.delete_base_disk(&orphan.id)?;
             removed += 1;
         }
@@ -276,6 +301,10 @@ impl Runtime {
     /// same installed packages and files as the source, but is independent.
     ///
     /// The source VM can be running or stopped.
+    /// # Errors
+    ///
+    /// Returns an error if the source VM is not found, quota is exceeded,
+    /// disk flattening fails, or the spawn fails.
     pub fn clone_box(
         &self,
         source_id: &str,
@@ -316,10 +345,13 @@ impl Runtime {
     /// Flow: OCI pull → ext4 base image (cached by digest) → per-VM QCOW2
     /// overlay → block-device boot. Each VM gets its own copy-on-write layer,
     /// so `pip install`, `apt install`, etc. work out of the box.
+    /// # Errors
+    ///
+    /// Returns an error if the image pull, disk creation, or spawn fails.
     pub async fn run(
         &self,
         image: &str,
-        configure: impl FnOnce(VmBuilder) -> VmBuilder,
+        configure: impl FnOnce(VmBuilder) -> VmBuilder + Send,
         name: Option<String>,
     ) -> Result<VmHandle> {
         self.run_opts(image, configure, name, &RunOptions::default(), |_| {})
@@ -330,13 +362,17 @@ impl Runtime {
     ///
     /// Checks tenant quota limits before creating the VM. Pass `tenant`
     /// via [`RunOptions`] (defaults to `"default"`).
+    /// # Errors
+    ///
+    /// Returns an error if quota is exceeded, pull fails, disk creation
+    /// fails, or the spawn fails.
     pub async fn run_opts(
         &self,
         image: &str,
-        configure: impl FnOnce(VmBuilder) -> VmBuilder,
+        configure: impl FnOnce(VmBuilder) -> VmBuilder + Send,
         name: Option<String>,
         opts: &RunOptions,
-        on_progress: impl Fn(&str),
+        on_progress: impl Fn(&str) + Send + Sync,
     ) -> Result<VmHandle> {
         // Quota check: enforce max_boxes limit for the tenant.
         self.check_quota("default")?;
@@ -364,12 +400,17 @@ impl Runtime {
         let handle = self.spawn(&builder, Some(image.to_owned()), name, opts.auto_remove)?;
 
         if !opts.ready_timeout.is_zero() {
-            let _ = handle.wait_ready(opts.ready_timeout).await;
+            drop(handle.wait_ready(opts.ready_timeout).await);
         }
         Ok(handle)
     }
 
     /// Spawns a VM in a child process via `bux-shim` and returns a handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the shim binary is not found, config serialization
+    /// fails, or the child process cannot be created.
     pub fn spawn(
         &self,
         builder: &VmBuilder,
@@ -380,7 +421,13 @@ impl Runtime {
         self.spawn_impl(builder, image, name, auto_remove, true)
     }
 
-    #[allow(missing_docs)]
+    #[allow(
+        missing_docs,
+        reason = "mirrors spawn() but skips parent-watch; pending docs"
+    )]
+    /// # Errors
+    ///
+    /// Returns an error if the shim binary is not found or spawn fails.
     pub fn spawn_detached(
         &self,
         builder: &VmBuilder,
@@ -391,7 +438,10 @@ impl Runtime {
         self.spawn_impl(builder, image, name, auto_remove, false)
     }
 
-    #[allow(clippy::missing_docs_in_private_items)]
+    #[allow(
+        clippy::missing_docs_in_private_items,
+        reason = "private implementation detail"
+    )]
     fn spawn_impl(
         &self,
         builder: &VmBuilder,
@@ -467,6 +517,10 @@ impl Runtime {
     }
 
     /// Lists all known VMs, reconciling liveness and auto-removing stopped VMs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
     pub fn list(&self) -> Result<Vec<VmState>> {
         let vms = self.db.list()?;
         let mut keep = Vec::with_capacity(vms.len());
@@ -474,13 +528,13 @@ impl Runtime {
         for mut vm in vms {
             if vm.status.is_active() && !is_pid_alive(vm.pid) {
                 vm.status = Status::Stopped;
-                let _ = self.db.update_status(&vm.id, Status::Stopped);
+                drop(self.db.update_status(&vm.id, Status::Stopped));
             }
 
             if vm.status == Status::Stopped && vm.config.auto_remove {
-                let _ = fs::remove_file(&vm.socket);
-                let _ = self.disk.remove_vm_disk(&vm.id);
-                let _ = self.db.delete(&vm.id);
+                drop(fs::remove_file(&vm.socket));
+                drop(self.disk.remove_vm_disk(&vm.id));
+                drop(self.db.delete(&vm.id));
                 continue;
             }
 
@@ -490,6 +544,10 @@ impl Runtime {
     }
 
     /// Retrieves a handle by name or ID prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the VM is not found or the database query fails.
     pub fn get(&self, id_or_name: &str) -> Result<VmHandle> {
         let mut state = if let Some(s) = self.db.get_by_name(id_or_name)? {
             s
@@ -499,7 +557,7 @@ impl Runtime {
 
         if state.status.is_active() && !is_pid_alive(state.pid) {
             state.status = Status::Stopped;
-            let _ = self.db.update_status(&state.id, Status::Stopped);
+            drop(self.db.update_status(&state.id, Status::Stopped));
         }
 
         Ok(VmHandle::new(
@@ -514,6 +572,11 @@ impl Runtime {
     }
 
     /// Renames a VM.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the VM is not found, the new name conflicts,
+    /// or the database update fails.
     pub fn rename(&self, id_or_name: &str, new_name: &str) -> Result<()> {
         let handle = self.get(id_or_name)?;
         if let Some(existing) = self.db.get_by_name(new_name)?
@@ -528,6 +591,11 @@ impl Runtime {
     }
 
     /// Removes a stopped VM's state, socket, and disk overlay.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the VM is not found, is still running,
+    /// or the database deletion fails.
     pub fn remove(&self, id_or_name: &str) -> Result<()> {
         let handle = self.get(id_or_name)?;
         let state = handle.state();
@@ -540,7 +608,7 @@ impl Runtime {
         }
 
         clean_vm_files(&state.socket);
-        let _ = self.disk.remove_vm_disk(&state.id);
+        drop(self.disk.remove_vm_disk(&state.id));
         self.db.delete(&state.id)?;
         info!(vm_id = %state.id, "VM removed");
         self.events
@@ -556,6 +624,10 @@ impl Runtime {
     /// `SIGKILL` any survivors. Called automatically when the
     /// `Runtime` is dropped, or can be called manually for
     /// coordinated shutdown.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "sync shutdown cannot use tokio::time::sleep"
+    )]
     pub fn shutdown_sync(&self) {
         let Ok(vms) = self.db.list() else { return };
 
@@ -565,7 +637,7 @@ impl Runtime {
             }
 
             info!(vm_id = %vm.id, pid = vm.pid, "stopping VM on shutdown");
-            let _ = signal::kill(Pid::from_raw(vm.pid), Signal::SIGTERM);
+            signal::kill(Pid::from_raw(vm.pid), Signal::SIGTERM).ok();
 
             let start = std::time::Instant::now();
             let timeout = Duration::from_secs(5);
@@ -575,10 +647,10 @@ impl Runtime {
 
             if is_pid_alive(vm.pid) {
                 warn!(vm_id = %vm.id, pid = vm.pid, "SIGKILL after timeout");
-                let _ = signal::kill(Pid::from_raw(vm.pid), Signal::SIGKILL);
+                signal::kill(Pid::from_raw(vm.pid), Signal::SIGKILL).ok();
             }
 
-            let _ = self.db.update_status(&vm.id, Status::Stopped);
+            drop(self.db.update_status(&vm.id, Status::Stopped));
         }
     }
 
@@ -588,6 +660,11 @@ impl Runtime {
     /// 1. Auto-remove stopped VMs flagged with `auto_remove`.
     /// 2. Mark dead-but-active processes as Stopped.
     /// 3. Clean up orphaned socket files.
+    #[allow(
+        clippy::cognitive_complexity,
+        clippy::excessive_nesting,
+        reason = "three-phase recovery logic with inherent branching"
+    )]
     fn recover(&self) {
         let vms = match self.db.list() {
             Ok(v) => v,
@@ -602,8 +679,8 @@ impl Runtime {
             // Phase 1: auto-remove stopped VMs.
             if vm.status == Status::Stopped && vm.config.auto_remove {
                 clean_vm_files(&vm.socket);
-                let _ = self.disk.remove_vm_disk(&vm.id);
-                let _ = self.db.delete(&vm.id);
+                drop(self.disk.remove_vm_disk(&vm.id));
+                drop(self.db.delete(&vm.id));
                 cleaned += 1;
                 continue;
             }
@@ -611,12 +688,12 @@ impl Runtime {
             // Phase 2: reconcile active VMs whose process died.
             if vm.status.is_active() && !is_pid_alive(vm.pid) {
                 warn!(vm_id = %vm.id, pid = vm.pid, "recovery: marking dead VM as stopped");
-                let _ = self.db.update_status(&vm.id, Status::Stopped);
+                drop(self.db.update_status(&vm.id, Status::Stopped));
 
                 if vm.config.auto_remove {
                     clean_vm_files(&vm.socket);
-                    let _ = self.disk.remove_vm_disk(&vm.id);
-                    let _ = self.db.delete(&vm.id);
+                    drop(self.disk.remove_vm_disk(&vm.id));
+                    drop(self.db.delete(&vm.id));
                     cleaned += 1;
                 }
             }
@@ -637,7 +714,7 @@ impl Runtime {
                         .is_some_and(|id| !known_ids.contains(id))
                 });
                 if is_orphan {
-                    let _ = fs::remove_file(entry.path());
+                    drop(fs::remove_file(entry.path()));
                     cleaned += 1;
                 }
             }
@@ -652,453 +729,6 @@ impl Runtime {
 impl Drop for Runtime {
     fn drop(&mut self) {
         self.shutdown_sync();
-    }
-}
-
-/// Handle to a single managed VM.
-#[derive(Debug)]
-pub struct VmHandle {
-    /// Cached state snapshot.
-    state: VmState,
-    /// Shared database reference for status updates.
-    db: Arc<StateDb>,
-    /// Disk image manager for auto-remove cleanup.
-    disk: DiskManager,
-    /// Stateless client (opens a new connection per operation).
-    client: Client,
-    /// Watchdog keepalive — dropping this signals the shim to shut down.
-    /// `None` when reconnecting to a VM spawned in a previous session.
-    keepalive: Option<Keepalive>,
-    /// Runtime-level metrics (shared with Runtime).
-    runtime_metrics: Arc<RuntimeMetrics>,
-    /// Per-box metrics for this VM.
-    box_metrics: BoxMetrics,
-    /// Event dispatcher (shared with Runtime).
-    events: Arc<EventDispatcher>,
-    /// Snapshot manager (shared with Runtime).
-    snapshots: SnapshotManager,
-    /// When this VM was spawned (for uptime tracking).
-    spawned_at: std::time::Instant,
-}
-
-impl VmHandle {
-    /// Creates a new handle from a state snapshot.
-    fn new(
-        state: VmState,
-        db: Arc<StateDb>,
-        disk: DiskManager,
-        keepalive: Option<Keepalive>,
-        runtime_metrics: Arc<RuntimeMetrics>,
-        events: Arc<EventDispatcher>,
-        snapshots: SnapshotManager,
-    ) -> Self {
-        let client = Client::new(&state.socket);
-        Self {
-            state,
-            db,
-            disk,
-            client,
-            keepalive,
-            runtime_metrics,
-            box_metrics: BoxMetrics::new(),
-            events,
-            snapshots,
-            spawned_at: std::time::Instant::now(),
-        }
-    }
-
-    /// Returns the current state snapshot.
-    pub const fn state(&self) -> &VmState {
-        &self.state
-    }
-
-    /// Returns a reference to the stateless client.
-    pub const fn client(&self) -> &Client {
-        &self.client
-    }
-
-    /// Returns per-box metrics for this VM.
-    pub const fn box_metrics(&self) -> &BoxMetrics {
-        &self.box_metrics
-    }
-
-    /// Creates a point-in-time snapshot of this VM's disk.
-    ///
-    /// If the VM is running, guest filesystems are quiesced first.
-    pub async fn create_snapshot(
-        &self,
-        name: Option<&str>,
-    ) -> Result<crate::snapshot::SnapshotInfo> {
-        let overlay = self.state.config.root_disk.as_deref().ok_or_else(|| {
-            crate::Error::InvalidState("VM has no overlay disk to snapshot".to_owned())
-        })?;
-
-        let info = self
-            .snapshots
-            .create(
-                &self.state.id,
-                self.state.status,
-                Path::new(overlay),
-                &self.client,
-                name,
-            )
-            .await?;
-
-        self.events
-            .emit(AuditEvent::now(AuditEventKind::SnapshotCreated {
-                box_id: self.state.id.clone(),
-                snapshot_id: info.id.clone(),
-            }));
-
-        Ok(info)
-    }
-
-    /// Lists all snapshots for this VM.
-    pub fn list_snapshots(&self) -> Result<Vec<crate::snapshot::SnapshotInfo>> {
-        self.snapshots.list(&self.state.id)
-    }
-
-    /// Deletes a snapshot by ID.
-    pub fn delete_snapshot(&self, snapshot_id: &str) -> Result<()> {
-        self.snapshots.delete(snapshot_id)
-    }
-
-    /// Exports this VM's disk as a standalone QCOW2 image.
-    ///
-    /// Flattens the QCOW2 overlay chain (overlay + backing base) into a
-    /// single self-contained file at `dest`. The source VM is unaffected.
-    /// If the VM is running, consider creating a snapshot first.
-    pub fn export(&self, dest: &Path) -> Result<()> {
-        let vm_id = &self.state.id;
-        self.disk.flatten_vm_disk(vm_id, dest)?;
-        info!(vm_id = %vm_id, dest = %dest.display(), "VM disk exported");
-        Ok(())
-    }
-
-    /// Starts a background health check task for this VM.
-    ///
-    /// The task periodically pings the guest agent and updates the VM's
-    /// health state in the database. Dropping the returned handle cancels
-    /// the background task.
-    pub fn enable_health_check(
-        &self,
-        config: crate::health::HealthCheckConfig,
-    ) -> crate::health::HealthCheckHandle {
-        crate::health::start(
-            self.state.id.clone(),
-            self.client.clone(),
-            Arc::clone(&self.db),
-            config,
-        )
-    }
-
-    /// Probes the guest agent and returns the current health status.
-    pub async fn health(&self) -> HealthStatus {
-        if !self.is_alive() {
-            return HealthStatus::Dead;
-        }
-        match tokio::time::timeout(Duration::from_secs(2), self.client.ping()).await {
-            Ok(Ok(_)) => HealthStatus::Healthy,
-            Ok(Err(_)) => HealthStatus::Unhealthy,
-            Err(_) => HealthStatus::Starting,
-        }
-    }
-
-    /// Pings the guest agent and returns agent metadata.
-    pub async fn ping(&self) -> Result<PongInfo> {
-        Ok(self.client.ping().await?)
-    }
-
-    /// Starts a command on a dedicated exec connection.
-    ///
-    /// Emits an [`ExecStarted`](AuditEventKind::ExecStarted) audit event.
-    /// The caller is responsible for collecting output and calling
-    /// [`exec_output`](Self::exec_output) if they want
-    /// [`ExecCompleted`](AuditEventKind::ExecCompleted) to be emitted.
-    pub async fn exec(&self, req: ExecStart) -> Result<ExecHandle> {
-        let cmd = req.cmd.clone();
-        let handle = self.client.exec(req).await?;
-        self.events
-            .emit(AuditEvent::now(AuditEventKind::ExecStarted {
-                box_id: self.state.id.clone(),
-                command: cmd,
-                exec_id: handle.exec_id().to_owned(),
-            }));
-        Ok(handle)
-    }
-
-    /// Executes a command and collects all output.
-    ///
-    /// Emits both [`ExecStarted`](AuditEventKind::ExecStarted) and
-    /// [`ExecCompleted`](AuditEventKind::ExecCompleted) audit events,
-    /// and updates [`BoxMetrics::exec_count`](crate::BoxMetrics).
-    pub async fn exec_output(&self, req: ExecStart) -> Result<ExecOutput> {
-        let cmd = req.cmd.clone();
-        let output = self.client.exec_output(req).await?;
-        self.events
-            .emit(AuditEvent::now(AuditEventKind::ExecStarted {
-                box_id: self.state.id.clone(),
-                command: cmd,
-                exec_id: output.exec_id.clone(),
-            }));
-        self.events
-            .emit(AuditEvent::now(AuditEventKind::ExecCompleted {
-                box_id: self.state.id.clone(),
-                exec_id: output.exec_id.clone(),
-                exit_code: output.code,
-                duration_ms: output.duration_ms,
-            }));
-        self.box_metrics.on_exec_completed(output.duration_ms);
-        Ok(output)
-    }
-
-    /// Restarts a stopped VM from its preserved QCOW2 overlay disk.
-    ///
-    /// Only works when `auto_remove` is `false` (the default for [`Runtime::run`]).
-    /// All previous state (installed packages, files) is preserved.
-    pub async fn start(&mut self, ready_timeout: Duration) -> Result<()> {
-        if self.state.status != Status::Stopped {
-            return Err(crate::Error::InvalidState(format!(
-                "VM {} cannot be started (status: {:?}); only stopped VMs can restart",
-                self.state.id, self.state.status
-            )));
-        }
-
-        prepare_managed_config(&mut self.state.config)?;
-
-        let config_path = self
-            .state
-            .socket
-            .with_file_name(format!("{}.json", self.state.id));
-        let socks_dir = self.state.socket.parent().unwrap_or_else(|| Path::new("."));
-        let shim = spawn_shim(
-            &self.state.config,
-            &config_path,
-            socks_dir,
-            &self.state.id,
-            true,
-        )?;
-
-        self.state.pid = shim.pid;
-        self.state.status = Status::Running;
-        self.db.update_status(&self.state.id, Status::Running)?;
-        self.client = Client::new(&self.state.socket);
-        self.keepalive = shim.keepalive;
-
-        info!(vm_id = %self.state.id, pid = shim.pid, "VM restarted");
-        self.spawned_at = std::time::Instant::now();
-        self.events
-            .emit(AuditEvent::now(AuditEventKind::BoxStarted {
-                id: self.state.id.clone(),
-            }));
-        if !ready_timeout.is_zero() {
-            let _ = self.wait_ready(ready_timeout).await;
-        }
-        Ok(())
-    }
-
-    /// Graceful shutdown with default 10 s timeout.
-    pub async fn stop(&mut self) -> Result<()> {
-        self.stop_timeout(Duration::from_secs(10)).await
-    }
-
-    /// Graceful shutdown: sends `Shutdown` request, waits up to `timeout`,
-    /// then falls back to `SIGKILL`.
-    pub async fn stop_timeout(&mut self, timeout: Duration) -> Result<()> {
-        if !self.state.status.can_stop() {
-            return Err(crate::Error::InvalidState(format!(
-                "VM {} cannot be stopped (status: {:?})",
-                self.state.id, self.state.status
-            )));
-        }
-
-        self.state.status = Status::Stopping;
-        self.db.update_status(&self.state.id, Status::Stopping)?;
-
-        let _ = self.client.shutdown().await;
-
-        let pid = self.state.pid;
-        let result = tokio::time::timeout(
-            timeout,
-            tokio::task::spawn_blocking(move || wait_for_exit(pid)),
-        )
-        .await;
-
-        if result.is_ok() {
-            return self.mark_stopped();
-        }
-        self.kill()
-    }
-
-    /// Sends `SIGKILL` to the VM process.
-    pub fn kill(&mut self) -> Result<()> {
-        let _ = signal::kill(Pid::from_raw(self.state.pid), Signal::SIGKILL);
-        self.mark_stopped()
-    }
-
-    /// Returns `true` if the VM process is still alive.
-    pub fn is_alive(&self) -> bool {
-        is_pid_alive(self.state.pid)
-    }
-
-    /// Pauses the VM by quiescing its filesystems and sending `SIGSTOP`.
-    pub async fn pause(&mut self) -> Result<()> {
-        if !self.state.status.can_pause() {
-            return Err(crate::Error::InvalidState(format!(
-                "VM {} cannot be paused (status: {:?})",
-                self.state.id, self.state.status
-            )));
-        }
-        let _ = self.client.quiesce().await;
-        signal::kill(Pid::from_raw(self.state.pid), Signal::SIGSTOP)?;
-        self.state.status = Status::Paused;
-        self.db.update_status(&self.state.id, Status::Paused)?;
-        Ok(())
-    }
-
-    /// Resumes a paused VM by sending `SIGCONT` and thawing its filesystems.
-    pub async fn resume(&mut self) -> Result<()> {
-        if !self.state.status.can_resume() {
-            return Err(crate::Error::InvalidState(format!(
-                "VM {} cannot be resumed (status: {:?})",
-                self.state.id, self.state.status
-            )));
-        }
-        signal::kill(Pid::from_raw(self.state.pid), Signal::SIGCONT)?;
-        let _ = self.client.thaw().await;
-        self.state.status = Status::Running;
-        self.db.update_status(&self.state.id, Status::Running)?;
-        Ok(())
-    }
-
-    /// Sends a POSIX signal to the VM process.
-    pub fn signal(&self, sig: i32) -> Result<()> {
-        let signal =
-            Signal::try_from(sig).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        signal::kill(Pid::from_raw(self.state.pid), signal)?;
-        Ok(())
-    }
-
-    /// Waits for the VM process to exit.
-    pub async fn wait(&mut self) -> Result<()> {
-        let pid = self.state.pid;
-        let _ = tokio::task::spawn_blocking(move || wait_for_exit(pid)).await;
-        self.mark_stopped()
-    }
-
-    /// Waits for the guest agent to become reachable.
-    ///
-    /// Races handshake probes against shim process death detection.
-    /// On failure, reads the shim's exit file for structured diagnostics.
-    pub async fn wait_ready(&self, timeout: Duration) -> io::Result<()> {
-        let start = std::time::Instant::now();
-        let pid = self.state.pid;
-        let exit_file = self.state.socket.with_extension("exit");
-
-        let result = tokio::time::timeout(timeout, async {
-            let handshake_loop = async {
-                loop {
-                    if self.client.handshake().await.is_ok() {
-                        return Ok(());
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            };
-
-            let process_monitor = async {
-                loop {
-                    if !is_pid_alive(pid) {
-                        let msg = shim_death_message(pid, &exit_file);
-                        return Err(io::Error::new(io::ErrorKind::BrokenPipe, msg));
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-            };
-
-            tokio::select! {
-                result = handshake_loop => result,
-                result = process_monitor => result,
-            }
-        })
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "guest agent did not become ready"))?;
-
-        // Record boot duration on success.
-        if result.is_ok() {
-            let boot_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-            self.box_metrics.set_boot_duration_ms(boot_ms);
-        }
-        result
-    }
-
-    /// Reads a file from the guest filesystem.
-    pub async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
-        Ok(self.client.read_file(path).await?)
-    }
-
-    /// Writes a file to the guest filesystem.
-    pub async fn write_file(&self, path: &str, data: &[u8], mode: u32) -> Result<()> {
-        Ok(self.client.write_file(path, data, mode).await?)
-    }
-
-    /// Copies a tar archive into the guest, unpacking at `dest`.
-    pub async fn copy_in(&self, dest: &str, tar_data: &[u8]) -> Result<()> {
-        Ok(self.client.copy_in(dest, tar_data).await?)
-    }
-
-    /// Streams a tar archive from `reader` into the guest, unpacking at `dest`.
-    pub async fn copy_in_from_reader(
-        &self,
-        dest: &str,
-        reader: &mut (impl tokio::io::AsyncRead + Unpin),
-    ) -> Result<()> {
-        Ok(self.client.copy_in_from_reader(dest, reader).await?)
-    }
-
-    /// Copies a path from the guest as a tar archive.
-    pub async fn copy_out(&self, path: &str) -> Result<Vec<u8>> {
-        Ok(self.client.copy_out(path).await?)
-    }
-
-    /// Streams a path from the guest as a tar archive directly to `writer`.
-    pub async fn copy_out_to_writer(
-        &self,
-        path: &str,
-        follow_symlinks: bool,
-        writer: &mut (impl tokio::io::AsyncWrite + Unpin),
-    ) -> Result<u64> {
-        Ok(self
-            .client
-            .copy_out_to_writer(path, follow_symlinks, writer)
-            .await?)
-    }
-
-    /// Performs a version handshake with the guest agent.
-    pub async fn handshake(&self) -> Result<()> {
-        Ok(self.client.handshake().await?)
-    }
-
-    /// Updates status to Stopped and persists. If `auto_remove` is set,
-    /// deletes the VM record, socket, and disk image.
-    fn mark_stopped(&mut self) -> Result<()> {
-        self.state.status = Status::Stopped;
-
-        let uptime_ms = u64::try_from(self.spawned_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-        self.runtime_metrics.on_box_stopped(uptime_ms);
-        self.events
-            .emit(AuditEvent::now(AuditEventKind::BoxStopped {
-                id: self.state.id.clone(),
-                exit_code: None,
-            }));
-
-        if self.state.config.auto_remove {
-            clean_vm_files(&self.state.socket);
-            let _ = self.disk.remove_vm_disk(&self.state.id);
-            self.db.delete(&self.state.id)?;
-        } else {
-            self.db.update_status(&self.state.id, Status::Stopped)?;
-        }
-        Ok(())
     }
 }
 
@@ -1130,9 +760,9 @@ fn shim_death_message(pid: i32, exit_file: &Path) -> String {
 /// Cleans `.sock`, `.exit`, `.json`, and `.stderr` files that share the
 /// same stem as the socket.
 fn clean_vm_files(socket: &Path) {
-    let _ = fs::remove_file(socket);
+    drop(fs::remove_file(socket));
     for ext in ["exit", "json", "stderr"] {
-        let _ = fs::remove_file(socket.with_extension(ext));
+        drop(fs::remove_file(socket.with_extension(ext)));
     }
 }
 
@@ -1145,6 +775,10 @@ fn is_pid_alive(pid: i32) -> bool {
 ///
 /// Tries `waitpid` first (works for child processes — zero CPU, zero delay).
 /// Falls back to `kill(pid, 0)` polling if the process is not a direct child.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "sync fallback poll cannot use tokio::time::sleep"
+)]
 fn wait_for_exit(pid: i32) {
     let nix_pid = Pid::from_raw(pid);
     if let Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..)) = waitpid(nix_pid, None) {
@@ -1247,11 +881,14 @@ fn spawn_shim(
     };
 
     let result = jail::spawn(&shim, config_path, jail_config, vm_id).map_err(|e| {
-        let _ = fs::remove_file(config_path);
+        drop(fs::remove_file(config_path));
         io::Error::new(e.kind(), format!("failed to spawn {}: {e}", shim.display()))
     })?;
 
-    #[allow(clippy::cast_possible_wrap)]
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "PID fits in i32 on all supported platforms"
+    )]
     let pid = result.child.id() as i32;
     drop(shim_wd_fd);
 
@@ -1297,7 +934,10 @@ fn find_shim() -> io::Result<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-#[allow(clippy::missing_docs_in_private_items)]
+#[allow(
+    clippy::missing_docs_in_private_items,
+    reason = "macOS-only helper with self-explanatory name"
+)]
 fn ensure_shim_dylib_aliases(shim: &Path) -> io::Result<()> {
     let Some(shim_dir) = shim.parent() else {
         return Ok(());

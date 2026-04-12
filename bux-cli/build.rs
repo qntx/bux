@@ -1,4 +1,8 @@
-#![allow(missing_docs, clippy::missing_docs_in_private_items)]
+#![allow(
+    missing_docs,
+    clippy::missing_docs_in_private_items,
+    reason = "build script"
+)]
 
 use std::env;
 use std::fs;

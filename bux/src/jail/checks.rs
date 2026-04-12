@@ -8,6 +8,10 @@ use std::path::Path;
 /// Capabilities available on the current host for VM isolation.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each bool represents an independent capability flag"
+)]
 pub struct HostCapabilities {
     /// Whether hardware virtualization is available (KVM / Hypervisor.framework).
     pub virtualization: bool,
@@ -25,6 +29,7 @@ pub struct HostCapabilities {
 ///
 /// This is a best-effort check — it probes for the presence of various
 /// system features without requiring elevated privileges.
+#[must_use]
 pub fn check_host() -> HostCapabilities {
     HostCapabilities {
         virtualization: check_virtualization(),
@@ -38,6 +43,7 @@ pub fn check_host() -> HostCapabilities {
 /// Reports on the isolation strength of the current sandbox configuration.
 ///
 /// Returns a list of warnings for missing security layers.
+#[must_use]
 pub fn audit_isolation(caps: &HostCapabilities) -> Vec<String> {
     let mut warnings = Vec::new();
 
@@ -68,6 +74,10 @@ pub fn audit_isolation(caps: &HostCapabilities) -> Vec<String> {
 ///
 /// Returns `Ok(())` if the binary passes all checks, or an error describing
 /// the validation failure.
+///
+/// # Errors
+///
+/// Returns an error if the binary is missing, too small, or not a valid ELF.
 pub fn check_guest_binary(path: &Path) -> std::io::Result<()> {
     use std::io;
 
@@ -88,7 +98,8 @@ pub fn check_guest_binary(path: &Path) -> std::io::Result<()> {
 
     // Read ELF magic.
     let header = std::fs::read(path)?;
-    if header.len() < 16 || &header[..4] != b"\x7fELF" {
+    let elf_magic: &[u8] = b"\x7fELF";
+    if header.get(..4) != Some(elf_magic) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "guest binary is not a valid ELF file",
@@ -122,7 +133,7 @@ fn check_virtualization() -> bool {
 }
 
 /// Checks whether Linux namespace isolation (bubblewrap) is available.
-#[allow(clippy::missing_const_for_fn)]
+#[allow(clippy::missing_const_for_fn, reason = "body is non-const on Linux")]
 fn check_namespaces() -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -136,7 +147,7 @@ fn check_namespaces() -> bool {
 }
 
 /// Checks whether seccomp BPF syscall filtering is available.
-#[allow(clippy::missing_const_for_fn)]
+#[allow(clippy::missing_const_for_fn, reason = "body is non-const on Linux")]
 fn check_seccomp() -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -168,7 +179,7 @@ fn check_mac() -> bool {
 }
 
 /// Checks whether cgroup v2 resource limits are available.
-#[allow(clippy::missing_const_for_fn)]
+#[allow(clippy::missing_const_for_fn, reason = "body is non-const on Linux")]
 fn check_cgroups() -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -181,7 +192,7 @@ fn check_cgroups() -> bool {
 }
 
 /// Checks if a binary is available in $PATH.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "used conditionally on Linux")]
 fn which(name: &str) -> bool {
     std::env::var("PATH")
         .unwrap_or_default()
@@ -190,6 +201,10 @@ fn which(name: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::let_underscore_must_use,
+    reason = "tests use let _ for clarity"
+)]
 mod tests {
     use super::*;
 

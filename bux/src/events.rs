@@ -101,6 +101,7 @@ pub struct AuditEvent {
 
 impl AuditEvent {
     /// Creates a new event with the current timestamp.
+    #[must_use]
     pub fn now(kind: AuditEventKind) -> Self {
         Self {
             timestamp: SystemTime::now(),
@@ -137,6 +138,7 @@ impl std::fmt::Debug for EventDispatcher {
 
 impl EventDispatcher {
     /// Creates a new dispatcher with no listeners.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -149,7 +151,10 @@ impl EventDispatcher {
     }
 
     /// Emits an event to all registered listeners.
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "event is consumed after broadcast"
+    )]
     pub fn emit(&self, event: AuditEvent) {
         if let Ok(listeners) = self.listeners.lock() {
             for listener in listeners.iter() {
@@ -187,6 +192,7 @@ impl std::fmt::Debug for RingBufferListener {
 
 impl RingBufferListener {
     /// Creates a ring buffer with the given capacity.
+    #[must_use]
     pub fn new(capacity: usize) -> Self {
         let cap = capacity.max(1);
         Self {
@@ -209,7 +215,10 @@ impl RingBufferListener {
         let Ok(buffer) = self.buffer.lock() else {
             return Vec::new();
         };
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "capacity is usize, so truncation is acceptable"
+        )]
         let total = self.total.load(Ordering::Relaxed) as usize;
         let available = total.min(self.capacity);
         let take = limit.min(available);
@@ -230,7 +239,7 @@ impl RingBufferListener {
 
         for i in 0..take {
             let idx = (start + i) % self.capacity;
-            if let Some(ref event) = buffer[idx] {
+            if let Some(event) = buffer.get(idx).and_then(Option::as_ref) {
                 events.push(event.clone());
             }
         }
@@ -243,7 +252,9 @@ impl EventListener for RingBufferListener {
     fn on_event(&self, event: &AuditEvent) {
         if let Ok(mut buffer) = self.buffer.lock() {
             let pos = self.write_pos.load(Ordering::Relaxed);
-            buffer[pos % self.capacity] = Some(event.clone());
+            if let Some(slot) = buffer.get_mut(pos % self.capacity) {
+                *slot = Some(event.clone());
+            }
             self.write_pos
                 .store((pos + 1) % self.capacity, Ordering::Relaxed);
             self.total.fetch_add(1, Ordering::Relaxed);
@@ -252,7 +263,11 @@ impl EventListener for RingBufferListener {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "test assertions use unwrap/indexing for clarity"
+)]
 mod tests {
     use super::*;
 
@@ -299,7 +314,10 @@ mod tests {
     fn dispatcher_fans_out() {
         let dispatcher = EventDispatcher::new();
         let ring = Arc::new(RingBufferListener::new(10));
-        #[allow(clippy::clone_on_ref_ptr)] // coercion to dyn trait requires .clone()
+        #[allow(
+            clippy::clone_on_ref_ptr,
+            reason = "coercion to dyn trait requires .clone()"
+        )]
         let listener: Arc<dyn EventListener> = ring.clone();
         dispatcher.add_listener(listener);
 

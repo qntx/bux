@@ -29,13 +29,16 @@
     clippy::pub_underscore_fields,
     clippy::struct_field_names,
     clippy::too_many_arguments,
+    clippy::undocumented_unsafe_blocks,
+    clippy::multiple_unsafe_ops_per_block,
     clippy::unimplemented,
     clippy::unreadable_literal,
     clippy::unseparated_literal_suffix,
     clippy::unwrap_used,
     clippy::upper_case_acronyms,
     clippy::used_underscore_binding,
-    clippy::useless_transmute
+    clippy::useless_transmute,
+    reason = "auto-generated FFI bindings"
 )]
 
 // When the `regenerate` feature is enabled, use freshly generated bindings.

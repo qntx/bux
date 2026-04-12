@@ -3,6 +3,10 @@
 /// Errors returned by ext4 operations.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
+#[allow(
+    clippy::error_impl_error,
+    reason = "Error is the crate's public error type"
+)]
 pub enum Error {
     /// A libext2fs function returned a non-zero error code.
     #[error("{op}: {}", describe_ext2fs_error(*.code))]
