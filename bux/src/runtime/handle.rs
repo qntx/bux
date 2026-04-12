@@ -8,9 +8,10 @@ use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use tracing::info;
 
-use super::{
-    HealthStatus, clean_vm_files, is_pid_alive, prepare_managed_config, shim_death_message,
-    spawn_shim, wait_for_exit,
+use super::HealthStatus;
+use super::spawn::{
+    clean_vm_files, is_pid_alive, prepare_managed_config, shim_death_message, spawn_shim,
+    wait_for_exit,
 };
 use crate::Result;
 use crate::client::{Client, ExecHandle, ExecOutput, PongInfo};
