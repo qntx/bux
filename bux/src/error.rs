@@ -23,7 +23,6 @@ pub type Result<T> = std::result::Result<T, Error>;
     reason = "Error is the crate's public error type"
 )]
 pub enum Error {
-    // ---- User errors (caller can fix) ----
     /// Invalid VM, runtime, or managed-guest configuration.
     #[error("{0}")]
     InvalidConfig(String),
@@ -40,7 +39,6 @@ pub enum Error {
     #[error("{0}")]
     InvalidState(String),
 
-    // ---- Retryable errors (transient) ----
     /// A resource is currently busy (e.g. locked by another operation).
     #[error("{0}")]
     Busy(String),
@@ -53,7 +51,6 @@ pub enum Error {
     #[error("{0}")]
     QuotaExceeded(String),
 
-    // ---- System errors (infrastructure) ----
     /// libkrun returned a negative error code.
     #[error("{op}: libkrun error code {code}")]
     Krun {
@@ -95,7 +92,6 @@ pub enum Error {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 
-    // ---- Fatal errors ----
     /// The runtime has been shut down; no new operations are accepted.
     #[error("runtime has been shut down")]
     Shutdown,
@@ -125,5 +121,49 @@ impl Error {
     #[must_use]
     pub const fn is_fatal(&self) -> bool {
         matches!(self, Self::Shutdown)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_errors() {
+        assert!(Error::InvalidConfig("bad".into()).is_user_error());
+        assert!(Error::NotFound("gone".into()).is_user_error());
+        assert!(Error::Ambiguous("many".into()).is_user_error());
+        assert!(Error::InvalidState("wrong".into()).is_user_error());
+
+        assert!(!Error::InvalidConfig("bad".into()).is_retryable());
+        assert!(!Error::InvalidConfig("bad".into()).is_fatal());
+    }
+
+    #[test]
+    fn retryable_errors() {
+        assert!(Error::Busy("locked".into()).is_retryable());
+        assert!(Error::GuestUnavailable.is_retryable());
+        assert!(Error::QuotaExceeded("disk".into()).is_retryable());
+
+        assert!(!Error::GuestUnavailable.is_user_error());
+        assert!(!Error::GuestUnavailable.is_fatal());
+    }
+
+    #[test]
+    fn fatal_error() {
+        assert!(Error::Shutdown.is_fatal());
+        assert!(!Error::Shutdown.is_user_error());
+        assert!(!Error::Shutdown.is_retryable());
+    }
+
+    #[test]
+    fn system_errors_not_categorized() {
+        let krun = Error::Krun {
+            op: "create_ctx",
+            code: -1,
+        };
+        assert!(!krun.is_user_error());
+        assert!(!krun.is_retryable());
+        assert!(!krun.is_fatal());
     }
 }

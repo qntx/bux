@@ -36,7 +36,7 @@ pub struct ExecOutput {
     /// Wall-clock duration in milliseconds.
     pub duration_ms: u64,
     /// Error message from the guest agent, if any.
-    pub error_message: String,
+    pub error_message: Option<String>,
 }
 
 /// Information returned by a successful ping.

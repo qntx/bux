@@ -98,28 +98,31 @@ pub(crate) fn start_stats_logging(instance: Weak<GvproxyInstance>) {
                 break;
             };
 
-            match inst.get_stats() {
-                Ok(stats) => {
-                    tracing::info!(
-                        bytes_sent = stats.bytes_sent,
-                        bytes_received = stats.bytes_received,
-                        tcp_established = stats.tcp.current_established,
-                        tcp_failed = stats.tcp.failed_connection_attempts,
-                        tcp_retransmits = stats.tcp.retransmits,
-                        tcp_timeouts = stats.tcp.timeouts,
-                        "network statistics"
-                    );
-
-                    if stats.tcp.forward_max_inflight_drop > 0 {
-                        tracing::warn!(
-                            drops = stats.tcp.forward_max_inflight_drop,
-                            "TCP connections dropped due to maxInFlight limit"
-                        );
-                    }
-                }
+            let stats = match inst.get_stats() {
+                Ok(s) => s,
                 Err(e) => {
                     tracing::debug!(error = %e, "failed to get stats (instance may be shutting down)");
+                    drop(inst);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                    continue;
                 }
+            };
+
+            tracing::info!(
+                bytes_sent = stats.bytes_sent,
+                bytes_received = stats.bytes_received,
+                tcp_established = stats.tcp.current_established,
+                tcp_failed = stats.tcp.failed_connection_attempts,
+                tcp_retransmits = stats.tcp.retransmits,
+                tcp_timeouts = stats.tcp.timeouts,
+                "network statistics"
+            );
+
+            if stats.tcp.forward_max_inflight_drop > 0 {
+                tracing::warn!(
+                    drops = stats.tcp.forward_max_inflight_drop,
+                    "TCP connections dropped due to maxInFlight limit"
+                );
             }
 
             // Release the Arc before sleeping.

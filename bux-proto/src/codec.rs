@@ -416,7 +416,7 @@ mod tests {
                 signal: None,
                 timed_out: false,
                 duration_ms: 42,
-                error_message: String::new(),
+                error_message: None,
             },
         )
         .await

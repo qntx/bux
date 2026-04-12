@@ -27,6 +27,8 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 #[cfg(unix)]
 use crate::guest::ManagedGuestBinary;
+#[cfg(unix)]
+use crate::util::push_unique_path;
 
 /// Parsed QCOW2 header information extracted via `qemu-img info`.
 #[non_exhaustive]
@@ -523,14 +525,6 @@ pub(crate) fn read_backing_chain(path: &Path) -> Vec<PathBuf> {
     }
 
     chain
-}
-
-#[cfg(unix)]
-#[allow(clippy::missing_docs_in_private_items, reason = "trivial helper")]
-fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
-    if !paths.iter().any(|p| p == &path) {
-        paths.push(path);
-    }
 }
 
 // All offsets/sizes in this module are compile-time constants well within

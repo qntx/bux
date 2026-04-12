@@ -308,8 +308,6 @@ impl StateDb {
         Ok(())
     }
 
-    // ---- Snapshot CRUD ----
-
     /// Inserts a snapshot record.
     ///
     /// # Errors
@@ -379,8 +377,6 @@ impl StateDb {
             .execute("DELETE FROM snapshots WHERE id = ?1", params![snapshot_id])?;
         Ok(())
     }
-
-    // ---- Base disk CRUD ----
 
     /// Inserts or returns an existing base disk by digest.
     ///
@@ -470,8 +466,6 @@ impl StateDb {
             .execute("DELETE FROM base_disks WHERE id = ?1", params![id])?;
         Ok(())
     }
-
-    // ---- Quota CRUD ----
 
     /// Sets quota limits for a tenant.
     ///

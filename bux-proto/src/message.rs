@@ -306,7 +306,7 @@ pub enum ExecOut {
         /// Wall-clock milliseconds from spawn to exit.
         duration_ms: u64,
         /// Diagnostic message when the process died unexpectedly.
-        error_message: String,
+        error_message: Option<String>,
     },
     /// Fatal error during execution (e.g. I/O failure on pipes).
     Error(ErrorInfo),

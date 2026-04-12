@@ -23,6 +23,7 @@
     non_camel_case_types,
     non_upper_case_globals,
     non_snake_case,
+    clippy::doc_markdown,
     clippy::missing_safety_doc,
     clippy::upper_case_acronyms
 )]

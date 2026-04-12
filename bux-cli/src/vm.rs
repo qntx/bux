@@ -539,8 +539,6 @@ fn parse_signal(name: &str) -> Result<i32> {
     }
 }
 
-// ---- New commands: restart, stats, clone, export ----
-
 /// Arguments for `bux restart`.
 #[derive(clap::Args)]
 pub struct RestartArgs {

@@ -79,3 +79,51 @@ pub const SIGNAL_EXIT_BASE: i32 = 128;
 
 /// Rust default panic exit code.
 pub const PANIC_EXIT_CODE: i32 = 101;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signal_roundtrip() {
+        let info = ExitInfo::Signal {
+            exit_code: 134,
+            signal: "SIGABRT".into(),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let parsed: ExitInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.exit_code(), 134);
+        assert_eq!(parsed.summary(), "killed by SIGABRT");
+    }
+
+    #[test]
+    fn panic_roundtrip() {
+        let info = ExitInfo::Panic {
+            exit_code: PANIC_EXIT_CODE,
+            message: "index out of bounds".into(),
+            location: "src/main.rs:42:5".into(),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let parsed: ExitInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.exit_code(), 101);
+        assert!(parsed.summary().contains("index out of bounds"));
+        assert!(parsed.summary().contains("src/main.rs:42:5"));
+    }
+
+    #[test]
+    fn error_roundtrip() {
+        let info = ExitInfo::Error {
+            exit_code: 1,
+            message: "config parse failed".into(),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let parsed: ExitInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.exit_code(), 1);
+        assert_eq!(parsed.summary(), "config parse failed");
+    }
+
+    #[test]
+    fn from_file_missing_returns_none() {
+        assert!(ExitInfo::from_file(Path::new("/nonexistent/path.json")).is_none());
+    }
+}
