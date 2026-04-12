@@ -27,7 +27,7 @@ fn is_gzip(media_type: &str) -> bool {
 ///
 /// Each `(path, media_type)` pair is a layer tarball on disk. Layers are applied
 /// in order with full OCI whiteout semantics.
-pub fn extract_layer_files(
+pub(crate) fn extract_layer_files(
     layers: &[(impl AsRef<Path>, impl AsRef<str>)],
     rootfs: &Path,
 ) -> crate::Result<()> {
@@ -48,6 +48,10 @@ pub fn extract_layer_files(
 /// Whiteout semantics (OCI Image Spec v1.1):
 /// - `.wh.<name>` — removes the named sibling entry from a lower layer.
 /// - `.wh..wh..opq` — marks the directory as opaque (clears inherited contents).
+#[allow(
+    clippy::excessive_nesting,
+    reason = "inherent in tar iteration + whiteout processing"
+)]
 fn apply_tar(reader: impl Read, rootfs: &Path) -> crate::Result<()> {
     let mut archive = tar::Archive::new(reader);
     archive.set_preserve_permissions(true);
@@ -64,23 +68,23 @@ fn apply_tar(reader: impl Read, rootfs: &Path) -> crate::Result<()> {
 
         // Opaque whiteout: clear the parent directory contents.
         if file_name == ".wh..wh..opq" {
-            if let Some(parent) = rel.parent() {
-                let target = rootfs.join(parent);
-                if target.exists() {
-                    clear_dir(&target)?;
-                }
+            if let Some(parent) = rel.parent().map(|p| rootfs.join(p)).filter(|p| p.exists()) {
+                clear_dir(&parent)?;
             }
             continue;
         }
 
         // Regular whiteout: remove the named entry from a lower layer.
         if let Some(target_name) = file_name.strip_prefix(".wh.") {
-            if let Some(parent) = rel.parent() {
-                let target = rootfs.join(parent).join(target_name);
-                if target.is_dir() {
-                    fs::remove_dir_all(&target).ok();
+            if let Some(t) = rel
+                .parent()
+                .map(|p| rootfs.join(p).join(target_name))
+                .filter(|t| t.exists())
+            {
+                if t.is_dir() {
+                    fs::remove_dir_all(&t).ok();
                 } else {
-                    fs::remove_file(&target).ok();
+                    fs::remove_file(&t).ok();
                 }
             }
             continue;

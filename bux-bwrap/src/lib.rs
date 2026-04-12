@@ -54,6 +54,7 @@ pub fn path() -> Option<&'static Path> {
 
 /// On non-Linux platforms, bwrap is unavailable.
 #[cfg(not(target_os = "linux"))]
+#[must_use]
 pub const fn path() -> Option<&'static Path> {
     None
 }

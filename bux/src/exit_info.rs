@@ -45,12 +45,14 @@ pub enum ExitInfo {
 
 impl ExitInfo {
     /// Reads exit info from a JSON file. Returns `None` if missing or invalid.
+    #[must_use]
     pub fn from_file(path: &Path) -> Option<Self> {
         let content = std::fs::read_to_string(path).ok()?;
         serde_json::from_str(&content).ok()
     }
 
     /// Exit code regardless of variant.
+    #[must_use]
     pub const fn exit_code(&self) -> i32 {
         match self {
             Self::Signal { exit_code, .. }
@@ -60,6 +62,7 @@ impl ExitInfo {
     }
 
     /// Human-readable summary for error messages.
+    #[must_use]
     pub fn summary(&self) -> String {
         match self {
             Self::Signal { signal, .. } => format!("killed by {signal}"),

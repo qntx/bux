@@ -1,7 +1,13 @@
 //! bux guest agent — runs inside a micro-VM, typically as PID 1.
 //!
 //! Listens on a vsock port and handles host requests via [`bux_proto`].
-#![allow(unsafe_code, clippy::print_stderr)]
+#![allow(
+    unsafe_code,
+    clippy::print_stderr,
+    clippy::disallowed_methods,
+    unused_crate_dependencies,
+    reason = "guest agent binary uses stderr, process::exit, and unsafe for low-level VM operations"
+)]
 
 #[cfg(not(target_os = "linux"))]
 fn main() {

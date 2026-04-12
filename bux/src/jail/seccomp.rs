@@ -310,7 +310,10 @@ fn build_filter() -> Vec<BpfInstruction> {
     // 1. Load architecture
     prog.push(bpf(BPF_LD | BPF_W | BPF_ABS, 0, 0, SECCOMP_ARCH_OFFSET));
     // If arch != expected, jump to kill (skip all remaining instructions)
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "BPF program length fits in u8"
+    )]
     let kill_offset = (n + 2) as u8; // skip load_nr + all JEQs + allow
     prog.push(bpf(BPF_JMP | BPF_JEQ | BPF_K, 0, kill_offset, AUDIT_ARCH));
 
@@ -320,7 +323,10 @@ fn build_filter() -> Vec<BpfInstruction> {
     // 3. For each allowed syscall: if nr == syscall, jump to ALLOW
     for (i, &syscall) in ALLOWED_SYSCALLS.iter().enumerate() {
         // Distance to the ALLOW instruction at the end
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "BPF jump offset fits in u8"
+        )]
         let allow_offset = (n - i) as u8;
         prog.push(bpf(BPF_JMP | BPF_JEQ | BPF_K, allow_offset, 0, syscall));
     }
@@ -368,7 +374,7 @@ pub fn install() -> Result<(), SeccompError> {
     let filter_len =
         u16::try_from(filter.len()).map_err(|_| SeccompError::FilterTooLarge(filter.len()))?;
 
-    #[allow(unsafe_code)]
+    #[allow(unsafe_code, reason = "seccomp requires raw prctl/syscall")]
     unsafe {
         // Set PR_SET_NO_NEW_PRIVS (required for unprivileged seccomp).
         let rc = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
@@ -404,7 +410,7 @@ pub const fn allowlist_size() -> usize {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, reason = "tests use unwrap for clarity")]
 mod tests {
     use super::*;
 

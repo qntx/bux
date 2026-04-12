@@ -1,4 +1,8 @@
-#![allow(missing_docs, clippy::missing_docs_in_private_items)]
+#![allow(
+    missing_docs,
+    clippy::missing_docs_in_private_items,
+    reason = "internal module with crate-private API surface"
+)]
 
 use std::fmt::Write;
 use std::fs;
@@ -19,7 +23,7 @@ const PT_INTERP: u32 = 3;
 const IMAGE_INJECTION_MARGIN_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
-pub struct ManagedGuestBinary {
+pub(crate) struct ManagedGuestBinary {
     host_path: PathBuf,
     cache_key: String,
     size_bytes: u64,
@@ -54,7 +58,7 @@ impl ManagedGuestBinary {
     fn from_path(path: &Path) -> Result<Self> {
         let data = fs::read(path)?;
         validate_guest_binary(path, &data)?;
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_possible_truncation, reason = "file sizes fit in u64")]
         let size_bytes = data.len() as u64;
         Ok(Self {
             host_path: path.to_path_buf(),
@@ -152,6 +156,10 @@ fn push_unique_path(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
     }
 }
 
+#[allow(
+    clippy::indexing_slicing,
+    reason = "all indices are within bounds: data.len() >= 64 is checked upfront"
+)]
 fn validate_guest_binary(path: &Path, data: &[u8]) -> Result<()> {
     if data.len() < 64 {
         return Err(Error::InvalidConfig(format!(
@@ -160,21 +168,21 @@ fn validate_guest_binary(path: &Path, data: &[u8]) -> Result<()> {
         )));
     }
 
-    if data[..4] != ELF_MAGIC {
+    if data.get(..4) != Some(&ELF_MAGIC) {
         return Err(Error::InvalidConfig(format!(
             "guest binary {} is not a Linux ELF binary",
             path.display()
         )));
     }
 
-    if data[4] != 2 {
+    if data.get(4) != Some(&2) {
         return Err(Error::InvalidConfig(format!(
             "guest binary {} is not a 64-bit ELF",
             path.display()
         )));
     }
 
-    if data[5] != 1 {
+    if data.get(5) != Some(&1) {
         return Err(Error::InvalidConfig(format!(
             "guest binary {} is not little-endian ELF",
             path.display()
@@ -222,7 +230,11 @@ const fn machine_name(machine: u16) -> &'static str {
     }
 }
 
-#[allow(clippy::cast_possible_truncation)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::indexing_slicing,
+    reason = "ELF offsets fit in usize on 64-bit; all slicing is bounds-checked"
+)]
 fn has_pt_interp(data: &[u8]) -> bool {
     if data.len() < 64 {
         return false;
@@ -274,13 +286,18 @@ fn short_hash(data: &[u8]) -> String {
     let digest = Sha256::digest(data);
     let mut out = String::with_capacity(16);
     for byte in digest.iter().take(8) {
-        let _ = write!(out, "{byte:02x}");
+        write!(out, "{byte:02x}").ok();
     }
     out
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "tests"
+)]
 mod tests {
     use super::*;
 

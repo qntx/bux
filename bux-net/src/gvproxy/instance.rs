@@ -33,10 +33,7 @@ impl GvproxyInstance {
     /// port mappings.
     ///
     /// The logging bridge is initialised on first call.
-    pub(crate) fn new(
-        socket_path: PathBuf,
-        port_mappings: &[(u16, u16)],
-    ) -> Result<Self> {
+    pub(crate) fn new(socket_path: PathBuf, port_mappings: &[(u16, u16)]) -> Result<Self> {
         logging::init();
 
         let config = GvproxyConfig::new(socket_path.clone(), port_mappings.to_vec());

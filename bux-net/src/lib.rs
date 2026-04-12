@@ -31,7 +31,5 @@ pub mod error;
 pub mod gvproxy;
 pub mod socket;
 
-pub use backend::{
-    ConnectionType, NetworkBackend, NetworkConfig, NetworkEndpoint, NetworkMetrics,
-};
+pub use backend::{ConnectionType, NetworkBackend, NetworkConfig, NetworkEndpoint, NetworkMetrics};
 pub use error::{NetError, Result};

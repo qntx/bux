@@ -1,6 +1,6 @@
 //! Background health checking for running VMs.
 //!
-//! Periodically pings the guest agent and updates the VM's [`HealthState`]
+//! Periodically pings the guest agent and updates the VM's [`crate::HealthState`]
 //! in the database. Optionally triggers automatic restart when a VM
 //! becomes unhealthy.
 
@@ -52,6 +52,7 @@ mod inner {
 
     impl HealthCheckHandle {
         /// Returns the current number of consecutive health check failures.
+        #[must_use]
         pub fn consecutive_failures(&self) -> u32 {
             self.failures.load(Ordering::Relaxed)
         }
@@ -71,11 +72,15 @@ mod inner {
         let failures = Arc::new(AtomicU32::new(0));
         let failures_clone = Arc::clone(&failures);
 
+        #[allow(
+            clippy::excessive_nesting,
+            reason = "inherent in async spawn + select + match"
+        )]
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     () = tokio::time::sleep(config.interval) => {},
-                    () = async { let _ = cancel_rx.changed().await; } => break,
+                    () = async { drop(cancel_rx.changed().await); } => break,
                 }
 
                 let result = tokio::time::timeout(config.timeout, client.ping()).await;
@@ -86,7 +91,7 @@ mod inner {
                         if prev > 0 {
                             info!(vm_id = %vm_id, "health check recovered after {prev} failures");
                         }
-                        let _ = db.update_health(&vm_id, HealthState::Healthy);
+                        drop(db.update_health(&vm_id, HealthState::Healthy));
                     }
                     Ok(Err(e)) => {
                         let count = failures_clone.fetch_add(1, Ordering::Relaxed) + 1;
@@ -97,7 +102,7 @@ mod inner {
                                 error = %e,
                                 "VM marked unhealthy"
                             );
-                            let _ = db.update_health(&vm_id, HealthState::Unhealthy);
+                            drop(db.update_health(&vm_id, HealthState::Unhealthy));
                         }
                     }
                     Err(_timeout) => {
@@ -108,7 +113,7 @@ mod inner {
                                 failures = count,
                                 "health check timed out — VM marked unhealthy"
                             );
-                            let _ = db.update_health(&vm_id, HealthState::Unhealthy);
+                            drop(db.update_health(&vm_id, HealthState::Unhealthy));
                         }
                     }
                 }

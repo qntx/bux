@@ -3,7 +3,14 @@
 #![allow(
     clippy::print_stdout,
     clippy::print_stderr,
-    clippy::missing_docs_in_private_items
+    clippy::missing_docs_in_private_items,
+    clippy::exit,
+    clippy::disallowed_methods,
+    clippy::let_underscore_must_use,
+    clippy::indexing_slicing,
+    clippy::struct_excessive_bools,
+    unreachable_pub,
+    reason = "binary crate: CLI conventions differ from library lints"
 )]
 
 mod run;
@@ -371,7 +378,7 @@ fn disk_cmd(_action: DiskAction) -> Result<()> {
 }
 
 /// Formats bytes into a human-readable size string.
-#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_precision_loss, reason = "display-only float conversion")]
 fn human_size(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
     let mut size = bytes as f64;

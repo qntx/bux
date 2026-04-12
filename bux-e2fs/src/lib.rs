@@ -22,6 +22,10 @@
 //! [`libext2fs`]: https://e2fsprogs.sourceforge.net/
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![allow(
+    clippy::allow_attributes_without_reason,
+    reason = "bindgen-generated code cannot have reasons"
+)]
 
 pub mod sys;
 

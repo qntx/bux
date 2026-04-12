@@ -11,7 +11,7 @@
 //! [bubblewrap]: https://github.com/containers/bubblewrap
 //! [seatbelt]: https://developer.apple.com/documentation/sandbox
 
-pub mod checks;
+pub(crate) mod checks;
 #[cfg(target_os = "linux")]
 pub mod credentials;
 mod pre_exec;
@@ -34,11 +34,12 @@ use std::process::{Child, Command, Stdio};
 #[cfg(target_os = "linux")]
 pub use bwrap::BwrapSandbox;
 #[cfg(target_os = "macos")]
-pub use seatbelt::SeatbeltSandbox;
+pub(crate) use seatbelt::SeatbeltSandbox;
 
 /// Describes the isolation features provided by a [`Sandbox`] implementation.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
+#[allow(clippy::struct_excessive_bools, reason = "capability flags struct")]
 pub struct SandboxCapabilities {
     /// Whether the sandbox provides namespace isolation (mount, PID, net, etc.).
     pub namespaces: bool,
@@ -125,13 +126,16 @@ pub struct JailConfig {
 
 /// Result of spawning a shim process inside a sandbox.
 #[derive(Debug)]
-pub struct SpawnResult {
+pub(crate) struct SpawnResult {
     /// The spawned child process.
     pub child: Child,
     /// cgroup guard — holds the cgroup alive; cleaned up on drop.
     /// `None` on non-Linux platforms or when no resource limits are set.
     #[cfg(target_os = "linux")]
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "RAII guard: held for lifetime, never read directly"
+    )]
     pub cgroup: Option<cgroup::CgroupGuard>,
 }
 
@@ -140,7 +144,7 @@ pub struct SpawnResult {
 /// Applies platform-specific isolation, then falls back to a bare process
 /// with pre-exec hardening (FD cleanup, die-with-parent) if no sandbox
 /// is available.
-pub fn spawn(
+pub(crate) fn spawn(
     shim: &Path,
     config_path: &Path,
     config: JailConfig,
@@ -175,7 +179,7 @@ pub fn spawn(
             },
         )
         .map_err(|e| io::Error::new(e.kind(), format!("cgroup setup failed: {e}")))?;
-        #[allow(clippy::cast_possible_wrap)]
+        #[allow(clippy::cast_possible_wrap, reason = "PID fits in i32")]
         cgroup::add_pid(&guard, child.id() as i32)?;
         Some(guard)
     } else {

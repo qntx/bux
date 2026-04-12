@@ -8,10 +8,10 @@
 //! 1. Quiesce guest filesystems (if VM is running).
 //! 2. Copy the QCOW2 overlay to `{data_dir}/snapshots/{snapshot_id}.qcow2`.
 //! 3. Thaw guest filesystems.
-//! 4. Record metadata in SQLite.
+//! 4. Record metadata in `SQLite`.
 
 #[cfg(unix)]
-/// Unix-specific snapshot implementation using QCOW2 disk copies and SQLite metadata.
+/// Unix-specific snapshot implementation using QCOW2 disk copies and `SQLite` metadata.
 mod inner {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -69,6 +69,10 @@ mod inner {
 
     impl SnapshotManager {
         /// Creates a new snapshot manager.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if the snapshots directory cannot be created.
         pub fn new(db: Arc<StateDb>, data_dir: &Path) -> io::Result<Self> {
             let snapshots_dir = data_dir.join("snapshots");
             fs::create_dir_all(&snapshots_dir)?;
@@ -79,6 +83,10 @@ mod inner {
         ///
         /// If the VM is running, quiesces guest filesystems first for
         /// point-in-time consistency, then thaws after the copy.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if the disk copy or database insert fails.
         pub async fn create(
             &self,
             vm_id: &str,
@@ -90,21 +98,7 @@ mod inner {
             let snapshot_id = crate::state::gen_id();
             let dest = self.snapshots_dir.join(format!("{snapshot_id}.qcow2"));
 
-            // Quiesce if running.
-            let quiesced = if vm_status == Status::Running {
-                match client.quiesce().await {
-                    Ok(n) => {
-                        info!(vm_id, frozen = n, "filesystems quiesced for snapshot");
-                        true
-                    }
-                    Err(e) => {
-                        warn!(vm_id, error = %e, "quiesce failed, snapshot may be inconsistent");
-                        false
-                    }
-                }
-            } else {
-                false
-            };
+            let quiesced = try_quiesce(vm_id, vm_status, client).await;
 
             // Copy the overlay disk.
             let src = overlay_path.to_path_buf();
@@ -116,7 +110,7 @@ mod inner {
 
             // Thaw if we quiesced.
             if quiesced {
-                let _ = client.thaw().await;
+                client.thaw().await.ok();
             }
 
             let row = SnapshotRow {
@@ -135,6 +129,10 @@ mod inner {
         }
 
         /// Lists all snapshots for a given VM.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if the database query fails.
         pub fn list(&self, box_id: &str) -> Result<Vec<SnapshotInfo>> {
             Ok(self
                 .db
@@ -145,17 +143,42 @@ mod inner {
         }
 
         /// Gets a snapshot by ID.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if the snapshot is not found.
         pub fn get(&self, snapshot_id: &str) -> Result<SnapshotInfo> {
             Ok(SnapshotInfo::from(self.db.get_snapshot(snapshot_id)?))
         }
 
         /// Deletes a snapshot (both the DB record and the disk file).
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if the database record cannot be removed.
         pub fn delete(&self, snapshot_id: &str) -> Result<()> {
             let snap = self.db.get_snapshot(snapshot_id)?;
-            let _ = fs::remove_file(&snap.disk_path);
+            fs::remove_file(&snap.disk_path).ok();
             self.db.delete_snapshot(snapshot_id)?;
             info!(snapshot_id, "snapshot deleted");
             Ok(())
+        }
+    }
+
+    /// Attempts to quiesce guest filesystems. Returns `true` if frozen successfully.
+    async fn try_quiesce(vm_id: &str, status: Status, client: &Client) -> bool {
+        if status != Status::Running {
+            return false;
+        }
+        match client.quiesce().await {
+            Ok(n) => {
+                info!(vm_id, frozen = n, "filesystems quiesced for snapshot");
+                true
+            }
+            Err(e) => {
+                warn!(vm_id, error = %e, "quiesce failed, snapshot may be inconsistent");
+                false
+            }
         }
     }
 }

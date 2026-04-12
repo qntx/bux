@@ -50,15 +50,15 @@ pub mod stats;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub use config::{DnsZone, GvproxyConfig, PortMapping};
+pub use instance::GvproxyInstance;
+pub use stats::{NetworkStats, TcpStats};
+
 use crate::backend::{
     ConnectionType, NetworkBackend, NetworkConfig, NetworkEndpoint, NetworkMetrics,
 };
 use crate::constants::GUEST_MAC;
 use crate::error::Result;
-
-pub use config::{DnsZone, GvproxyConfig, PortMapping};
-pub use instance::GvproxyInstance;
-pub use stats::{NetworkStats, TcpStats};
 
 /// gvisor-tap-vsock network backend with integrated Go→Rust logging.
 ///

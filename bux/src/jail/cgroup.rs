@@ -59,7 +59,8 @@ pub fn create(vm_id: &str, limits: &ResourceLimits) -> io::Result<CgroupGuard> {
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            clippy::cast_precision_loss
+            clippy::cast_precision_loss,
+            reason = "CPU quota arithmetic is within safe range"
         )]
         let quota = (cores * period as f64) as u64;
         let value = format!("{quota} {period}");

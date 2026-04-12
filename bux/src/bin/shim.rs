@@ -1,16 +1,27 @@
 //! bux-shim — child process that boots a micro-VM.
 //!
-//! The parent (`Runtime::spawn`) writes a JSON-serialized [`VmConfig`] to a
+//! The parent (`Runtime::spawn`) writes a JSON-serialized [`bux::VmConfig`] to a
 //! temp file and spawns this binary with the file path as the sole argument.
 //! The shim reads the config, deletes the temp file, rebuilds the
-//! [`VmBuilder`], and calls [`Vm::start()`] which takes over the process
+//! [`bux::VmBuilder`], and calls [`bux::Vm::start()`] which takes over the process
 //! via `krun_start_enter()`.
 //!
 //! This replaces the previous `fork()` approach, which was undefined
 //! behavior in a multi-threaded tokio runtime.
 
 // Shim is a standalone binary — stderr is the correct error channel.
-#![allow(clippy::print_stderr)]
+#![allow(clippy::print_stderr, reason = "shim reports errors via stderr")]
+// Shim shares [dependencies] with the library but only uses a subset.
+#![allow(
+    unused_crate_dependencies,
+    reason = "shim shares [dependencies] with the library crate"
+)]
+// process::exit is the correct termination mechanism for this binary.
+#![allow(
+    clippy::disallowed_methods,
+    clippy::exit,
+    reason = "shim binary uses process::exit for controlled termination"
+)]
 
 #[cfg(not(unix))]
 fn main() {
@@ -33,7 +44,7 @@ fn main() {
 
     let json = match std::fs::read_to_string(&config_path) {
         Ok(j) => {
-            let _ = std::fs::remove_file(&config_path);
+            drop(std::fs::remove_file(&config_path));
             j
         }
         Err(e) => {
@@ -61,7 +72,7 @@ fn main() {
     }
 }
 
-/// Writes an [`ExitInfo::Error`] JSON to the exit file.
+/// Writes an [`bux::ExitInfo::Error`] JSON to the exit file.
 #[cfg(unix)]
 fn write_exit_error(path: &std::path::Path, message: &str) {
     eprintln!("[bux-shim] {message}");
@@ -70,7 +81,7 @@ fn write_exit_error(path: &std::path::Path, message: &str) {
         message: message.to_owned(),
     };
     if let Ok(json) = serde_json::to_string(&info) {
-        let _ = std::fs::write(path, json);
+        drop(std::fs::write(path, json));
     }
 }
 
@@ -79,7 +90,7 @@ fn write_exit_error(path: &std::path::Path, message: &str) {
 #[cfg(unix)]
 static SIGNAL_EXIT_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
-/// Signal handler that writes [`ExitInfo::Signal`] JSON to the exit file.
+/// Signal handler that writes [`bux::ExitInfo::Signal`] JSON to the exit file.
 #[cfg(unix)]
 extern "C" fn handle_crash_signal(sig: libc::c_int) {
     let name = match sig {
@@ -95,17 +106,23 @@ extern "C" fn handle_crash_signal(sig: libc::c_int) {
             signal: name.to_owned(),
         };
         if let Ok(json) = serde_json::to_string(&info) {
-            let _ = std::fs::write(path, json);
+            drop(std::fs::write(path, json));
         }
     }
-    #[allow(unsafe_code)]
+    // SAFETY: SIG_DFL is a valid signal disposition; sig is a valid signal number
+    // received from the kernel.
+    #[allow(unsafe_code, reason = "restore default signal handler")]
     unsafe {
-        libc::signal(sig, libc::SIG_DFL);
-        libc::raise(sig);
-    }
+        libc::signal(sig, libc::SIG_DFL)
+    };
+    // SAFETY: sig is a valid signal number received from the kernel.
+    #[allow(unsafe_code, reason = "re-raise to get default behavior")]
+    unsafe {
+        libc::raise(sig)
+    };
 }
 
-/// Installs panic hook and signal handlers that write [`ExitInfo`] JSON.
+/// Installs panic hook and signal handlers that write [`bux::ExitInfo`] JSON.
 #[cfg(unix)]
 fn install_crash_capture(exit_path: &std::path::Path) {
     // Panic hook — writes ExitInfo::Panic.
@@ -129,21 +146,32 @@ fn install_crash_capture(exit_path: &std::path::Path) {
             location,
         };
         if let Ok(json) = serde_json::to_string(&exit) {
-            let _ = std::fs::write(&panic_path, json);
+            drop(std::fs::write(&panic_path, json));
         }
         default_hook(info);
     }));
 
     // Signal handlers — write ExitInfo::Signal for fatal signals.
-    let _ = SIGNAL_EXIT_PATH.set(exit_path.to_path_buf());
+    drop(SIGNAL_EXIT_PATH.set(exit_path.to_path_buf()));
 
-    #[allow(unsafe_code, function_casts_as_integer)]
-    unsafe {
-        let h = handle_crash_signal as libc::sighandler_t;
-        libc::signal(libc::SIGABRT, h);
-        libc::signal(libc::SIGSEGV, h);
-        libc::signal(libc::SIGBUS, h);
-        libc::signal(libc::SIGILL, h);
+    #[allow(
+        unsafe_code,
+        function_casts_as_integer,
+        reason = "register C signal handlers via libc"
+    )]
+    let h = handle_crash_signal as libc::sighandler_t;
+    // SAFETY: handle_crash_signal is an extern "C" fn with the correct signature.
+    // Each signal number is a valid POSIX signal.
+    #[allow(unsafe_code, reason = "register signal handlers via libc")]
+    {
+        // SAFETY: h is a valid extern "C" signal handler; SIGABRT is a valid signal.
+        unsafe { libc::signal(libc::SIGABRT, h) };
+        // SAFETY: h is a valid extern "C" signal handler; SIGSEGV is a valid signal.
+        unsafe { libc::signal(libc::SIGSEGV, h) };
+        // SAFETY: h is a valid extern "C" signal handler; SIGBUS is a valid signal.
+        unsafe { libc::signal(libc::SIGBUS, h) };
+        // SAFETY: h is a valid extern "C" signal handler; SIGILL is a valid signal.
+        unsafe { libc::signal(libc::SIGILL, h) };
     }
 }
 
@@ -163,9 +191,12 @@ fn start_watchdog() {
         return;
     };
 
+    #[allow(
+        unsafe_code,
+        reason = "fd was created by parent via pipe() and preserved across exec"
+    )]
     // SAFETY: fd_num was created by the parent via pipe() and preserved
     // across exec by not setting O_CLOEXEC on the read end.
-    #[allow(unsafe_code)]
     let owned_fd = unsafe { OwnedFd::from_raw_fd(fd_num) };
 
     if let Err(e) = std::thread::Builder::new()
@@ -173,7 +204,7 @@ fn start_watchdog() {
         .spawn(move || {
             // Borrow the owned FD for the blocking poll.
             // SAFETY: owned_fd lives for the duration of this thread.
-            #[allow(unsafe_code)]
+            #[allow(unsafe_code, reason = "owned_fd lives for the duration of this thread")]
             let borrowed = unsafe { BorrowedFd::borrow_raw(fd_num) };
             bux::watchdog::wait_for_parent_death(borrowed);
             drop(owned_fd); // ensure lifetime extends through poll

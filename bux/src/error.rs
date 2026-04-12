@@ -18,6 +18,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Errors returned by bux VM operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
+#[allow(
+    clippy::error_impl_error,
+    reason = "Error is the crate's public error type"
+)]
 pub enum Error {
     // ---- User errors (caller can fix) ----
     /// Invalid VM, runtime, or managed-guest configuration.
@@ -80,14 +84,14 @@ pub enum Error {
     /// OCI image operation error.
     #[cfg(unix)]
     #[error(transparent)]
-    Oci(#[from] bux_oci::Error),
+    Oci(#[from] bux_oci::OciError),
 
-    /// SQLite database error.
+    /// `SQLite` database error.
     #[cfg(unix)]
     #[error(transparent)]
     Db(#[from] rusqlite::Error),
 
-    /// JSON serialization error (for config stored in SQLite).
+    /// JSON serialization error (for config stored in `SQLite`).
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 
@@ -100,6 +104,7 @@ pub enum Error {
 impl Error {
     /// Returns `true` if this is a user error that the caller can fix
     /// (invalid config, missing resource, wrong state).
+    #[must_use]
     pub const fn is_user_error(&self) -> bool {
         matches!(
             self,
@@ -108,6 +113,7 @@ impl Error {
     }
 
     /// Returns `true` if this is a transient error that may succeed on retry.
+    #[must_use]
     pub const fn is_retryable(&self) -> bool {
         matches!(
             self,
@@ -116,6 +122,7 @@ impl Error {
     }
 
     /// Returns `true` if this is a fatal error (runtime shut down).
+    #[must_use]
     pub const fn is_fatal(&self) -> bool {
         matches!(self, Self::Shutdown)
     }
