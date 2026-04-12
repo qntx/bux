@@ -46,8 +46,6 @@ impl RuntimeMetrics {
         }
     }
 
-    // ---- Read accessors ----
-
     /// Total number of VMs created since runtime start (monotonic counter).
     pub fn boxes_created_total(&self) -> u64 {
         self.boxes_created.load(Ordering::Relaxed)
@@ -72,8 +70,6 @@ impl RuntimeMetrics {
     pub fn disk_bytes_used(&self) -> u64 {
         self.disk_bytes_used.load(Ordering::Relaxed)
     }
-
-    // ---- Mutation (internal) ----
 
     /// Records that a new VM was created.
     pub(crate) fn on_box_created(&self) {
@@ -135,8 +131,6 @@ impl BoxMetrics {
         }
     }
 
-    // ---- Read accessors ----
-
     /// Time from spawn to guest-agent-ready in milliseconds.
     pub fn boot_duration_ms(&self) -> u64 {
         self.boot_duration_ms.load(Ordering::Relaxed)
@@ -151,8 +145,6 @@ impl BoxMetrics {
     pub fn last_exec_duration_ms(&self) -> u64 {
         self.last_exec_duration_ms.load(Ordering::Relaxed)
     }
-
-    // ---- Mutation (internal) ----
 
     /// Records the boot duration.
     pub(crate) fn set_boot_duration_ms(&self, ms: u64) {

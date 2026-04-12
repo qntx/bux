@@ -19,6 +19,8 @@
     reason = "internal modules have self-explanatory fields"
 )]
 
+mod config;
+mod error;
 mod extract;
 mod store;
 
@@ -27,116 +29,11 @@ use std::path::{Path, PathBuf};
 use oci_client::Reference;
 use oci_client::client::ClientConfig;
 use oci_client::secrets::RegistryAuth;
+
+pub use config::{ImageConfig, OciConfig, PullResult};
+pub use error::{OciError, Result};
 pub use store::ImageMeta;
 use store::Store;
-
-/// Result type for bux-oci operations.
-pub type Result<T> = std::result::Result<T, OciError>;
-
-/// Errors from OCI image operations.
-#[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
-pub enum OciError {
-    /// The image reference string could not be parsed.
-    #[error("invalid image reference: {0}")]
-    InvalidReference(String),
-
-    /// The image was not found locally.
-    #[error("image not found: {0}")]
-    NotFound(String),
-
-    /// Local store / database error.
-    #[error("db: {0}")]
-    Db(String),
-
-    /// OCI registry protocol error.
-    #[error("registry: {0}")]
-    Registry(String),
-
-    /// Filesystem I/O error.
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-
-    /// JSON parsing error.
-    #[error(transparent)]
-    Json(#[from] serde_json::Error),
-}
-
-/// Configuration for initializing [`Oci`].
-#[non_exhaustive]
-#[derive(Debug, Clone)]
-pub struct OciConfig {
-    /// Root directory for the image store. Defaults to `<platform_data_dir>/bux`.
-    pub store_dir: PathBuf,
-    /// Registry authentication. Defaults to anonymous.
-    pub auth: RegistryAuth,
-}
-
-impl Default for OciConfig {
-    fn default() -> Self {
-        let store_dir = dirs_default_store();
-        Self {
-            store_dir,
-            auth: RegistryAuth::Anonymous,
-        }
-    }
-}
-
-/// Subset of the OCI image configuration relevant to VM execution.
-#[non_exhaustive]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ImageConfig {
-    /// Default command (`CMD`).
-    #[serde(default, alias = "Cmd")]
-    pub cmd: Option<Vec<String>>,
-    /// Default entrypoint (`ENTRYPOINT`).
-    #[serde(default, alias = "Entrypoint")]
-    pub entrypoint: Option<Vec<String>>,
-    /// Default environment variables.
-    #[serde(default, alias = "Env")]
-    pub env: Option<Vec<String>>,
-    /// Default working directory.
-    #[serde(default, alias = "WorkingDir")]
-    pub working_dir: Option<String>,
-    /// Default user (from `USER` directive).
-    #[serde(default, alias = "User")]
-    pub user: Option<String>,
-    /// Exposed ports (from `EXPOSE` directive).
-    #[serde(default, alias = "ExposedPorts")]
-    pub exposed_ports: Option<serde_json::Value>,
-    /// Image labels (from `LABEL` directive).
-    #[serde(default, alias = "Labels")]
-    pub labels: Option<serde_json::Map<String, serde_json::Value>>,
-}
-
-impl ImageConfig {
-    /// Returns the combined entrypoint + cmd as the final execution command.
-    #[must_use]
-    pub fn command(&self) -> Vec<String> {
-        let mut parts = Vec::new();
-        if let Some(ref ep) = self.entrypoint {
-            parts.extend(ep.iter().cloned());
-        }
-        if let Some(ref cmd) = self.cmd {
-            parts.extend(cmd.iter().cloned());
-        }
-        parts
-    }
-}
-
-/// Result of a successful image pull.
-#[non_exhaustive]
-#[derive(Debug, Clone)]
-pub struct PullResult {
-    /// Canonical image reference string.
-    pub reference: String,
-    /// Manifest content digest.
-    pub digest: String,
-    /// Path to the extracted rootfs directory.
-    pub rootfs: PathBuf,
-    /// Image configuration (Cmd, Env, `WorkingDir`, etc.).
-    pub config: Option<ImageConfig>,
-}
 
 /// OCI image manager backed by a content-addressed store.
 ///
@@ -214,8 +111,7 @@ impl Oci {
         let (manifest, manifest_digest, config_json) = self
             .client
             .pull_manifest_and_config(&reference, &self.auth)
-            .await
-            .map_err(|e| OciError::Registry(e.to_string()))?;
+            .await?;
 
         // 2. Stream each layer to disk — O(chunk) memory per layer.
         let layer_count = manifest.layers.len();
@@ -234,10 +130,7 @@ impl Oci {
                 ));
                 let staging = self.store.layer_staging_path(digest);
                 let mut file = tokio::fs::File::create(&staging).await?;
-                self.client
-                    .pull_blob(&reference, layer, &mut file)
-                    .await
-                    .map_err(|e| OciError::Registry(e.to_string()))?;
+                self.client.pull_blob(&reference, layer, &mut file).await?;
                 self.store.commit_layer(digest, &layer.media_type, size)?;
             }
             total_size += size;

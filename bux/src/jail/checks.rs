@@ -79,27 +79,22 @@ pub fn audit_isolation(caps: &HostCapabilities) -> Vec<String> {
 ///
 /// Returns an error if the binary is missing, too small, or not a valid ELF.
 pub fn check_guest_binary(path: &Path) -> std::io::Result<()> {
-    use std::io;
+    use std::io::{self, Read};
 
-    if !path.exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("guest binary not found: {}", path.display()),
-        ));
-    }
+    let mut f = std::fs::File::open(path).map_err(|e| {
+        if e.kind() == io::ErrorKind::NotFound {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("guest binary not found: {}", path.display()),
+            )
+        } else {
+            e
+        }
+    })?;
 
-    let meta = std::fs::metadata(path)?;
-    if meta.len() < 16 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "guest binary too small to be a valid ELF",
-        ));
-    }
-
-    // Read ELF magic.
-    let header = std::fs::read(path)?;
-    let elf_magic: &[u8] = b"\x7fELF";
-    if header.get(..4) != Some(elf_magic) {
+    let mut magic = [0u8; 4];
+    let n = f.read(&mut magic)?;
+    if n < 4 || magic != *b"\x7fELF" {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "guest binary is not a valid ELF file",
@@ -108,8 +103,6 @@ pub fn check_guest_binary(path: &Path) -> std::io::Result<()> {
 
     Ok(())
 }
-
-// ---- Platform-specific capability probes ----
 
 /// Checks whether hardware virtualization support is available on this host.
 fn check_virtualization() -> bool {

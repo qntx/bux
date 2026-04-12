@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use crate::util::push_unique_path;
 use crate::{Error, Result};
 
 const GUEST_EXEC_PATH: &str = "/bux/bin/bux-guest";
@@ -147,12 +148,6 @@ fn linux_guest_target() -> &'static str {
         "x86_64" => "x86_64-unknown-linux-musl",
         "aarch64" => "aarch64-unknown-linux-musl",
         _ => "unknown-linux-musl",
-    }
-}
-
-fn push_unique_path(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
-    if !paths.iter().any(|existing| existing == &candidate) {
-        paths.push(candidate);
     }
 }
 

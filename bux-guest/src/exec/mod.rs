@@ -248,7 +248,7 @@ async fn send_exit(
             signal,
             timed_out: timed_out.load(Ordering::SeqCst),
             duration_ms,
-            error_message: String::new(),
+            error_message: None,
         },
     )
     .await
@@ -286,7 +286,7 @@ async fn send_exit_by_pid(
             signal,
             timed_out: timed_out.load(Ordering::SeqCst),
             duration_ms,
-            error_message: String::new(),
+            error_message: None,
         },
     )
     .await

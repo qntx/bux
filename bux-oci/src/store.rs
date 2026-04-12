@@ -17,17 +17,6 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 
-/// Extension trait to convert `rusqlite::Result` into `crate::Result`.
-trait DbResultExt<T> {
-    fn db(self) -> crate::Result<T>;
-}
-
-impl<T> DbResultExt<T> for rusqlite::Result<T> {
-    fn db(self) -> crate::Result<T> {
-        self.map_err(|e| crate::OciError::Db(e.to_string()))
-    }
-}
-
 /// Metadata for a locally stored image.
 #[non_exhaustive]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -95,10 +84,9 @@ impl Store {
         fs::create_dir_all(root.join("rootfs"))?;
 
         let db_path = root.join("images.db");
-        let db = Connection::open(&db_path).db()?;
-        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
-            .db()?;
-        db.execute_batch(SCHEMA).db()?;
+        let db = Connection::open(&db_path)?;
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        db.execute_batch(SCHEMA)?;
 
         Ok(Self {
             root: root.to_path_buf(),
@@ -152,14 +140,12 @@ impl Store {
         let final_path = self.layer_path(digest);
         fs::rename(&staging, &final_path)?;
 
-        self.lock()
-            .execute(
-                "INSERT INTO layers (digest, media_type, size)
+        self.lock().execute(
+            "INSERT INTO layers (digest, media_type, size)
                  VALUES (?1, ?2, ?3)
                  ON CONFLICT(digest) DO UPDATE SET ref_count = ref_count + 1",
-                params![digest, media_type, i64::try_from(size).unwrap_or(i64::MAX)],
-            )
-            .db()?;
+            params![digest, media_type, i64::try_from(size).unwrap_or(i64::MAX)],
+        )?;
 
         Ok(())
     }
@@ -253,7 +239,7 @@ impl Store {
         let config_json = fs::read_to_string(self.config_path(config_digest)).ok();
 
         let conn = self.lock();
-        let tx = conn.unchecked_transaction().db()?;
+        let tx = conn.unchecked_transaction()?;
 
         tx.execute(
             "INSERT INTO images (reference, digest, size, config)
@@ -269,15 +255,13 @@ impl Store {
                 i64::try_from(size).unwrap_or(i64::MAX),
                 config_json
             ],
-        )
-        .db()?;
+        )?;
 
         // Clear old layer associations, then insert new ones.
         tx.execute(
             "DELETE FROM image_layers WHERE image_ref = ?1",
             params![reference],
-        )
-        .db()?;
+        )?;
 
         for (pos, layer_digest) in layer_digests.iter().enumerate() {
             tx.execute(
@@ -288,19 +272,18 @@ impl Store {
                     layer_digest,
                     i64::try_from(pos).unwrap_or(i64::MAX)
                 ],
-            )
-            .db()?;
+            )?;
         }
 
-        tx.commit().db()?;
+        tx.commit()?;
         Ok(())
     }
 
     /// Lists all stored images.
     pub(crate) fn list_images(&self) -> crate::Result<Vec<ImageMeta>> {
         let conn = self.lock();
-        conn.prepare("SELECT reference, digest, size, created FROM images ORDER BY created DESC")
-            .db()?
+        Ok(conn
+            .prepare("SELECT reference, digest, size, created FROM images ORDER BY created DESC")?
             .query_map([], |row| {
                 Ok(ImageMeta {
                     reference: row.get(0)?,
@@ -308,10 +291,8 @@ impl Store {
                     size: u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
                     created_at: row.get::<_, String>(3).unwrap_or_default(),
                 })
-            })
-            .db()?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .db()
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Loads the stored image config JSON for a reference.
@@ -324,7 +305,7 @@ impl Store {
         match result {
             Ok(json) => Ok(Some(json)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(crate::OciError::Db(e.to_string())),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -338,7 +319,7 @@ impl Store {
         match result {
             Ok(d) => Ok(Some(d)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(crate::OciError::Db(e.to_string())),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -352,45 +333,39 @@ impl Store {
 
         // Decrement layer ref counts and collect orphans.
         let layer_digests: Vec<String> = {
-            let mut stmt = conn
-                .prepare("SELECT layer_digest FROM image_layers WHERE image_ref = ?1")
-                .db()?;
-            let rows = stmt.query_map(params![reference], |row| row.get(0)).db()?;
+            let mut stmt =
+                conn.prepare("SELECT layer_digest FROM image_layers WHERE image_ref = ?1")?;
+            let rows = stmt.query_map(params![reference], |row| row.get(0))?;
             rows.filter_map(Result::ok).collect()
         };
 
-        let tx = conn.unchecked_transaction().db()?;
+        let tx = conn.unchecked_transaction()?;
 
         for ld in &layer_digests {
             tx.execute(
                 "UPDATE layers SET ref_count = ref_count - 1 WHERE digest = ?1",
                 params![ld],
-            )
-            .db()?;
+            )?;
         }
 
         // Delete the image (CASCADE deletes image_layers).
         tx.execute(
             "DELETE FROM images WHERE reference = ?1",
             params![reference],
-        )
-        .db()?;
+        )?;
 
         // Remove orphaned layer blobs (ref_count <= 0).
         let orphans: Vec<String> = {
-            let mut stmt = tx
-                .prepare("SELECT digest FROM layers WHERE ref_count <= 0")
-                .db()?;
-            let rows = stmt.query_map([], |row| row.get(0)).db()?;
+            let mut stmt = tx.prepare("SELECT digest FROM layers WHERE ref_count <= 0")?;
+            let rows = stmt.query_map([], |row| row.get(0))?;
             rows.filter_map(Result::ok).collect()
         };
         for orphan in &orphans {
-            tx.execute("DELETE FROM layers WHERE digest = ?1", params![orphan])
-                .db()?;
+            tx.execute("DELETE FROM layers WHERE digest = ?1", params![orphan])?;
             fs::remove_file(self.layer_path(orphan)).ok();
         }
 
-        tx.commit().db()?;
+        tx.commit()?;
 
         // Remove rootfs directory.
         drop(conn);

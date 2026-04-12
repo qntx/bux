@@ -1,9 +1,10 @@
 //! Virtual machine builder and lifecycle management.
 
-use crate::disk::DiskFormat;
+mod builder;
+
+pub use builder::VmBuilder;
+
 use crate::error::Result;
-#[cfg(unix)]
-use crate::state::VmConfig;
 use crate::sys::{self, Feature, KernelFormat, LogStyle, SyncMode};
 
 /// Log verbosity level for libkrun.
@@ -39,8 +40,20 @@ impl std::fmt::Display for LogLevel {
     }
 }
 
+/// Error returned when parsing an invalid [`LogLevel`] string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseLogLevelError(pub String);
+
+impl std::fmt::Display for ParseLogLevelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown log level: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseLogLevelError {}
+
 impl std::str::FromStr for LogLevel {
-    type Err = String;
+    type Err = ParseLogLevelError;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_ascii_lowercase().as_str() {
@@ -50,357 +63,8 @@ impl std::str::FromStr for LogLevel {
             "info" => Ok(Self::Info),
             "debug" => Ok(Self::Debug),
             "trace" => Ok(Self::Trace),
-            _ => Err(format!("unknown log level: {s}")),
+            _ => Err(ParseLogLevelError(s.to_owned())),
         }
-    }
-}
-
-/// Builder for configuring a micro-VM.
-///
-/// Defaults: 1 vCPU, 512 MiB RAM, host environment inherited.
-///
-/// # Example
-///
-/// ```no_run
-/// use bux::Vm;
-///
-/// let vm = Vm::builder()
-///     .vcpus(2)
-///     .ram_mib(1024)
-///     .root("/path/to/rootfs")
-///     .exec("/bin/bash", &["--login"])
-///     .build()
-///     .expect("invalid VM config");
-/// ```
-#[derive(Debug)]
-#[must_use = "a VmBuilder does nothing until .build() is called"]
-pub struct VmBuilder {
-    /// Number of virtual CPUs.
-    vcpus: u8,
-    /// RAM size in MiB.
-    ram_mib: u32,
-    /// Root filesystem directory path.
-    root: Option<String>,
-    /// Root filesystem disk image path (mutually exclusive with `root`).
-    root_disk: Option<String>,
-    /// Disk image format.
-    disk_format: DiskFormat,
-    /// Shared base image for QCOW2 overlay creation (consumed by Runtime).
-    base_disk: Option<String>,
-    /// Executable path inside the VM.
-    exec_path: Option<String>,
-    /// Arguments passed to the executable (does not include argv[0]).
-    exec_args: Vec<String>,
-    /// Environment variables (`KEY=VALUE`). `None` = inherit from host.
-    env: Option<Vec<String>>,
-    /// Working directory inside the VM.
-    workdir: Option<String>,
-    /// TCP port mappings (`"host_port:guest_port"`).
-    ports: Vec<String>,
-    /// virtio-fs shared directories `(tag, host_path)`.
-    virtiofs: Vec<(String, String)>,
-    /// Global log level for libkrun.
-    log_level: Option<LogLevel>,
-    /// UID to set before starting the VM.
-    uid: Option<u32>,
-    /// GID to set before starting the VM.
-    gid: Option<u32>,
-    /// Resource limits (`RESOURCE=RLIM_CUR:RLIM_MAX`).
-    rlimits: Vec<String>,
-    /// Enable nested virtualization (macOS only).
-    nested_virt: Option<bool>,
-    /// Enable/disable virtio-snd.
-    snd_device: Option<bool>,
-    /// Redirect console output to a file.
-    console_output: Option<String>,
-    /// vsock port mappings `(guest_port, host_socket_path, listen)`.
-    vsock_ports: Vec<(u32, String, bool)>,
-}
-
-impl VmBuilder {
-    /// Sets the number of virtual CPUs (default: 1).
-    pub const fn vcpus(mut self, n: u8) -> Self {
-        self.vcpus = n;
-        self
-    }
-
-    /// Sets the RAM size in MiB (default: 512).
-    pub const fn ram_mib(mut self, mib: u32) -> Self {
-        self.ram_mib = mib;
-        self
-    }
-
-    /// Sets the root filesystem directory path (virtiofs-based).
-    pub fn root(mut self, path: impl Into<String>) -> Self {
-        self.root = Some(path.into());
-        self.root_disk = None;
-        self
-    }
-
-    /// Sets the root filesystem disk image path (raw format).
-    ///
-    /// The image is attached as `/dev/vda` and remounted as the root
-    /// filesystem during boot. Mutually exclusive with [`root()`](Self::root).
-    pub fn root_disk(mut self, path: impl Into<String>) -> Self {
-        self.root_disk = Some(path.into());
-        self.disk_format = DiskFormat::Raw;
-        self.root = None;
-        self
-    }
-
-    /// Sets a shared base image for automatic QCOW2 overlay creation.
-    ///
-    /// [`crate::Runtime::spawn()`] will create a per-VM QCOW2 overlay backed by
-    /// this image, set `root_disk` to the overlay path, and configure
-    /// `disk_format` to [`DiskFormat::Qcow2`]. The base image is never modified.
-    pub fn base_disk(mut self, path: impl Into<String>) -> Self {
-        self.base_disk = Some(path.into());
-        self.root = None;
-        self.root_disk = None;
-        self
-    }
-
-    /// Sets the executable and its arguments to run inside the VM.
-    ///
-    /// `args` should **not** include the program name (argv\[0\]).
-    pub fn exec(mut self, path: impl Into<String>, args: &[&str]) -> Self {
-        self.exec_path = Some(path.into());
-        self.exec_args = args.iter().map(|s| (*s).to_owned()).collect();
-        self
-    }
-
-    /// Sets explicit environment variables (`KEY=VALUE` format).
-    ///
-    /// If never called, the host environment is inherited automatically.
-    pub fn env(mut self, vars: &[&str]) -> Self {
-        self.env = Some(vars.iter().map(|s| (*s).to_owned()).collect());
-        self
-    }
-
-    /// Sets the working directory inside the VM.
-    pub fn workdir(mut self, path: impl Into<String>) -> Self {
-        self.workdir = Some(path.into());
-        self
-    }
-
-    /// Adds a TCP port mapping in `"host_port:guest_port"` format.
-    pub fn port(mut self, mapping: impl Into<String>) -> Self {
-        self.ports.push(mapping.into());
-        self
-    }
-
-    /// Adds a virtio-fs shared directory.
-    ///
-    /// - `tag` — identifier used to mount the filesystem in the guest.
-    /// - `host_path` — absolute path to the directory on the host.
-    pub fn virtiofs(mut self, tag: impl Into<String>, host_path: impl Into<String>) -> Self {
-        self.virtiofs.push((tag.into(), host_path.into()));
-        self
-    }
-
-    /// Sets the global libkrun log level (applies to all VMs in the process).
-    pub const fn log_level(mut self, level: LogLevel) -> Self {
-        self.log_level = Some(level);
-        self
-    }
-
-    /// Sets the UID before starting the VM.
-    pub const fn uid(mut self, uid: u32) -> Self {
-        self.uid = Some(uid);
-        self
-    }
-
-    /// Sets the GID before starting the VM.
-    pub const fn gid(mut self, gid: u32) -> Self {
-        self.gid = Some(gid);
-        self
-    }
-
-    /// Adds a resource limit (`"RESOURCE=RLIM_CUR:RLIM_MAX"` format).
-    pub fn rlimit(mut self, rlimit: impl Into<String>) -> Self {
-        self.rlimits.push(rlimit.into());
-        self
-    }
-
-    /// Enables or disables nested virtualization (macOS only).
-    pub const fn nested_virt(mut self, enable: bool) -> Self {
-        self.nested_virt = Some(enable);
-        self
-    }
-
-    /// Enables or disables the virtio-snd audio device.
-    pub const fn snd_device(mut self, enable: bool) -> Self {
-        self.snd_device = Some(enable);
-        self
-    }
-
-    /// Redirects console output to a file (ignores stdin).
-    pub fn console_output(mut self, path: impl Into<String>) -> Self {
-        self.console_output = Some(path.into());
-        self
-    }
-
-    /// Maps a guest vsock port to a host Unix socket path.
-    ///
-    /// When `listen` is `true`, the guest listens on the vsock port and the
-    /// host connects to the Unix socket (typical for guest agent pattern).
-    pub fn vsock_port(mut self, port: u32, host_path: impl Into<String>, listen: bool) -> Self {
-        self.vsock_ports.push((port, host_path.into(), listen));
-        self
-    }
-
-    /// Extracts a serializable configuration snapshot.
-    #[cfg(unix)]
-    pub(crate) fn to_config(&self) -> VmConfig {
-        use crate::state::{VirtioFs, VsockPort};
-        VmConfig {
-            vcpus: self.vcpus,
-            ram_mib: self.ram_mib,
-            rootfs: self.root.clone(),
-            root_disk: self.root_disk.clone(),
-            disk_format: self.disk_format,
-            base_disk: self.base_disk.clone(),
-            exec_path: self.exec_path.clone(),
-            exec_args: self.exec_args.clone(),
-            env: self.env.clone(),
-            workdir: self.workdir.clone(),
-            ports: self.ports.clone(),
-            virtiofs: self
-                .virtiofs
-                .iter()
-                .map(|(tag, path)| VirtioFs {
-                    tag: tag.clone(),
-                    path: path.clone(),
-                })
-                .collect(),
-            vsock_ports: self
-                .vsock_ports
-                .iter()
-                .map(|(port, path, listen)| VsockPort {
-                    port: *port,
-                    path: path.clone(),
-                    listen: *listen,
-                })
-                .collect(),
-            log_level: self.log_level,
-            uid: self.uid,
-            gid: self.gid,
-            rlimits: self.rlimits.clone(),
-            nested_virt: self.nested_virt,
-            snd_device: self.snd_device,
-            console_output: self.console_output.clone(),
-            auto_remove: false,
-        }
-    }
-
-    /// Reconstructs a [`VmBuilder`] from a serialized [`VmConfig`].
-    ///
-    /// Used by `bux-shim` to rebuild the VM in a child process.
-    #[cfg(unix)]
-    pub fn from_config(c: &VmConfig) -> Self {
-        Self {
-            vcpus: c.vcpus,
-            ram_mib: c.ram_mib,
-            root: c.rootfs.clone(),
-            root_disk: c.root_disk.clone(),
-            disk_format: c.disk_format,
-            base_disk: c.base_disk.clone(),
-            exec_path: c.exec_path.clone(),
-            exec_args: c.exec_args.clone(),
-            env: c.env.clone(),
-            workdir: c.workdir.clone(),
-            ports: c.ports.clone(),
-            virtiofs: c
-                .virtiofs
-                .iter()
-                .map(|v| (v.tag.clone(), v.path.clone()))
-                .collect(),
-            vsock_ports: c
-                .vsock_ports
-                .iter()
-                .map(|v| (v.port, v.path.clone(), v.listen))
-                .collect(),
-            log_level: c.log_level,
-            uid: c.uid,
-            gid: c.gid,
-            rlimits: c.rlimits.clone(),
-            nested_virt: c.nested_virt,
-            snd_device: c.snd_device,
-            console_output: c.console_output.clone(),
-        }
-    }
-
-    /// Builds and returns the configured [`Vm`].
-    ///
-    /// Creates a libkrun context and applies all configuration. If any step
-    /// fails, the context is automatically freed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if context creation or any configuration step fails.
-    pub fn build(self) -> Result<Vm> {
-        let ctx = sys::create_ctx()?;
-        // Vm's Drop impl frees the context on any subsequent error.
-        let vm = Vm { ctx };
-
-        if let Some(level) = self.log_level {
-            sys::set_log_level(level as u32)?;
-        }
-
-        sys::set_vm_config(vm.ctx, self.vcpus, self.ram_mib)?;
-
-        if let Some(ref root) = self.root {
-            sys::set_root(vm.ctx, root)?;
-        } else if let Some(ref disk) = self.root_disk {
-            let sys_fmt = match self.disk_format {
-                DiskFormat::Qcow2 => sys::DiskFormat::Qcow2,
-                _ => sys::DiskFormat::Raw,
-            };
-            sys::add_disk2(vm.ctx, "rootfs", disk, sys_fmt, false)?;
-            sys::set_root_disk_remount(vm.ctx, "/dev/vda", Some("ext4"), None)?;
-        }
-
-        for (tag, host_path) in &self.virtiofs {
-            sys::add_virtiofs(vm.ctx, tag, host_path)?;
-        }
-
-        if !self.ports.is_empty() {
-            sys::set_port_map(vm.ctx, &self.ports)?;
-        }
-
-        if let Some(ref workdir) = self.workdir {
-            sys::set_workdir(vm.ctx, workdir)?;
-        }
-
-        if let Some(ref exec_path) = self.exec_path {
-            sys::set_exec(vm.ctx, exec_path, &self.exec_args, self.env.as_deref())?;
-        } else if let Some(ref env) = self.env {
-            sys::set_env(vm.ctx, env)?;
-        }
-
-        if let Some(uid) = self.uid {
-            sys::setuid(vm.ctx, uid)?;
-        }
-        if let Some(gid) = self.gid {
-            sys::setgid(vm.ctx, gid)?;
-        }
-        if !self.rlimits.is_empty() {
-            sys::set_rlimits(vm.ctx, &self.rlimits)?;
-        }
-        if let Some(enable) = self.nested_virt {
-            sys::set_nested_virt(vm.ctx, enable)?;
-        }
-        if let Some(enable) = self.snd_device {
-            sys::set_snd_device(vm.ctx, enable)?;
-        }
-        if let Some(ref path) = self.console_output {
-            sys::set_console_output(vm.ctx, path)?;
-        }
-        for (port, path, listen) in &self.vsock_ports {
-            sys::add_vsock_port2(vm.ctx, *port, path, *listen)?;
-        }
-
-        Ok(vm)
     }
 }
 
@@ -417,28 +81,17 @@ pub struct Vm {
 impl Vm {
     /// Returns a new [`VmBuilder`] with sensible defaults.
     pub fn builder() -> VmBuilder {
-        VmBuilder {
-            vcpus: 1,
-            ram_mib: 512,
-            root: None,
-            root_disk: None,
-            disk_format: DiskFormat::default(),
-            base_disk: None,
-            exec_path: None,
-            exec_args: Vec::new(),
-            env: None,
-            workdir: None,
-            ports: Vec::new(),
-            virtiofs: Vec::new(),
-            log_level: None,
-            uid: None,
-            gid: None,
-            rlimits: Vec::new(),
-            nested_virt: None,
-            snd_device: None,
-            console_output: None,
-            vsock_ports: Vec::new(),
-        }
+        VmBuilder::new()
+    }
+
+    /// Creates a `Vm` wrapping a raw libkrun context ID.
+    pub(super) const fn from_raw_ctx(ctx: u32) -> Self {
+        Self { ctx }
+    }
+
+    /// Returns the raw libkrun context ID.
+    pub(super) const fn ctx(&self) -> u32 {
+        self.ctx
     }
 
     /// Returns the maximum number of vCPUs supported by the hypervisor.
@@ -842,5 +495,39 @@ impl Vm {
 impl Drop for Vm {
     fn drop(&mut self) {
         drop(sys::free_ctx(self.ctx));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_level_display_roundtrip() {
+        let levels = [
+            LogLevel::Off,
+            LogLevel::Error,
+            LogLevel::Warn,
+            LogLevel::Info,
+            LogLevel::Debug,
+            LogLevel::Trace,
+        ];
+        for level in levels {
+            let s = level.to_string();
+            let parsed: LogLevel = s.parse().expect("parse failed");
+            assert_eq!(parsed, level);
+        }
+    }
+
+    #[test]
+    fn log_level_parse_case_insensitive() {
+        assert_eq!("INFO".parse::<LogLevel>().unwrap(), LogLevel::Info);
+        assert_eq!("Debug".parse::<LogLevel>().unwrap(), LogLevel::Debug);
+        assert!("invalid".parse::<LogLevel>().is_err());
+    }
+
+    #[test]
+    fn log_level_default_is_info() {
+        assert_eq!(LogLevel::default(), LogLevel::Info);
     }
 }

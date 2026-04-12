@@ -29,7 +29,7 @@ pub enum DiskFormat {
     Vmdk = 2,
 }
 
-/// Block device sync mode for [`add_disk3`].
+/// Block device sync mode for [`Vm::add_disk3`](crate::Vm::add_disk3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 #[repr(u32)]
@@ -57,7 +57,7 @@ pub enum LogStyle {
     Never = 2,
 }
 
-/// Kernel image format for [`set_kernel`].
+/// Kernel image format for [`Vm::set_kernel`](crate::Vm::set_kernel).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 #[repr(u32)]
@@ -76,7 +76,7 @@ pub enum KernelFormat {
     ImageZstd = 5,
 }
 
-/// Build-time feature flag for [`has_feature`].
+/// Build-time feature flag for [`Vm::has_feature`](crate::Vm::has_feature).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 #[repr(u64)]

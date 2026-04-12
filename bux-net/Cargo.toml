@@ -38,4 +38,4 @@ unused_lifetimes = "warn"
 unused_qualifications = "warn"
 
 [lints.clippy]
-all = "allow"
+all = "warn"

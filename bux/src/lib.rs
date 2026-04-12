@@ -64,6 +64,7 @@ mod runtime;
 pub mod snapshot;
 mod state;
 mod sys;
+mod util;
 mod vm;
 #[cfg(unix)]
 pub mod watchdog;
@@ -98,4 +99,4 @@ pub use snapshot::{SnapshotInfo, SnapshotManager};
 pub use state::{BaseDiskRow, QuotaRow, SnapshotRow, StateDb};
 pub use state::{HealthState, Status, VirtioFs, VmConfig, VmState, VsockPort};
 pub use sys::{Feature, KernelFormat, LogStyle, SyncMode};
-pub use vm::{LogLevel, Vm, VmBuilder};
+pub use vm::{LogLevel, ParseLogLevelError, Vm, VmBuilder};

@@ -5,9 +5,8 @@
 //! implementations.
 //!
 //! The built-in [`RingBufferListener`] stores the most recent N events
-//! in a bounded, lock-free ring buffer for querying.
+//! in a bounded, mutex-protected ring buffer for querying.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
@@ -166,20 +165,24 @@ impl EventDispatcher {
 
 /// A bounded ring buffer that stores the most recent N audit events.
 ///
-/// Thread-safe: uses a `Mutex` for writes and atomic index for reads.
+/// Thread-safe: all state is behind a single `Mutex`.
 /// Suitable for in-process querying of recent activity.
 pub struct RingBufferListener {
-    /// Fixed-size event buffer.
-    buffer: Mutex<Vec<Option<AuditEvent>>>,
-    /// Buffer capacity.
+    /// Mutable state protected by a single lock.
+    inner: Mutex<RingBuffer>,
+    /// Buffer capacity (immutable after construction).
     capacity: usize,
-    /// Write position (wraps around).
-    write_pos: AtomicUsize,
-    /// Total number of events ever recorded.
-    total: AtomicU64,
 }
 
-use std::sync::atomic::AtomicU64;
+/// Internal mutable state of a [`RingBufferListener`].
+struct RingBuffer {
+    /// Fixed-size event slots.
+    slots: Vec<Option<AuditEvent>>,
+    /// Current write position (wraps around).
+    write_pos: usize,
+    /// Total number of events ever recorded.
+    total: u64,
+}
 
 impl std::fmt::Debug for RingBufferListener {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -196,30 +199,32 @@ impl RingBufferListener {
     pub fn new(capacity: usize) -> Self {
         let cap = capacity.max(1);
         Self {
-            buffer: Mutex::new(vec![None; cap]),
+            inner: Mutex::new(RingBuffer {
+                slots: vec![None; cap],
+                write_pos: 0,
+                total: 0,
+            }),
             capacity: cap,
-            write_pos: AtomicUsize::new(0),
-            total: AtomicU64::new(0),
         }
     }
 
     /// Total number of events ever recorded (may exceed capacity).
     pub fn total_events(&self) -> u64 {
-        self.total.load(Ordering::Relaxed)
+        self.inner.lock().map_or(0, |g| g.total)
     }
 
     /// Returns the most recent events, up to `limit`.
     ///
     /// Events are returned in chronological order (oldest first).
     pub fn recent(&self, limit: usize) -> Vec<AuditEvent> {
-        let Ok(buffer) = self.buffer.lock() else {
+        let Ok(guard) = self.inner.lock() else {
             return Vec::new();
         };
         #[allow(
             clippy::cast_possible_truncation,
             reason = "capacity is usize, so truncation is acceptable"
         )]
-        let total = self.total.load(Ordering::Relaxed) as usize;
+        let total = guard.total as usize;
         let available = total.min(self.capacity);
         let take = limit.min(available);
 
@@ -227,10 +232,9 @@ impl RingBufferListener {
             return Vec::new();
         }
 
-        let write_pos = self.write_pos.load(Ordering::Relaxed);
+        let write_pos = guard.write_pos;
         let mut events = Vec::with_capacity(take);
 
-        // Start from the oldest event we want.
         let start = if write_pos >= take {
             write_pos - take
         } else {
@@ -239,7 +243,7 @@ impl RingBufferListener {
 
         for i in 0..take {
             let idx = (start + i) % self.capacity;
-            if let Some(event) = buffer.get(idx).and_then(Option::as_ref) {
+            if let Some(event) = guard.slots.get(idx).and_then(Option::as_ref) {
                 events.push(event.clone());
             }
         }
@@ -250,14 +254,13 @@ impl RingBufferListener {
 
 impl EventListener for RingBufferListener {
     fn on_event(&self, event: &AuditEvent) {
-        if let Ok(mut buffer) = self.buffer.lock() {
-            let pos = self.write_pos.load(Ordering::Relaxed);
-            if let Some(slot) = buffer.get_mut(pos % self.capacity) {
+        if let Ok(mut guard) = self.inner.lock() {
+            let pos = guard.write_pos;
+            if let Some(slot) = guard.slots.get_mut(pos % self.capacity) {
                 *slot = Some(event.clone());
             }
-            self.write_pos
-                .store((pos + 1) % self.capacity, Ordering::Relaxed);
-            self.total.fetch_add(1, Ordering::Relaxed);
+            guard.write_pos = (pos + 1) % self.capacity;
+            guard.total += 1;
         }
     }
 }

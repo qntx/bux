@@ -81,7 +81,10 @@ fn main() {
             .exists()
         {
             // build.rs is single-threaded — safe to set env.
-            unsafe { env::set_var("BUX_DEPS_STUB", "1") };
+            #[allow(clippy::disallowed_methods)]
+            unsafe {
+                env::set_var("BUX_DEPS_STUB", "1")
+            };
         }
     }
 
