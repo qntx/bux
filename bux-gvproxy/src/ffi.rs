@@ -25,7 +25,10 @@ use crate::error::{Error, Result};
 ///
 /// - `level`: 0=trace, 1=debug, 2=info, 3=warn, 4=error
 /// - `message`: null-terminated C string
-#[allow(dead_code, reason = "type alias documents the Go-side callback signature")]
+#[allow(
+    dead_code,
+    reason = "type alias documents the Go-side callback signature"
+)]
 pub(crate) type LogCallbackFn = extern "C" fn(level: c_int, message: *const c_char);
 
 unsafe extern "C" {
@@ -67,8 +70,7 @@ unsafe extern "C" {
 pub(crate) fn create_instance(config: &GvproxyConfig) -> Result<i64> {
     let json = serde_json::to_string(config)?;
 
-    let c_json =
-        CString::new(json).map_err(|e| Error::Ffi(format!("invalid config JSON: {e}")))?;
+    let c_json = CString::new(json).map_err(|e| Error::Ffi(format!("invalid config JSON: {e}")))?;
 
     let id = unsafe { gvproxy_create(c_json.as_ptr()) };
 

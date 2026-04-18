@@ -17,6 +17,9 @@ rust-version = "1.85"
 ## Without this feature, pre-generated bindings committed in `src/bindings.rs` are used.
 regenerate = ["dep:bindgen"]
 
+[dependencies]
+thiserror.workspace = true
+
 [build-dependencies]
 bindgen = { workspace = true, optional = true }
 flate2.workspace = true
@@ -26,6 +29,5 @@ ureq.workspace = true
 [package.metadata.docs.rs]
 rustdoc-args = ["--cfg", "docsrs"]
 
-# Auto-generated bindings: suppress all clippy lints.
-[lints.clippy]
-all = "allow"
+[lints]
+workspace = true

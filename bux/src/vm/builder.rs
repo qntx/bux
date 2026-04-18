@@ -1,12 +1,15 @@
 //! [`VmBuilder`] — fluent builder for configuring a micro-VM.
 
+use bux_krun::ctx as sys;
+
 use crate::disk::DiskFormat;
 use crate::error::Result;
 #[cfg(unix)]
 use crate::state::VmConfig;
-use crate::sys;
 
-use super::{LogLevel, Vm};
+use crate::log_level::LogLevel;
+
+use super::Vm;
 
 /// Builder for configuring a micro-VM.
 ///

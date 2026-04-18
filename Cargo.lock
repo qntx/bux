@@ -282,6 +282,7 @@ dependencies = [
  "bindgen",
  "flate2",
  "tar",
+ "thiserror 2.0.18",
  "ureq",
 ]
 

@@ -10,8 +10,6 @@
 //!   infrastructure issues requiring operator attention.
 //! - **Fatal errors**: the runtime has been shut down.
 
-use std::ffi::NulError;
-
 /// Alias for `Result<T, bux::Error>`.
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -51,18 +49,10 @@ pub enum Error {
     #[error("{0}")]
     QuotaExceeded(String),
 
-    /// libkrun returned a negative error code.
-    #[error("{op}: libkrun error code {code}")]
-    Krun {
-        /// The FFI operation that failed.
-        op: &'static str,
-        /// The negative error code returned by libkrun.
-        code: i32,
-    },
-
-    /// A string argument contained an interior NUL byte.
-    #[error("interior NUL byte in string argument")]
-    Nul(#[from] NulError),
+    /// A `libkrun` FFI call failed or a string argument contained an
+    /// interior NUL byte. Details are carried by [`bux_krun::Error`].
+    #[error(transparent)]
+    Krun(#[from] bux_krun::Error),
 
     /// An I/O error from runtime, client, or state operations.
     #[error(transparent)]
@@ -173,10 +163,10 @@ mod tests {
 
     #[test]
     fn system_errors_not_categorized() {
-        let krun = Error::Krun {
+        let krun = Error::Krun(bux_krun::Error::Krun {
             op: "create_ctx",
             code: -1,
-        };
+        });
         assert!(!krun.is_user_error());
         assert!(!krun.is_retryable());
         assert!(!krun.is_fatal());

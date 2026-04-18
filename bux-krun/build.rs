@@ -16,6 +16,20 @@
 //!   freshly generated `bindings.rs` is copied back to `src/bindings.rs` so it
 //!   can be committed to the repository.
 
+// Build scripts legitimately use stderr for diagnostics and
+// expect/panic for unrecoverable failures (missing network / archive).
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::unwrap_in_result,
+    clippy::panic,
+    clippy::print_stderr,
+    clippy::let_underscore_must_use,
+    clippy::missing_docs_in_private_items,
+    missing_docs,
+    reason = "build scripts may panic/expect on unrecoverable setup failures"
+)]
+
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};

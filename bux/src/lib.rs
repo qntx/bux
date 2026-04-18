@@ -30,6 +30,8 @@
 //! # Quick start — low-level VM (takes over the process)
 //!
 //! ```no_run
+//! # #[cfg(unix)]
+//! # fn demo() {
 //! use bux::Vm;
 //!
 //! let vm = Vm::builder()
@@ -41,6 +43,7 @@
 //!     .expect("invalid VM config");
 //!
 //! vm.start().expect("failed to start VM");
+//! # }
 //! ```
 //!
 //! [`libkrun`]: https://github.com/containers/libkrun
@@ -57,14 +60,15 @@ mod guest;
 pub mod health;
 #[cfg(unix)]
 mod jail;
+mod log_level;
 pub mod metrics;
 #[cfg(unix)]
 mod runtime;
 #[cfg(unix)]
 pub mod snapshot;
 mod state;
-mod sys;
 mod util;
+#[cfg(unix)]
 mod vm;
 #[cfg(unix)]
 pub mod watchdog;
@@ -98,5 +102,8 @@ pub use snapshot::{SnapshotInfo, SnapshotManager};
 #[cfg(unix)]
 pub use state::{BaseDiskRow, QuotaRow, SnapshotRow, StateDb};
 pub use state::{HealthState, Status, VirtioFs, VmConfig, VmState, VsockPort};
-pub use sys::{Feature, KernelFormat, LogStyle, SyncMode};
-pub use vm::{LogLevel, ParseLogLevelError, Vm, VmBuilder};
+#[cfg(unix)]
+pub use bux_krun::{Feature, KernelFormat, LogStyle, SyncMode};
+pub use log_level::{LogLevel, ParseLogLevelError};
+#[cfg(unix)]
+pub use vm::{Vm, VmBuilder};

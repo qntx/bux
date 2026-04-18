@@ -182,7 +182,7 @@ pub struct VmConfig {
 
     /// Global log level.
     #[serde(default)]
-    pub log_level: Option<crate::vm::LogLevel>,
+    pub log_level: Option<crate::log_level::LogLevel>,
     /// UID to set before starting the VM.
     #[serde(default)]
     pub uid: Option<u32>,
