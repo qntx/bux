@@ -3,11 +3,19 @@
 //! All `unsafe` code for calling into the Go c-archive is confined here.
 //! Higher-level modules (`instance`, `mod`) use only the safe wrappers.
 
+#![allow(
+    unsafe_code,
+    clippy::undocumented_unsafe_blocks,
+    clippy::multiple_unsafe_ops_per_block,
+    clippy::missing_safety_doc,
+    reason = "FFI surface — every call is inherently unsafe; safety invariants are documented on the wrapper functions rather than each block"
+)]
+
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_longlong, c_void};
 
-use crate::error::{NetError, Result};
-use crate::gvproxy::config::GvproxyConfig;
+use crate::config::GvproxyConfig;
+use crate::error::{Error, Result};
 
 // ============================================================================
 // Raw extern "C" declarations
@@ -17,7 +25,7 @@ use crate::gvproxy::config::GvproxyConfig;
 ///
 /// - `level`: 0=trace, 1=debug, 2=info, 3=warn, 4=error
 /// - `message`: null-terminated C string
-#[allow(dead_code)]
+#[allow(dead_code, reason = "type alias documents the Go-side callback signature")]
 pub(crate) type LogCallbackFn = extern "C" fn(level: c_int, message: *const c_char);
 
 unsafe extern "C" {
@@ -60,12 +68,12 @@ pub(crate) fn create_instance(config: &GvproxyConfig) -> Result<i64> {
     let json = serde_json::to_string(config)?;
 
     let c_json =
-        CString::new(json).map_err(|e| NetError::Ffi(format!("invalid config JSON: {e}")))?;
+        CString::new(json).map_err(|e| Error::Ffi(format!("invalid config JSON: {e}")))?;
 
     let id = unsafe { gvproxy_create(c_json.as_ptr()) };
 
     if id < 0 {
-        return Err(NetError::Ffi("gvproxy_create returned -1".into()));
+        return Err(Error::Ffi("gvproxy_create returned -1".into()));
     }
 
     tracing::info!(id, "created gvproxy instance via FFI");
@@ -76,7 +84,7 @@ pub(crate) fn create_instance(config: &GvproxyConfig) -> Result<i64> {
 pub(crate) fn destroy_instance(id: i64) -> Result<()> {
     let rc = unsafe { gvproxy_destroy(id) };
     if rc != 0 {
-        return Err(NetError::Ffi(format!(
+        return Err(Error::Ffi(format!(
             "gvproxy_destroy failed for instance {id}: code {rc}"
         )));
     }
@@ -88,12 +96,12 @@ pub(crate) fn destroy_instance(id: i64) -> Result<()> {
 pub(crate) fn get_version() -> Result<String> {
     let ptr = unsafe { gvproxy_get_version() };
     if ptr.is_null() {
-        return Err(NetError::Ffi("gvproxy_get_version returned NULL".into()));
+        return Err(Error::Ffi("gvproxy_get_version returned NULL".into()));
     }
 
     let version = unsafe { CStr::from_ptr(ptr) }
         .to_str()
-        .map_err(|e| NetError::Ffi(format!("invalid UTF-8 in version string: {e}")))?
+        .map_err(|e| Error::Ffi(format!("invalid UTF-8 in version string: {e}")))?
         .to_owned();
 
     unsafe { gvproxy_free_string(ptr) };
@@ -104,14 +112,14 @@ pub(crate) fn get_version() -> Result<String> {
 pub(crate) fn get_stats_json(id: i64) -> Result<String> {
     let ptr = unsafe { gvproxy_get_stats(id) };
     if ptr.is_null() {
-        return Err(NetError::Ffi(format!(
+        return Err(Error::Ffi(format!(
             "gvproxy_get_stats returned NULL for instance {id}"
         )));
     }
 
     let json = unsafe { CStr::from_ptr(ptr) }
         .to_str()
-        .map_err(|e| NetError::Ffi(format!("invalid UTF-8 in stats JSON: {e}")))?
+        .map_err(|e| Error::Ffi(format!("invalid UTF-8 in stats JSON: {e}")))?
         .to_owned();
 
     unsafe { gvproxy_free_string(ptr) };

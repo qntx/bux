@@ -1,4 +1,4 @@
-//! Build script for bux-net.
+//! Build script for bux-gvproxy.
 //!
 //! Compiles the `gvproxy-bridge` Go sources into a C static archive
 //! (`libgvproxy.a`) and links it into the Rust binary.
@@ -7,6 +7,20 @@
 //!
 //! - `BUX_DEPS_STUB` — When set, skips the Go build entirely.  Used
 //!   for CI linting or when Go is not installed.
+
+// Build scripts legitimately use stderr for diagnostics and
+// expect/panic for unrecoverable failures (missing Go toolchain etc.).
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::print_stderr,
+    clippy::unwrap_used,
+    clippy::unwrap_in_result,
+    clippy::let_underscore_must_use,
+    missing_docs,
+    unsafe_code,
+    reason = "build scripts may panic/expect on unrecoverable setup failures"
+)]
 
 use std::env;
 use std::fs;
@@ -24,9 +38,10 @@ fn build_gvproxy(source_dir: &Path, output_path: &Path) {
         .status()
         .expect("Failed to run 'go mod download' — is Go installed?");
 
-    if !download.success() {
-        panic!("Failed to download Go module dependencies");
-    }
+    assert!(
+        download.success(),
+        "Failed to download Go module dependencies"
+    );
 
     // Build as C archive (static library).
     let mut cmd = Command::new("go");
@@ -47,9 +62,7 @@ fn build_gvproxy(source_dir: &Path, output_path: &Path) {
         .status()
         .expect("Failed to run 'go build' — is Go installed?");
 
-    if !build.success() {
-        panic!("Failed to build libgvproxy");
-    }
+    assert!(build.success(), "Failed to build libgvproxy");
 
     println!("cargo:warning=Successfully built libgvproxy");
 }
@@ -81,10 +94,15 @@ fn main() {
             .exists()
         {
             // build.rs is single-threaded — safe to set env.
-            #[allow(clippy::disallowed_methods)]
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "build.rs runs single-threaded, env::set_var is race-free"
+            )]
+            // SAFETY: Cargo invokes build scripts single-threaded; no other
+            // thread can observe `env::set_var` concurrently.
             unsafe {
-                env::set_var("BUX_DEPS_STUB", "1")
-            };
+                env::set_var("BUX_DEPS_STUB", "1");
+            }
         }
     }
 

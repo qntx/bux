@@ -1,0 +1,15 @@
+[package]
+name = "bux-cgroup"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure-Rust cgroup v2 resource limits (L1 platform primitive for bux)"
+keywords = ["cgroup", "linux", "resource-limits", "sandbox"]
+categories = ["os::linux-apis", "virtualization"]
+
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true

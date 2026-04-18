@@ -100,9 +100,12 @@ impl GvproxyConfig {
         };
 
         // Allow packet capture via environment variable.
-        if let Ok(path) = std::env::var("BUX_NET_CAPTURE_FILE") {
+        if let Ok(path) = std::env::var("BUX_GVPROXY_CAPTURE_FILE") {
             if !path.is_empty() {
-                tracing::info!(path, "enabling packet capture from BUX_NET_CAPTURE_FILE");
+                tracing::info!(
+                    path,
+                    "enabling packet capture from BUX_GVPROXY_CAPTURE_FILE"
+                );
                 config.capture_file = Some(path);
                 config.debug = true;
             }
@@ -113,7 +116,7 @@ impl GvproxyConfig {
 
     /// Enable verbose debug logging.
     #[must_use]
-    pub fn with_debug(mut self, debug: bool) -> Self {
+    pub const fn with_debug(mut self, debug: bool) -> Self {
         self.debug = debug;
         self
     }
@@ -127,7 +130,7 @@ impl GvproxyConfig {
 
     /// Set custom MTU.
     #[must_use]
-    pub fn with_mtu(mut self, mtu: u16) -> Self {
+    pub const fn with_mtu(mut self, mtu: u16) -> Self {
         self.mtu = mtu;
         self
     }
@@ -141,6 +144,12 @@ impl GvproxyConfig {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::missing_docs_in_private_items,
+    reason = "tests may unwrap and index; not production paths"
+)]
 mod tests {
     use super::*;
 

@@ -1,77 +1,53 @@
-//! Bundles the [bubblewrap] (`bwrap`) sandbox binary for bux.
+//! Bundled [bubblewrap] binary and a safe command-builder for bux.
 //!
-//! This crate downloads a pre-built `bwrap` binary at build time and exposes
-//! a [`path()`] function for runtime discovery. Bubblewrap provides unprivileged
-//! Linux namespace isolation for sandboxing the `bux-shim` process.
+//! This crate does two things:
+//!
+//! 1. **Discovery** — downloads a pre-built `bwrap` binary at build time
+//!    and exposes [`path()`] for runtime lookup.
+//! 2. **Command building** — [`BwrapCommand`] is a fluent builder that
+//!    produces a ready-to-spawn [`std::process::Command`] wrapping a
+//!    target program with bubblewrap namespace isolation.
+//!
+//! Bubblewrap provides unprivileged Linux namespace isolation and is
+//! the basis of the `bux-shim` sandbox.
 //!
 //! # Platform
 //!
-//! Linux only. On other platforms, [`path()`] returns `None`.
+//! Linux only. On other platforms:
+//! - [`path()`] returns `None`.
+//! - [`BwrapCommand::new`] always returns [`Error::NotFound`].
+//! - The types remain constructible so downstream `cfg` gating can be
+//!   minimised.
+//!
+//! # Example
+//!
+//! ```no_run
+//! # #[cfg(target_os = "linux")]
+//! # fn main() -> Result<(), bux_bwrap::Error> {
+//! use bux_bwrap::{BwrapCommand, Namespace};
+//!
+//! let cmd = BwrapCommand::new()?
+//!     .unshare([Namespace::Pid, Namespace::Ipc, Namespace::Uts])
+//!     .die_with_parent()
+//!     .ro_bind("/", "/")
+//!     .tmpfs("/tmp")
+//!     .program("/usr/bin/id")
+//!     .into_command();
+//! // Ready to `.spawn()`.
+//! drop(cmd);
+//! # Ok(()) }
+//! # #[cfg(not(target_os = "linux"))]
+//! # fn main() {}
+//! ```
 //!
 //! [bubblewrap]: https://github.com/containers/bubblewrap
 
-use std::path::Path;
-#[cfg(target_os = "linux")]
-use std::path::PathBuf;
-#[cfg(target_os = "linux")]
-use std::sync::OnceLock;
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
-/// Build-time path to the bwrap binary (baked in by build.rs).
-#[cfg(target_os = "linux")]
-const BUILD_PATH: &str = env!("BUX_BWRAP_BUILD_PATH");
+mod command;
+mod discover;
+mod error;
 
-/// Returns the path to the bundled `bwrap` binary, or `None` if unavailable.
-///
-/// Search order:
-/// 1. Sibling of the current executable (e.g. `/usr/bin/bwrap`).
-/// 2. `$PATH` lookup.
-/// 3. Build-time path (for `cargo run` during development).
-#[cfg(target_os = "linux")]
-pub fn path() -> Option<&'static Path> {
-    static CACHED: OnceLock<Option<PathBuf>> = OnceLock::new();
-    CACHED
-        .get_or_init(|| {
-            // 1. Sibling of the current executable.
-            if let Some(p) = sibling_path("bwrap") {
-                return Some(p);
-            }
-
-            // 2. Search $PATH.
-            if let Some(p) = search_path("bwrap") {
-                return Some(p);
-            }
-
-            // 3. Build-time fallback (works during `cargo run`).
-            let build = Path::new(BUILD_PATH);
-            if build.is_file() {
-                return Some(build.to_path_buf());
-            }
-
-            None
-        })
-        .as_deref()
-}
-
-/// On non-Linux platforms, bwrap is unavailable.
-#[cfg(not(target_os = "linux"))]
-#[must_use]
-pub const fn path() -> Option<&'static Path> {
-    None
-}
-
-/// Check for a binary next to the current executable.
-#[cfg(target_os = "linux")]
-fn sibling_path(name: &str) -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let sibling = exe.with_file_name(name);
-    sibling.is_file().then_some(sibling)
-}
-
-/// Search `$PATH` for a binary.
-#[cfg(target_os = "linux")]
-fn search_path(name: &str) -> Option<PathBuf> {
-    let path_var = std::env::var("PATH").ok()?;
-    std::env::split_paths(&path_var)
-        .map(|dir| dir.join(name))
-        .find(|p| p.is_file())
-}
+pub use command::{BwrapCommand, Namespace};
+pub use discover::path;
+pub use error::{Error, Result};

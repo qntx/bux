@@ -49,7 +49,7 @@ pub const DNS_SEARCH_DOMAINS: &[&str] = &["local"];
 
 /// Format a 6-byte MAC address as a colon-separated hex string.
 #[must_use]
-pub fn mac_to_string(mac: &[u8; 6]) -> String {
+pub fn mac_to_string(mac: [u8; 6]) -> String {
     format!(
         "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
@@ -57,13 +57,18 @@ pub fn mac_to_string(mac: &[u8; 6]) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::missing_docs_in_private_items,
+    reason = "tests may index; not production paths"
+)]
 mod tests {
     use super::*;
 
     #[test]
     fn mac_to_string_matches_constants() {
-        assert_eq!(mac_to_string(&GUEST_MAC), GUEST_MAC_STRING);
-        assert_eq!(mac_to_string(&GATEWAY_MAC), GATEWAY_MAC_STRING);
+        assert_eq!(mac_to_string(GUEST_MAC), GUEST_MAC_STRING);
+        assert_eq!(mac_to_string(GATEWAY_MAC), GATEWAY_MAC_STRING);
     }
 
     #[test]

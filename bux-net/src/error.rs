@@ -4,13 +4,10 @@
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum NetError {
-    /// FFI call returned an error or NULL pointer.
-    #[error("gvproxy FFI error: {0}")]
-    Ffi(String),
-
-    /// JSON serialization / deserialization failed.
-    #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
+    /// A gvproxy FFI or config-serialisation error bubbled up from the
+    /// [`bux_gvproxy`] crate.
+    #[error(transparent)]
+    Gvproxy(#[from] bux_gvproxy::Error),
 
     /// Configuration is invalid.
     #[error("invalid network config: {0}")]

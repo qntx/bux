@@ -461,10 +461,104 @@ impl Filesystem {
     }
 }
 
-/// Creates an ext4 image populated from a host directory.
+/// Fluent builder for creating ext4 images with custom [`CreateOptions`].
 ///
-/// This is the primary convenience function combining [`Filesystem::create`],
-/// [`Filesystem::populate`], and [`Filesystem::add_journal`].
+/// Chains `block_size`, `reserved_ratio`, and `add_journal` into a single
+/// expression, then finishes with [`Ext4Builder::create_from_dir`]. For
+/// the common "build an image from a rootfs" case, [`create_from_dir`]
+/// keeps the call-site to one line by using default options.
+///
+/// # Example
+///
+/// ```no_run
+/// use std::path::Path;
+/// use bux_e2fs::{BlockSize, Ext4Builder};
+///
+/// Ext4Builder::new()
+///     .block_size(BlockSize::B4096)
+///     .reserved_ratio(0)
+///     .create_from_dir(
+///         Path::new("/tmp/rootfs"),
+///         Path::new("/tmp/base.raw"),
+///         512 * 1024 * 1024,
+///     )
+///     .unwrap();
+/// ```
+#[derive(Debug, Clone, Copy)]
+#[must_use = "Ext4Builder does nothing until you call `.create_from_dir()`"]
+pub struct Ext4Builder {
+    /// Underlying options passed to [`Filesystem::create`].
+    opts: CreateOptions,
+    /// Whether to create a journal (enabled → ext4, disabled → ext2).
+    journal: bool,
+}
+
+impl Default for Ext4Builder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Ext4Builder {
+    /// Start a new builder with default options: 4 KiB blocks, 0 % reserved,
+    /// journal enabled (`ext4`).
+    pub const fn new() -> Self {
+        Self {
+            opts: CreateOptions {
+                block_size: BlockSize::B4096,
+                reserved_ratio: 0,
+            },
+            journal: true,
+        }
+    }
+
+    /// Set the block size (default: 4 KiB).
+    pub const fn block_size(mut self, size: BlockSize) -> Self {
+        self.opts.block_size = size;
+        self
+    }
+
+    /// Set the reserved-block percentage (default: 0). The kernel
+    /// clamps this to `0..=50`; values above 50 are rejected by
+    /// libext2fs at create time.
+    pub const fn reserved_ratio(mut self, pct: u8) -> Self {
+        self.opts.reserved_ratio = pct;
+        self
+    }
+
+    /// Toggle journal creation. Default is `true` (ext4); set to
+    /// `false` to produce an ext2 image.
+    pub const fn add_journal(mut self, enabled: bool) -> Self {
+        self.journal = enabled;
+        self
+    }
+
+    /// Build the image at `output` populated from the `source_dir`
+    /// rootfs, with the configured options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if image creation, optional journal setup, or
+    /// population fails.
+    pub fn create_from_dir(self, source_dir: &Path, output: &Path, size_bytes: u64) -> Result<()> {
+        let mut fs = Filesystem::create(output, size_bytes, &self.opts)?;
+        if self.journal {
+            fs.add_journal()?;
+        }
+        fs.populate(source_dir)?;
+        Ok(())
+    }
+}
+
+/// Create an ext4 image populated from a host directory with default options.
+///
+/// Equivalent to:
+/// ```text
+/// Ext4Builder::new().create_from_dir(source_dir, output, size_bytes)
+/// ```
+///
+/// Use [`Ext4Builder`] if you need to customise block size, reserved
+/// ratio, or journal creation.
 ///
 /// # Example
 ///
@@ -483,13 +577,10 @@ impl Filesystem {
 ///
 /// Returns an error if image creation, journal setup, or population fails.
 pub fn create_from_dir(source_dir: &Path, output: &Path, size_bytes: u64) -> Result<()> {
-    let mut fs = Filesystem::create(output, size_bytes, &CreateOptions::default())?;
-    fs.add_journal()?;
-    fs.populate(source_dir)?;
-    Ok(())
+    Ext4Builder::new().create_from_dir(source_dir, output, size_bytes)
 }
 
-/// Injects a single host file into an existing ext4 image.
+/// Inject a single host file into an existing ext4 image.
 ///
 /// Equivalent to `debugfs -w -R "write <host_file> <guest_path>"`.
 ///
@@ -567,4 +658,54 @@ fn walk(dir: &Path, f: &mut impl FnMut(&std::fs::Metadata)) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::missing_docs_in_private_items,
+    reason = "tests are allowed to use unwrap and omit docs"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_size_bytes_match_log_levels() {
+        assert_eq!(BlockSize::B1024.bytes(), 1024);
+        assert_eq!(BlockSize::B2048.bytes(), 2048);
+        assert_eq!(BlockSize::B4096.bytes(), 4096);
+    }
+
+    #[test]
+    fn default_create_options_are_container_friendly() {
+        let opts = CreateOptions::default();
+        assert_eq!(opts.block_size, BlockSize::B4096);
+        assert_eq!(opts.reserved_ratio, 0);
+    }
+
+    #[test]
+    fn builder_default_matches_new() {
+        let a = Ext4Builder::new();
+        let b = Ext4Builder::default();
+        assert_eq!(a.opts.block_size, b.opts.block_size);
+        assert_eq!(a.opts.reserved_ratio, b.opts.reserved_ratio);
+        assert_eq!(a.journal, b.journal);
+    }
+
+    #[test]
+    fn builder_chain_applies_options() {
+        let b = Ext4Builder::new()
+            .block_size(BlockSize::B1024)
+            .reserved_ratio(5)
+            .add_journal(false);
+        assert_eq!(b.opts.block_size, BlockSize::B1024);
+        assert_eq!(b.opts.reserved_ratio, 5);
+        assert!(!b.journal);
+    }
+
+    #[test]
+    fn builder_journal_defaults_to_true() {
+        let b = Ext4Builder::new();
+        assert!(b.journal, "default should produce ext4 (with journal)");
+    }
 }

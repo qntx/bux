@@ -28,7 +28,8 @@ const SYMLINK_PREFIX: &str = "bx_";
 
 /// Manages a short symlink in `/tmp` that aliases a sockets directory.
 ///
-/// When the real socket path exceeds [`MAX_SUN_PATH`], this creates:
+/// When the real socket path exceeds the `sun_path` limit (104 B on
+/// macOS, 108 B on Linux), this creates:
 ///
 /// ```text
 /// /tmp/bx_{short_id}  →  {data_dir}/socks/
@@ -44,7 +45,7 @@ pub struct SocketShortener {
     /// The short symlink path: `/tmp/bx_{short_id}`.
     symlink_path: PathBuf,
     /// The real sockets directory this symlink points to.
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "retained for debugging")]
     real_dir: PathBuf,
 }
 
@@ -52,6 +53,13 @@ impl SocketShortener {
     /// Creates a shortener if the socket paths exceed the `sun_path` limit.
     ///
     /// Returns `Ok(None)` if all paths already fit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::SocketPath`] if even the shortened path
+    /// exceeds the platform `sun_path` limit, or if a non-symlink
+    /// entry already occupies the target. Returns [`NetError::Io`] if
+    /// creating the symlink fails.
     pub fn new(short_id: &str, sockets_dir: &Path) -> Result<Option<Self>> {
         // Use a representative long socket name for the length check.
         let longest_real = sockets_dir.join("net.sock");
@@ -76,7 +84,7 @@ impl SocketShortener {
         // Handle stale symlinks from a previous run.
         match std::fs::symlink_metadata(&symlink_path) {
             Ok(meta) if meta.file_type().is_symlink() => {
-                let _ = std::fs::remove_file(&symlink_path);
+                drop(std::fs::remove_file(&symlink_path));
             }
             Ok(_) => {
                 return Err(NetError::SocketPath(format!(
@@ -114,20 +122,25 @@ impl SocketShortener {
 
 impl Drop for SocketShortener {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.symlink_path);
+        drop(std::fs::remove_file(&self.symlink_path));
     }
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::missing_docs_in_private_items,
+    reason = "tests are allowed to unwrap and omit docs"
+)]
 mod tests {
     use super::*;
 
     #[test]
     fn short_path_not_needed() {
         let dir = std::env::temp_dir().join("bux_test_short");
-        let _ = std::fs::create_dir_all(&dir);
+        drop(std::fs::create_dir_all(&dir));
         let result = SocketShortener::new("test1", &dir).unwrap();
         assert!(result.is_none(), "short paths should not need a shortener");
-        let _ = std::fs::remove_dir_all(&dir);
+        drop(std::fs::remove_dir_all(&dir));
     }
 }

@@ -1,0 +1,22 @@
+[package]
+name = "bux-gvproxy"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Safe Rust wrapper over gvisor-tap-vsock (gvproxy) — Go CGO bridge packaged as an L1 platform primitive"
+readme = "README.md"
+links = "gvproxy"
+categories = ["api-bindings", "network-programming", "virtualization"]
+keywords = ["gvproxy", "gvisor", "vsock", "ffi", "networking"]
+rust-version = "1.85"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

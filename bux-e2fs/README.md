@@ -23,13 +23,13 @@ BUX_UPDATE_BINDINGS=1 cargo check -p bux-e2fs --features regenerate
 
 ## Safe API
 
-```rust
-use bux_e2fs::Ext4Builder;
+```rust,no_run
+use bux_e2fs::{BlockSize, Ext4Builder, inject_file};
 use std::path::Path;
 
-// Create an ext4 image from a directory (like mke2fs -d)
+// Create an ext4 image from a directory (like mke2fs -d).
 Ext4Builder::new()
-    .block_size(4096)
+    .block_size(BlockSize::B4096)
     .reserved_ratio(0)
     .create_from_dir(
         Path::new("/tmp/rootfs"),
@@ -37,12 +37,28 @@ Ext4Builder::new()
         512 * 1024 * 1024,
     )?;
 
-// Inject a file into an existing image (like debugfs write)
-Ext4Builder::inject_file(
+// Inject a file into an existing image (like debugfs write).
+inject_file(
     Path::new("/tmp/base.raw"),
     Path::new("/usr/local/bin/bux-guest"),
     "usr/local/bin/bux-guest",
 )?;
+# Ok::<_, bux_e2fs::Error>(())
+```
+
+Prefer [`create_from_dir`] if default options are fine:
+
+```rust,no_run
+use bux_e2fs::{create_from_dir, estimate_image_size};
+use std::path::Path;
+
+let size = estimate_image_size(Path::new("/tmp/rootfs"))?;
+create_from_dir(
+    Path::new("/tmp/rootfs"),
+    Path::new("/tmp/base.raw"),
+    size,
+)?;
+# Ok::<_, bux_e2fs::Error>(())
 ```
 
 ## Environment variables

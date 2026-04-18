@@ -1,37 +1,39 @@
 # bux-net
 
-Network backend abstraction and [gvisor-tap-vsock](https://github.com/containers/gvisor-tap-vsock) integration for bux micro-VMs.
+Network backend abstraction for bux micro-VMs.
 
 ## Overview
 
-This crate provides:
+This crate exposes a small, backend-neutral API:
 
-- **`NetworkBackend` trait** — pluggable interface for network backends (gvproxy, libslirp, passt, …)
-- **`GvproxyBackend`** — concrete implementation using gvisor-tap-vsock via a Go c-archive (CGO bridge)
-- **Network constants** — shared subnet, gateway/guest IP and MAC addresses
-- **Socket shortener** — handles Unix socket `sun_path` length limits via symlinks
+- **`NetworkBackend` trait** — pluggable interface that VM engines
+  program against (gvproxy today; passt / libslirp / socket_vmnet in
+  the future).
+- **`GvproxyBackend`** — concrete `NetworkBackend` implementation that
+  delegates to the [`bux-gvproxy`](../bux-gvproxy/) L1 platform
+  primitive (which owns the Go CGO bridge and `libgvproxy.a`).
+- **`SocketShortener`** — Unix domain socket `sun_path` length
+  workaround via `/tmp` symlinks.
 
-## Build requirements
+Network-topology defaults (subnet, gateway/guest IP & MAC, MTU, DNS
+search domains) live in `bux_gvproxy::constants` — the single source of
+truth for both the Go and Rust sides.
 
-- **Go 1.21+** — required to compile the `gvproxy-bridge` Go sources into `libgvproxy.a`
-- Set `BUX_DEPS_STUB=1` to skip the Go build (CI lint mode)
+## Layering
 
-## Architecture
-
+```text
+bux-net        (this crate — pure Rust, no native deps)
+    │
+    ▼
+bux-gvproxy    (L1 platform primitive — Go CGO bridge + FFI)
+    │
+    ▼
+libgvproxy.a   (Go c-archive)
 ```
-Rust (bux-net)                          Go (gvproxy-bridge)
-┌──────────────────┐                    ┌───────────────────┐
-│ GvproxyBackend   │──── FFI (CGO) ────▶│ gvisor-tap-vsock  │
-│ (NetworkBackend) │                    │ virtual network    │
-└──────────────────┘                    └───────────────────┘
-        │
-        ▼
-  NetworkEndpoint
-  (UnixSocket path + MAC)
-        │
-        ▼
-  VM engine (bux-krun)
-```
+
+Because the Go toolchain dependency now lives entirely in
+`bux-gvproxy`, `bux-net` itself is a pure-Rust crate with no
+`build.rs`.
 
 ## License
 

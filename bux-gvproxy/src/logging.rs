@@ -6,6 +6,12 @@
 //!
 //! Filter with: `RUST_LOG=gvproxy=debug`
 
+#![allow(
+    unsafe_code,
+    clippy::undocumented_unsafe_blocks,
+    reason = "`extern \"C\" fn` callback invoked from Go; raw pointer handling is the whole point of this bridge"
+)]
+
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 use std::sync::Once;
@@ -21,9 +27,8 @@ extern "C" fn log_callback(level: c_int, message: *const c_char) {
         return;
     }
 
-    let msg = match unsafe { CStr::from_ptr(message) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return, // invalid UTF-8 — skip
+    let Ok(msg) = unsafe { CStr::from_ptr(message) }.to_str() else {
+        return; // invalid UTF-8 — skip
     };
 
     match level {
@@ -42,7 +47,7 @@ pub fn init() {
     ONCE.call_once(|| {
         tracing::debug!("initializing gvproxy log callback");
         unsafe {
-            super::ffi::set_log_callback(log_callback as *const std::ffi::c_void);
+            crate::ffi::set_log_callback(log_callback as *const std::ffi::c_void);
         }
     });
 }

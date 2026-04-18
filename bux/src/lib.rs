@@ -72,9 +72,9 @@ pub mod watchdog;
 pub use bux_proto::ExecStart;
 #[cfg(unix)]
 pub use client::{Client, ExecHandle, ExecOutput, PongInfo};
+pub use disk::DiskFormat;
 #[cfg(unix)]
-pub use disk::{Disk, DiskManager};
-pub use disk::{DiskFormat, QcowHeader};
+pub use disk::{Disk, DiskManager, QcowHeader};
 pub use error::{Error, Result};
 pub use events::{
     AuditEvent, AuditEventKind, CopyDirection, EventDispatcher, EventListener, RingBufferListener,
@@ -87,7 +87,7 @@ pub use jail::checks::{HostCapabilities, audit_isolation, check_guest_binary, ch
 #[cfg(target_os = "linux")]
 pub use jail::credentials::CredentialConfig;
 #[cfg(target_os = "linux")]
-pub use jail::seccomp::SeccompError;
+pub use bux_seccomp::Error as SeccompError;
 #[cfg(unix)]
 pub use jail::{JailConfig, NoopSandbox, ResourceLimits, Sandbox, SandboxCapabilities};
 pub use metrics::{BoxMetrics, RuntimeMetrics};

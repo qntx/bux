@@ -3,11 +3,17 @@
 //! [`GvproxyInstance`] owns an FFI handle and calls `gvproxy_destroy`
 //! on [`Drop`], ensuring Go-side resources are always released.
 
+#![allow(
+    unsafe_code,
+    reason = "exposes `unsafe impl Send` for the FFI handle; CGO serialises internally"
+)]
+
 use std::path::{Path, PathBuf};
 use std::sync::Weak;
 
-use crate::error::{NetError, Result};
-use crate::gvproxy::{config::GvproxyConfig, ffi, logging, stats::NetworkStats};
+use crate::config::GvproxyConfig;
+use crate::error::{Error, Result};
+use crate::{ffi, logging, stats::NetworkStats};
 
 /// Safe, RAII wrapper around a gvproxy (gvisor-tap-vsock) instance.
 ///
@@ -29,15 +35,20 @@ pub struct GvproxyInstance {
 }
 
 impl GvproxyInstance {
-    /// Creates a new gvproxy instance with the given socket path and
-    /// port mappings.
+    /// Creates a new gvproxy instance from a [`GvproxyConfig`].
     ///
-    /// The logging bridge is initialised on first call.
-    pub(crate) fn new(socket_path: PathBuf, port_mappings: &[(u16, u16)]) -> Result<Self> {
+    /// The Go→Rust logging bridge is initialised on first call
+    /// (idempotent).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Json`] if the config cannot be serialised and
+    /// [`Error::Ffi`] if the Go side rejects the configuration.
+    pub fn new(config: &GvproxyConfig) -> Result<Self> {
         logging::init();
 
-        let config = GvproxyConfig::new(socket_path.clone(), port_mappings.to_vec());
-        let id = ffi::create_instance(&config)?;
+        let socket_path = config.socket_path.clone();
+        let id = ffi::create_instance(config)?;
 
         tracing::info!(id, ?socket_path, "created GvproxyInstance");
 
@@ -45,30 +56,31 @@ impl GvproxyInstance {
     }
 
     /// Unix socket path for the network tap interface.
+    #[must_use]
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
 
     /// FFI handle (used by stats logging and other internal callers).
-    #[allow(dead_code)]
-    pub(crate) fn id(&self) -> i64 {
+    #[must_use]
+    pub const fn id(&self) -> i64 {
         self.id
     }
 
     /// Fetches live network statistics from the Go side.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Ffi`] if the Go side returns NULL or the JSON
+    /// cannot be parsed.
     pub fn get_stats(&self) -> Result<NetworkStats> {
         let json = ffi::get_stats_json(self.id)?;
         tracing::debug!("received stats JSON: {json}");
         NetworkStats::from_json_str(&json).map_err(|e| {
-            NetError::Ffi(format!(
+            Error::Ffi(format!(
                 "failed to parse stats JSON from gvproxy: {e} (raw: {json})"
             ))
         })
-    }
-
-    /// Returns the gvproxy-bridge library version.
-    pub fn version() -> Result<String> {
-        ffi::get_version()
     }
 }
 
@@ -81,13 +93,20 @@ impl Drop for GvproxyInstance {
     }
 }
 
-// The CGO layer handles synchronisation internally.
+// SAFETY: The Go CGO runtime serialises all calls into `libgvproxy`
+// internally, so passing the opaque handle across thread boundaries is
+// sound. No Rust-side data inside `GvproxyInstance` is shared without
+// a lock: only the `i64` handle and an immutable `PathBuf`.
 unsafe impl Send for GvproxyInstance {}
 
 /// Spawns a background tokio task that logs network statistics every
 /// 30 seconds.  Holds only a [`Weak`] reference so it exits
-/// automatically when the instance is dropped.
-pub(crate) fn start_stats_logging(instance: Weak<GvproxyInstance>) {
+/// automatically when the last `Arc<GvproxyInstance>` is dropped.
+///
+/// This is a convenience for callers that want "fire-and-forget"
+/// stats visibility; ignore it if you poll [`GvproxyInstance::get_stats`]
+/// on your own schedule.
+pub fn start_stats_logging(instance: Weak<GvproxyInstance>) {
     tokio::spawn(async move {
         // Let the instance stabilise before the first log.
         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;

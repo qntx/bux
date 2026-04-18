@@ -78,6 +78,21 @@ pub enum Error {
     #[error(transparent)]
     E2fs(#[from] bux_e2fs::Error),
 
+    /// QCOW2 image operation error.
+    #[cfg(unix)]
+    #[error(transparent)]
+    Qcow2(#[from] bux_qcow2::Error),
+
+    /// cgroup v2 resource-limit error (Linux-only operations).
+    #[cfg(unix)]
+    #[error(transparent)]
+    Cgroup(#[from] bux_cgroup::Error),
+
+    /// Seccomp BPF filter error (Linux-only).
+    #[cfg(target_os = "linux")]
+    #[error(transparent)]
+    Seccomp(#[from] bux_seccomp::Error),
+
     /// OCI image operation error.
     #[cfg(unix)]
     #[error(transparent)]

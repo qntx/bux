@@ -1,8 +1,8 @@
 //! Network statistics from gvisor-tap-vsock.
 //!
 //! Deserialized from the JSON returned by `gvproxy_get_stats()`.
-//! Field names use `#[serde(rename)]` to map Go's PascalCase to
-//! Rust's snake_case.
+//! Field names use `#[serde(rename)]` to map Go's `PascalCase` to
+//! Rust's `snake_case`.
 
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +50,11 @@ pub struct TcpStats {
 
 impl NetworkStats {
     /// Parse from a JSON string returned by the Go FFI layer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying `serde_json::Error` if the payload does
+    /// not conform to the expected schema.
     pub fn from_json_str(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
     }

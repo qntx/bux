@@ -5,7 +5,7 @@
 //! - [`DiskFormat`] — Type-safe disk format enum (Raw / Qcow2) with serde support.
 //! - [`Disk`] — RAII handle that optionally auto-removes the file on drop.
 //! - [`DiskManager`] — Manages shared ext4 bases and per-VM QCOW2 overlays.
-//! - [`qcow2`] — Pure-Rust QCOW2 v3 operations (create / read / flatten / resize).
+//! - QCOW2 operations themselves live in the [`bux_qcow2`] sub-crate.
 //!
 //! # Storage layout
 //!
@@ -24,53 +24,14 @@ use std::{fs, io};
 use serde::{Deserialize, Serialize};
 
 #[cfg(unix)]
+pub use bux_qcow2::Header as QcowHeader;
+
+#[cfg(unix)]
 use crate::Result;
 #[cfg(unix)]
 use crate::guest::ManagedGuestBinary;
 #[cfg(unix)]
 use crate::util::push_unique_path;
-
-/// Parsed QCOW2 header information extracted via `qemu-img info`.
-#[non_exhaustive]
-#[derive(Debug, Clone)]
-pub struct QcowHeader {
-    /// Format version (2 or 3).
-    pub version: u32,
-    /// Virtual size of the disk in bytes.
-    pub virtual_size: u64,
-    /// Cluster size in bytes (always a power of two).
-    pub cluster_size: u64,
-    /// Cluster bits (log2 of `cluster_size`).
-    pub cluster_bits: u32,
-    /// Number of L1 table entries.
-    pub l1_entries: u32,
-    /// Refcount order (log2 of refcount bit width).
-    pub refcount_order: u32,
-    /// Number of snapshots stored in the image.
-    pub snapshots: u32,
-    /// Backing file path, if any.
-    pub backing_file: Option<String>,
-    /// Backing file format string from header extensions (e.g. `"raw"`).
-    pub backing_format: Option<String>,
-}
-
-impl fmt::Display for QcowHeader {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "version:        {}", self.version)?;
-        writeln!(f, "virtual_size:   {} bytes", self.virtual_size)?;
-        writeln!(f, "cluster_size:   {} bytes", self.cluster_size)?;
-        writeln!(f, "l1_entries:     {}", self.l1_entries)?;
-        writeln!(f, "refcount_order: {}", self.refcount_order)?;
-        writeln!(f, "snapshots:      {}", self.snapshots)?;
-        if let Some(ref bf) = self.backing_file {
-            writeln!(f, "backing_file:   {bf}")?;
-        }
-        if let Some(ref bfmt) = self.backing_format {
-            writeln!(f, "backing_format: {bfmt}")?;
-        }
-        Ok(())
-    }
-}
 
 /// Disk image format.
 ///
@@ -103,6 +64,16 @@ impl fmt::Display for DiskFormat {
             Self::Raw => "raw",
             Self::Qcow2 => "qcow2",
         })
+    }
+}
+
+#[cfg(unix)]
+impl From<DiskFormat> for bux_qcow2::BackingFormat {
+    fn from(value: DiskFormat) -> Self {
+        match value {
+            DiskFormat::Raw => Self::Raw,
+            DiskFormat::Qcow2 => Self::Qcow2,
+        }
     }
 }
 
@@ -170,14 +141,15 @@ impl Disk {
     /// # Errors
     ///
     /// Returns an error if the format is not QCOW2 or the file cannot be parsed.
-    pub fn inspect(&self) -> io::Result<QcowHeader> {
+    pub fn inspect(&self) -> Result<QcowHeader> {
         if self.format != DiskFormat::Qcow2 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "inspect is only supported for QCOW2 images",
-            ));
+            )
+            .into());
         }
-        qcow2::read_header(&self.path)
+        Ok(bux_qcow2::read_header(&self.path)?)
     }
 
     /// Resizes the virtual size of a QCOW2 image using `qemu-img`.
@@ -188,14 +160,15 @@ impl Disk {
     /// # Errors
     ///
     /// Returns an error if the format is not QCOW2 or the resize fails.
-    pub fn resize(&self, new_size: u64) -> io::Result<()> {
+    pub fn resize(&self, new_size: u64) -> Result<()> {
         if self.format != DiskFormat::Qcow2 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "resize is only supported for QCOW2 images",
-            ));
+            )
+            .into());
         }
-        qcow2::resize(&self.path, new_size)
+        Ok(bux_qcow2::resize(&self.path, new_size)?)
     }
 }
 
@@ -331,7 +304,7 @@ impl DiskManager {
         base: &Path,
         backing_format: DiskFormat,
         vm_id: &str,
-    ) -> io::Result<PathBuf> {
+    ) -> Result<PathBuf> {
         let path = self.vm_disk_path(vm_id);
 
         // Resolve the base to an absolute canonical path for the QCOW2 header.
@@ -341,7 +314,7 @@ impl DiskManager {
 
         // Write to a temporary file, then rename for atomicity.
         let tmp = self.vms_dir.join(format!("{vm_id}.qcow2.tmp"));
-        qcow2::create_overlay(&tmp, &backing, backing_format, base_size)?;
+        bux_qcow2::create_overlay(&tmp, &backing, backing_format.into(), base_size)?;
         fs::rename(&tmp, &path)?;
 
         Ok(path)
@@ -358,8 +331,8 @@ impl DiskManager {
     /// # Errors
     ///
     /// Returns an error if the header cannot be read.
-    pub fn inspect_vm_disk(&self, vm_id: &str) -> io::Result<QcowHeader> {
-        qcow2::read_header(&self.vm_disk_path(vm_id))
+    pub fn inspect_vm_disk(&self, vm_id: &str) -> Result<QcowHeader> {
+        Ok(bux_qcow2::read_header(&self.vm_disk_path(vm_id))?)
     }
 
     /// Resizes the virtual size of a VM's QCOW2 overlay.
@@ -367,8 +340,8 @@ impl DiskManager {
     /// # Errors
     ///
     /// Returns an error if the resize operation fails.
-    pub fn resize_vm_disk(&self, vm_id: &str, new_size: u64) -> io::Result<()> {
-        qcow2::resize(&self.vm_disk_path(vm_id), new_size)
+    pub fn resize_vm_disk(&self, vm_id: &str, new_size: u64) -> Result<()> {
+        Ok(bux_qcow2::resize(&self.vm_disk_path(vm_id), new_size)?)
     }
 
     /// Flattens a VM's QCOW2 overlay and its entire backing chain into
@@ -377,8 +350,8 @@ impl DiskManager {
     /// # Errors
     ///
     /// Returns an error if the flatten operation fails.
-    pub fn flatten_vm_disk(&self, vm_id: &str, dst: &Path) -> io::Result<()> {
-        qcow2::flatten(&self.vm_disk_path(vm_id), dst)
+    pub fn flatten_vm_disk(&self, vm_id: &str, dst: &Path) -> Result<()> {
+        Ok(bux_qcow2::flatten(&self.vm_disk_path(vm_id), dst)?)
     }
 
     /// Removes a VM's QCOW2 overlay.
@@ -485,7 +458,7 @@ fn dir_size(dir: &Path) -> io::Result<u64> {
 #[allow(clippy::missing_docs_in_private_items, reason = "internal helper")]
 pub(crate) fn readonly_disk_paths(path: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    for backing in read_backing_chain(path) {
+    for backing in bux_qcow2::read_backing_chain(path) {
         if let Some(parent) = backing.parent().filter(|p| p.exists()) {
             push_unique_path(&mut paths, parent.to_path_buf());
         }
@@ -493,45 +466,3 @@ pub(crate) fn readonly_disk_paths(path: &Path) -> Vec<PathBuf> {
     }
     paths
 }
-
-#[cfg(unix)]
-#[allow(clippy::missing_docs_in_private_items, reason = "internal helper")]
-pub(crate) fn read_backing_chain(path: &Path) -> Vec<PathBuf> {
-    const MAX_BACKING_CHAIN_DEPTH: usize = 16;
-
-    let mut chain = Vec::new();
-    let mut current = path.to_path_buf();
-
-    for _ in 0..MAX_BACKING_CHAIN_DEPTH {
-        let Ok(Some(backing)) = qcow2::read_backing_file(&current) else {
-            break;
-        };
-
-        let backing_path = PathBuf::from(&backing);
-        let resolved = if backing_path.is_absolute() {
-            backing_path
-        } else if let Some(parent) = current.parent() {
-            parent.join(backing_path)
-        } else {
-            PathBuf::from(backing)
-        };
-
-        if !resolved.exists() {
-            break;
-        }
-
-        chain.push(resolved.clone());
-        current = resolved;
-    }
-
-    chain
-}
-
-// All offsets/sizes in this module are compile-time constants well within
-// usize range; truncation is impossible on any supported platform.
-#[cfg(unix)]
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "all offsets are compile-time constants within usize"
-)]
-mod qcow2;

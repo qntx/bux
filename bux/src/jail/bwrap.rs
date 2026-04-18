@@ -7,6 +7,8 @@
 use std::path::Path;
 use std::process::Command;
 
+use bux_bwrap::{BwrapCommand, Namespace};
+
 use super::{JailConfig, Sandbox};
 
 /// Bubblewrap (bwrap) sandbox for Linux.
@@ -18,59 +20,31 @@ pub struct BwrapSandbox;
 
 impl Sandbox for BwrapSandbox {
     fn wrap(&self, shim: &Path, config_path: &Path, jail: &JailConfig) -> Option<Command> {
-        let bwrap = bux_bwrap::path()?;
+        let mut builder = BwrapCommand::new()
+            .ok()?
+            .unshare([Namespace::Pid, Namespace::Ipc, Namespace::Uts])
+            .die_with_parent()
+            .ro_bind("/", "/")
+            .tmpfs("/tmp")
+            .tmpfs("/dev/shm");
 
-        let mut cmd = Command::new(bwrap);
-
-        // Namespace isolation.
-        cmd.args(["--unshare-pid", "--unshare-ipc", "--unshare-uts"]);
-
-        // Die when parent (bux) exits.
-        cmd.arg("--die-with-parent");
-
-        // Read-only root bind.
-        cmd.args(["--ro-bind", "/", "/"]);
-
-        // Writable /tmp and /dev/shm.
-        cmd.args(["--tmpfs", "/tmp"]);
-        cmd.args(["--tmpfs", "/dev/shm"]);
-
-        // Writable /dev/kvm if it exists.
         if Path::new("/dev/kvm").exists() {
-            cmd.args(["--dev-bind", "/dev/kvm", "/dev/kvm"]);
+            builder = builder.dev_bind("/dev/kvm", "/dev/kvm");
         }
 
-        // Writable rootfs directory.
         if let Some(rootfs) = &jail.rootfs {
-            let s = rootfs.to_string_lossy();
-            cmd.args(["--bind", &s, &s]);
+            builder = builder.bind(rootfs, rootfs);
         }
-
-        // Writable root disk file.
         if let Some(disk) = &jail.root_disk {
-            let s = disk.to_string_lossy();
-            cmd.args(["--bind", &s, &s]);
+            builder = builder.bind(disk, disk);
         }
 
-        // Writable sockets directory.
-        let socks = jail.socks_dir.to_string_lossy();
-        cmd.args(["--bind", &socks, &socks]);
-
-        // Writable virtiofs host paths.
+        builder = builder.bind(&jail.socks_dir, &jail.socks_dir);
         for path in &jail.virtiofs_paths {
-            let s = path.to_string_lossy();
-            cmd.args(["--bind", &s, &s]);
+            builder = builder.bind(path, path);
         }
+        builder = builder.ro_bind(config_path, config_path);
 
-        // Config file (read-only).
-        let cfg = config_path.to_string_lossy();
-        cmd.args(["--ro-bind", &cfg, &cfg]);
-
-        // Shim binary + its arguments.
-        cmd.arg("--");
-        cmd.arg(shim);
-        cmd.arg(config_path);
-
-        Some(cmd)
+        Some(builder.program(shim).arg(config_path).into_command())
     }
 }

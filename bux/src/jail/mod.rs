@@ -15,26 +15,24 @@ pub(crate) mod checks;
 #[cfg(target_os = "linux")]
 pub mod credentials;
 mod pre_exec;
-#[cfg(target_os = "linux")]
-pub mod seccomp;
 
 #[cfg(target_os = "linux")]
 mod bwrap;
-#[cfg(target_os = "linux")]
-pub mod cgroup;
 #[cfg(target_os = "macos")]
 mod seatbelt;
 
-use std::io;
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-// Re-export platform-specific sandbox implementations.
+pub use bux_cgroup::ResourceLimits;
+
 #[cfg(target_os = "linux")]
 pub use bwrap::BwrapSandbox;
 #[cfg(target_os = "macos")]
 pub(crate) use seatbelt::SeatbeltSandbox;
+
+use crate::Result;
 
 /// Describes the isolation features provided by a [`Sandbox`] implementation.
 #[derive(Debug, Clone, Default)]
@@ -87,18 +85,6 @@ impl Sandbox for NoopSandbox {
     }
 }
 
-/// cgroup v2 resource limits for VM processes.
-#[non_exhaustive]
-#[derive(Debug, Clone, Default)]
-pub struct ResourceLimits {
-    /// Maximum CPU bandwidth as a fraction (e.g. 2.0 = 2 cores).
-    pub cpu_cores: Option<f64>,
-    /// Memory limit in bytes.
-    pub memory_bytes: Option<u64>,
-    /// Memory+swap limit in bytes. Set equal to `memory_bytes` to disable swap.
-    pub memory_swap_bytes: Option<u64>,
-}
-
 /// Sandbox configuration for a single VM spawn.
 #[non_exhaustive]
 #[derive(Debug)]
@@ -136,7 +122,7 @@ pub(crate) struct SpawnResult {
         dead_code,
         reason = "RAII guard: held for lifetime, never read directly"
     )]
-    pub cgroup: Option<cgroup::CgroupGuard>,
+    pub cgroup: Option<bux_cgroup::CgroupGuard>,
 }
 
 /// Spawn `bux-shim` inside a sandbox.
@@ -149,14 +135,13 @@ pub(crate) fn spawn(
     config_path: &Path,
     config: JailConfig,
     vm_id: &str,
-) -> io::Result<SpawnResult> {
+) -> Result<SpawnResult> {
     let mut cmd = build_command(shim, config_path, &config);
     cmd.stdin(Stdio::null());
     if let Some(file) = config.stderr_file {
         cmd.stderr(Stdio::from(file));
     }
 
-    // Pass watchdog FD number to the shim via environment variable.
     if let Some(fd) = config.watchdog_fd {
         cmd.env(crate::watchdog::ENV_WATCHDOG_FD, fd.to_string());
     }
@@ -164,23 +149,13 @@ pub(crate) fn spawn(
     pre_exec::apply(&mut cmd, config.watchdog_fd);
     let child = cmd.spawn()?;
 
-    // vm_id is only used on Linux (cgroup setup).
     let _ = vm_id;
 
-    // Apply cgroup v2 resource limits (Linux only).
     #[cfg(target_os = "linux")]
     let cgroup_guard = if let Some(ref limits) = config.resource_limits {
-        let guard = cgroup::create(
-            vm_id,
-            &cgroup::ResourceLimits {
-                cpu_cores: limits.cpu_cores,
-                memory_bytes: limits.memory_bytes,
-                memory_swap_bytes: limits.memory_swap_bytes,
-            },
-        )
-        .map_err(|e| io::Error::new(e.kind(), format!("cgroup setup failed: {e}")))?;
+        let guard = bux_cgroup::create(vm_id, limits)?;
         #[allow(clippy::cast_possible_wrap, reason = "PID fits in i32")]
-        cgroup::add_pid(&guard, child.id() as i32)?;
+        bux_cgroup::add_pid(&guard, child.id() as i32)?;
         Some(guard)
     } else {
         None

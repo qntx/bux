@@ -1,0 +1,18 @@
+[package]
+name = "bux-seccomp"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure-Rust seccomp BPF syscall filter for the bux VMM shim (L1 platform primitive)"
+keywords = ["seccomp", "bpf", "linux", "sandbox", "syscall"]
+categories = ["os::linux-apis", "virtualization"]
+
+[dependencies]
+thiserror.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
+[lints]
+workspace = true

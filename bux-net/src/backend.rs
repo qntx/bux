@@ -23,6 +23,12 @@ use crate::error::Result;
 pub trait NetworkBackend: Send + Sync + fmt::Debug {
     /// Returns the connection information the VM engine needs to wire
     /// the guest's virtio-net device to this backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend-specific error if the endpoint cannot be
+    /// produced (e.g. the underlying gvproxy instance was not created
+    /// successfully).
     fn endpoint(&self) -> Result<NetworkEndpoint>;
 
     /// Human-readable backend name (e.g. `"gvisor-tap-vsock"`).
@@ -31,6 +37,11 @@ pub trait NetworkBackend: Send + Sync + fmt::Debug {
     /// Optional live network counters.
     ///
     /// Backends that don't support metrics return `Ok(None)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend-specific error if the counters cannot be
+    /// queried from the underlying transport.
     fn metrics(&self) -> Result<Option<NetworkMetrics>> {
         Ok(None)
     }
@@ -46,7 +57,7 @@ pub trait NetworkBackend: Send + Sync + fmt::Debug {
 pub enum NetworkEndpoint {
     /// Connect via a Unix domain socket.
     ///
-    /// Used by gvproxy, passt, libslirp, and socket_vmnet.
+    /// Used by gvproxy, passt, libslirp, and `socket_vmnet`.
     UnixSocket {
         /// Path to the Unix socket.
         path: PathBuf,
@@ -62,9 +73,9 @@ pub enum NetworkEndpoint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ConnectionType {
-    /// `SOCK_STREAM` — passt, socket_vmnet, libslirp, gvproxy on Linux.
+    /// `SOCK_STREAM` — passt, `socket_vmnet`, libslirp, gvproxy on Linux.
     UnixStream,
-    /// `SOCK_DGRAM` — gvproxy on macOS (VFKit protocol).
+    /// `SOCK_DGRAM` — gvproxy on macOS (`VFKit` protocol).
     UnixDgram,
 }
 
@@ -85,7 +96,8 @@ pub struct NetworkConfig {
 
 impl NetworkConfig {
     /// Creates a new configuration.
-    pub fn new(port_mappings: Vec<(u16, u16)>, socket_path: PathBuf) -> Self {
+    #[must_use]
+    pub const fn new(port_mappings: Vec<(u16, u16)>, socket_path: PathBuf) -> Self {
         Self {
             port_mappings,
             socket_path,
