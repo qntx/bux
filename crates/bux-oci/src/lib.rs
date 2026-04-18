@@ -190,7 +190,7 @@ impl Oci {
     /// Returns a cached [`PullResult`] if already present, otherwise pulls.
     ///
     /// This is the preferred entry point for `bux run <image>` — instant when
-    /// cached. Uses [`rootfs_complete`](Store::rootfs_complete) to verify the
+    /// cached. Uses the private `rootfs_complete` check to verify the
     /// extraction finished successfully (crash-safe).
     /// # Errors
     ///

@@ -16,8 +16,8 @@ static EXEC_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Handles an exec connection: spawns a child, multiplexes I/O until exit.
 pub async fn handle(
-    r: &mut (impl AsyncRead + Unpin),
-    w: &mut (impl AsyncWrite + Unpin),
+    r: &mut (impl AsyncRead + Unpin + Send),
+    w: &mut (impl AsyncWrite + Unpin + Send),
     req: ExecStart,
 ) -> io::Result<()> {
     let exec_id = format!("exec-{}", EXEC_SEQ.fetch_add(1, Ordering::Relaxed));
@@ -32,8 +32,8 @@ pub async fn handle(
 
 /// Pipe-mode execution: stdout and stderr are separate streams.
 async fn handle_pipe(
-    r: &mut (impl AsyncRead + Unpin),
-    w: &mut (impl AsyncWrite + Unpin),
+    r: &mut (impl AsyncRead + Unpin + Send),
+    w: &mut (impl AsyncWrite + Unpin + Send),
     req: ExecStart,
     exec_id: &str,
     spawn_t0: Instant,
@@ -152,8 +152,8 @@ async fn handle_pipe(
 
 /// PTY-mode execution: stdout and stderr are merged into a single PTY stream.
 async fn handle_pty(
-    r: &mut (impl AsyncRead + Unpin),
-    w: &mut (impl AsyncWrite + Unpin),
+    r: &mut (impl AsyncRead + Unpin + Send),
+    w: &mut (impl AsyncWrite + Unpin + Send),
     req: ExecStart,
     exec_id: &str,
     spawn_t0: Instant,
@@ -229,7 +229,7 @@ async fn handle_pty(
 
 /// Waits for a `tokio::process::Child` and sends `ExecOut::Exit`.
 async fn send_exit(
-    w: &mut (impl AsyncWrite + Unpin),
+    w: &mut (impl AsyncWrite + Unpin + Send),
     child: &mut tokio::process::Child,
     spawn_t0: Instant,
     timed_out: &AtomicBool,
@@ -256,7 +256,7 @@ async fn send_exit(
 
 /// Waits for a process by PID (PTY mode) and sends `ExecOut::Exit`.
 async fn send_exit_by_pid(
-    w: &mut (impl AsyncWrite + Unpin),
+    w: &mut (impl AsyncWrite + Unpin + Send),
     pid: i32,
     spawn_t0: Instant,
     timed_out: &AtomicBool,

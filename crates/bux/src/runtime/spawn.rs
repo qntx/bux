@@ -167,7 +167,11 @@ pub(super) fn spawn_shim(
 
     let result = jail::spawn(&shim, config_path, jail_config, vm_id).map_err(|e| {
         drop(fs::remove_file(config_path));
-        io::Error::new(e.kind(), format!("failed to spawn {}: {e}", shim.display()))
+        let kind = match &e {
+            crate::Error::Io(io_err) => io_err.kind(),
+            _ => io::ErrorKind::Other,
+        };
+        io::Error::new(kind, format!("failed to spawn {}: {e}", shim.display()))
     })?;
 
     #[allow(

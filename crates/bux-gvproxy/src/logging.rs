@@ -22,6 +22,10 @@ use std::sync::Once;
 ///
 /// This is `extern "C"` and called from Go — it must not panic.
 /// The `message` pointer is guaranteed valid and null-terminated by Go.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "tracing::*! macros expand into per-level fast-path branches; the apparent complexity is fully inside the macro, not this function"
+)]
 extern "C" fn log_callback(level: c_int, message: *const c_char) {
     if message.is_null() {
         return;

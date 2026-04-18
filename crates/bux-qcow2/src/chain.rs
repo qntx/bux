@@ -59,7 +59,9 @@ pub fn read_backing_file(path: &Path) -> Result<Option<String>> {
     let mut buf = vec![0u8; bf_size];
     file.read_exact(&mut buf)?;
 
-    String::from_utf8(buf).map(Some).map_err(|_| Error::InvalidUtf8)
+    String::from_utf8(buf)
+        .map(Some)
+        .map_err(|_| Error::InvalidUtf8)
 }
 
 /// Walk the full backing chain starting at `path`, using

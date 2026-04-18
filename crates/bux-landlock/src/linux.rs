@@ -87,23 +87,35 @@ pub(crate) fn build(r: &PathRestrictions) -> Result<Option<RawFd>> {
 /// # Returns
 ///
 /// `0` on success, or a positive `errno` value on failure.
+#[allow(
+    clippy::multiple_unsafe_ops_per_block,
+    reason = "async-signal-safe path: errno deref + close on the same fd counted as two ops by clippy but each is minimal"
+)]
 pub(crate) unsafe fn restrict_self_raw(fd: RawFd) -> i32 {
     // PR_SET_NO_NEW_PRIVS is required before landlock_restrict_self
     // succeeds on an unprivileged process; bwrap may have set it
     // already, but prctl is idempotent.
     // SAFETY: prctl with PR_SET_NO_NEW_PRIVS takes only an integer arg.
-    let ret = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
-    if ret != 0 {
+    let prctl_rc = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    if prctl_rc != 0 {
         // SAFETY: errno is thread-local.
         let errno = unsafe { *libc::__errno_location() };
         // SAFETY: fd came from the caller who owns it.
-        unsafe { libc::close(fd) };
+        unsafe {
+            libc::close(fd);
+        }
         return errno;
     }
 
     // SAFETY: fd is a valid Landlock ruleset fd; flags must be 0.
-    let ret = unsafe { libc::syscall(libc::SYS_landlock_restrict_self, fd as libc::c_long, 0_i64) };
-    let errno = if ret == 0 {
+    let syscall_rc = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_restrict_self,
+            libc::c_long::from(fd),
+            0_i64,
+        )
+    };
+    let errno = if syscall_rc == 0 {
         0
     } else {
         // SAFETY: errno is thread-local.
@@ -111,7 +123,9 @@ pub(crate) unsafe fn restrict_self_raw(fd: RawFd) -> i32 {
     };
 
     // SAFETY: fd is no longer needed after restrict_self; close unconditionally.
-    unsafe { libc::close(fd) };
+    unsafe {
+        libc::close(fd);
+    }
     errno
 }
 
@@ -119,7 +133,7 @@ pub(crate) unsafe fn restrict_self_raw(fd: RawFd) -> i32 {
 pub(crate) fn is_available() -> bool {
     Ruleset::default()
         .handle_access(AccessFs::Execute)
-        .and_then(|r| r.create())
+        .and_then(Ruleset::create)
         .is_ok()
 }
 

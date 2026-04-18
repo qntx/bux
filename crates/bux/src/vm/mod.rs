@@ -6,8 +6,6 @@ pub use builder::VmBuilder;
 
 use bux_krun::{Feature, KernelFormat, LogStyle, Result, SyncMode, ctx as sys};
 
-use crate::log_level::LogLevel;
-
 /// A configured micro-VM ready to start.
 ///
 /// Created via [`Vm::builder()`]. The underlying libkrun context is

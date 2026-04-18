@@ -86,7 +86,7 @@ pub struct ExecArgs {
     #[arg(short = 'w', long)]
     pub workdir: Option<String>,
 
-    /// User (format: uid[:gid]).
+    /// User (format: `uid[:gid]`).
     #[arg(short = 'u', long = "user")]
     pub user: Option<String>,
 

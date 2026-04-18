@@ -18,8 +18,8 @@ static FROZEN_MOUNTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 /// Handles a control connection: loops reading requests until EOF.
 pub async fn handle(
-    r: &mut (impl AsyncRead + Unpin),
-    w: &mut (impl AsyncWrite + Unpin),
+    r: &mut (impl AsyncRead + Unpin + Send),
+    w: &mut (impl AsyncWrite + Unpin + Send),
 ) -> io::Result<()> {
     loop {
         let req: ControlReq = match bux_proto::recv(r).await {

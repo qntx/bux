@@ -13,7 +13,7 @@
 
 pub(crate) mod checks;
 #[cfg(target_os = "linux")]
-pub mod credentials;
+pub(crate) mod credentials;
 mod pre_exec;
 
 #[cfg(target_os = "linux")]
@@ -28,7 +28,7 @@ use std::process::{Child, Command, Stdio};
 pub use bux_cgroup::ResourceLimits;
 
 #[cfg(target_os = "linux")]
-pub use bwrap::BwrapSandbox;
+pub(crate) use bwrap::BwrapSandbox;
 #[cfg(target_os = "macos")]
 pub(crate) use seatbelt::SeatbeltSandbox;
 

@@ -76,14 +76,11 @@ pub fn install(program: &[Instruction]) -> Result<()> {
         unsafe_code,
         reason = "seccomp requires raw prctl/syscall — the only unsafe in this crate"
     )]
-    // SAFETY: `libc::prctl` with PR_SET_NO_NEW_PRIVS(38) takes an integer
-    // second argument; remaining three are ignored (passed as 0). The
-    // seccomp syscall reads `sock_fprog` for exactly `len * 8` bytes from
-    // `filter`, which we guarantee by backing it with the `program` slice
-    // that outlives this unsafe block.
-    unsafe {
-        let rc = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-        if rc != 0 {
+    {
+        // SAFETY: PR_SET_NO_NEW_PRIVS(38) takes one integer arg; the other
+        // three are ignored by the kernel.
+        let prctl_rc = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+        if prctl_rc != 0 {
             return Err(Error::NoNewPrivs(io::Error::last_os_error()));
         }
 
@@ -91,16 +88,20 @@ pub fn install(program: &[Instruction]) -> Result<()> {
             len: filter_len,
             filter: program.as_ptr(),
         };
-        let rc = libc::syscall(
-            libc::SYS_seccomp,
-            libc::SECCOMP_SET_MODE_FILTER,
-            libc::SECCOMP_FILTER_FLAG_TSYNC,
-            &raw const prog,
-        );
-        if rc > 0 {
-            return Err(Error::TsyncFailed(rc));
+        // SAFETY: the kernel reads exactly `len * 8` bytes from `filter`,
+        // backed by `program`, which outlives this call.
+        let syscall_rc = unsafe {
+            libc::syscall(
+                libc::SYS_seccomp,
+                libc::SECCOMP_SET_MODE_FILTER,
+                libc::SECCOMP_FILTER_FLAG_TSYNC,
+                &raw const prog,
+            )
+        };
+        if syscall_rc > 0 {
+            return Err(Error::TsyncFailed(syscall_rc));
         }
-        if rc != 0 {
+        if syscall_rc != 0 {
             return Err(Error::Install(io::Error::last_os_error()));
         }
     }

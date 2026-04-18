@@ -68,6 +68,10 @@
 //! [Landlock]: https://docs.kernel.org/userspace-api/landlock.html
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![allow(
+    unsafe_code,
+    reason = "L1 LSM wrapper — restrict_self is fundamentally unsafe (revokes caller thread rights permanently); safety contract documented on the function"
+)]
 
 mod error;
 mod restrictions;
@@ -123,6 +127,7 @@ impl PathRestrictions {
 ///
 /// `0` on success, positive `errno` otherwise.
 #[cfg(target_os = "linux")]
+#[must_use = "non-zero errno indicates the ruleset was NOT applied; callers must propagate the failure"]
 pub unsafe fn restrict_self(fd: RawFd) -> i32 {
     // SAFETY: Forwarded to the linux-only helper; same contract.
     unsafe { linux::restrict_self_raw(fd) }

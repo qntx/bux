@@ -73,7 +73,11 @@ mod vm;
 #[cfg(unix)]
 pub mod watchdog;
 
+#[cfg(unix)]
+pub use bux_krun::{Feature, KernelFormat, LogStyle, SyncMode};
 pub use bux_proto::ExecStart;
+#[cfg(target_os = "linux")]
+pub use bux_seccomp::Error as SeccompError;
 #[cfg(unix)]
 pub use client::{Client, ExecHandle, ExecOutput, PongInfo};
 pub use disk::DiskFormat;
@@ -90,10 +94,9 @@ pub use health::{HealthCheckConfig, HealthCheckHandle};
 pub use jail::checks::{HostCapabilities, audit_isolation, check_guest_binary, check_host};
 #[cfg(target_os = "linux")]
 pub use jail::credentials::CredentialConfig;
-#[cfg(target_os = "linux")]
-pub use bux_seccomp::Error as SeccompError;
 #[cfg(unix)]
 pub use jail::{JailConfig, NoopSandbox, ResourceLimits, Sandbox, SandboxCapabilities};
+pub use log_level::{LogLevel, ParseLogLevelError};
 pub use metrics::{BoxMetrics, RuntimeMetrics};
 #[cfg(unix)]
 pub use runtime::{HealthStatus, RunOptions, Runtime, VmHandle, default_data_dir};
@@ -102,8 +105,5 @@ pub use snapshot::{SnapshotInfo, SnapshotManager};
 #[cfg(unix)]
 pub use state::{BaseDiskRow, QuotaRow, SnapshotRow, StateDb};
 pub use state::{HealthState, Status, VirtioFs, VmConfig, VmState, VsockPort};
-#[cfg(unix)]
-pub use bux_krun::{Feature, KernelFormat, LogStyle, SyncMode};
-pub use log_level::{LogLevel, ParseLogLevelError};
 #[cfg(unix)]
 pub use vm::{Vm, VmBuilder};

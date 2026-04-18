@@ -222,17 +222,14 @@ fn create_versioned_symlinks(dir: &Path, target: &str) {
     for (src, link) in &pairs {
         let src_path = dir.join(src);
         let link_path = dir.join(link);
-        if src_path.exists() && !link_path.exists() {
-            #[cfg(unix)]
-            {
-                std::os::unix::fs::symlink(src, &link_path).unwrap_or_else(|e| {
-                    eprintln!("bux-krun: warning: failed to create symlink {link}: {e}");
-                });
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = fs::copy(&src_path, &link_path);
-            }
+        if !src_path.exists() || link_path.exists() {
+            continue;
         }
+        #[cfg(unix)]
+        if let Err(e) = std::os::unix::fs::symlink(src, &link_path) {
+            eprintln!("bux-krun: warning: failed to create symlink {link}: {e}");
+        }
+        #[cfg(not(unix))]
+        let _ = fs::copy(&src_path, &link_path);
     }
 }

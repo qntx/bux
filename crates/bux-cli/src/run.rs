@@ -65,7 +65,7 @@ pub struct RunArgs {
     #[arg(short = 'p', long = "publish")]
     publish: Vec<String>,
 
-    /// Bind mount a volume (format: hostPath:guestPath[:ro]).
+    /// Bind mount a volume (format: `hostPath:guestPath[:ro]`).
     #[arg(short = 'v', long = "volume")]
     volume: Vec<String>,
 
@@ -77,7 +77,7 @@ pub struct RunArgs {
     #[arg(long)]
     env_file: Vec<String>,
 
-    /// User inside the VM (format: uid[:gid]).
+    /// User inside the VM (format: `uid[:gid]`).
     #[arg(short = 'u', long = "user")]
     user: Option<String>,
 

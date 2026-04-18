@@ -336,9 +336,7 @@ fn open_chain(path: &Path) -> Result<Vec<Layer>> {
         file.read_exact(&mut l1_buf)?;
         let l1_table: Vec<u64> = l1_buf
             .chunks_exact(8)
-            .map(|c| {
-                u64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
-            })
+            .map(|c| u64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
             .collect();
 
         let backing = if bf_offset != 0 && bf_size != 0 {

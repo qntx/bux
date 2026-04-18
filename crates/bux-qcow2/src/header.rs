@@ -17,8 +17,8 @@ use std::path::Path;
 
 use crate::error::{Error, Result};
 use crate::format::{
-    BackingFormat, CLUSTER_SIZE, EXT_BACKING_FMT, EXT_END, HEADER_LENGTH, MAGIC,
-    MIN_HEADER_BYTES, align8, read_be_u32, read_be_u64,
+    BackingFormat, CLUSTER_SIZE, EXT_BACKING_FMT, EXT_END, HEADER_LENGTH, MAGIC, MIN_HEADER_BYTES,
+    align8, read_be_u32, read_be_u64,
 };
 
 /// Parsed QCOW2 header.
@@ -135,9 +135,7 @@ pub fn read_header(path: &Path) -> Result<Header> {
     } else {
         None
     };
-    let backing_format = backing_format_raw
-        .as_deref()
-        .and_then(BackingFormat::parse);
+    let backing_format = backing_format_raw.as_deref().and_then(BackingFormat::parse);
 
     Ok(Header {
         version,
@@ -185,7 +183,11 @@ fn parse_backing_file(
     clippy::indexing_slicing,
     reason = "every slice is preceded by an explicit bounds check"
 )]
-fn parse_backing_format_extension(buf: &[u8], start: usize, limit: usize) -> Result<Option<String>> {
+fn parse_backing_format_extension(
+    buf: &[u8],
+    start: usize,
+    limit: usize,
+) -> Result<Option<String>> {
     let mut off = start;
     while off + 8 <= limit {
         let ext_type = read_be_u32(buf, off);

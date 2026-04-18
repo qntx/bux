@@ -142,8 +142,9 @@ fn main() {
     #[cfg(target_os = "linux")]
     {
         let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+        // x86_64 and any unknown arch share the same fallback library
+        // path, so a single wildcard arm is sufficient.
         let gnu_triple = match arch.as_str() {
-            "x86_64" => "x86_64-linux-gnu",
             "aarch64" => "aarch64-linux-gnu",
             _ => "x86_64-linux-gnu",
         };

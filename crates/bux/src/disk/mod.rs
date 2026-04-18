@@ -420,6 +420,10 @@ impl DiskManager {
     pub fn check_space(&self, needed_bytes: u64) -> io::Result<()> {
         let stat = nix::sys::statvfs::statvfs(&self.bases_dir)?;
         let frag = stat.fragment_size();
+        #[allow(
+            clippy::useless_conversion,
+            reason = "fsblkcnt_t is u32 on macOS but u64 on Linux; explicit conversion keeps code portable"
+        )]
         let blocks: u64 = stat.blocks_available().into();
         let available = frag * blocks;
         if available < needed_bytes {
@@ -455,7 +459,11 @@ fn dir_size(dir: &Path) -> io::Result<u64> {
 }
 
 #[cfg(unix)]
-#[allow(clippy::missing_docs_in_private_items, reason = "internal helper")]
+#[allow(
+    dead_code,
+    clippy::missing_docs_in_private_items,
+    reason = "internal helper reserved for sandbox ro-path wiring (wired up in a later phase)"
+)]
 pub(crate) fn readonly_disk_paths(path: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for backing in bux_qcow2::read_backing_chain(path) {

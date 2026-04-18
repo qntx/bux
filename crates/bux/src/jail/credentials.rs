@@ -15,6 +15,17 @@
 //! ```
 
 #![cfg(target_os = "linux")]
+#![allow(
+    unsafe_code,
+    dead_code,
+    unreachable_pub,
+    trivial_casts,
+    clippy::undocumented_unsafe_blocks,
+    clippy::multiple_unsafe_ops_per_block,
+    clippy::borrow_as_ptr,
+    clippy::ref_as_ptr,
+    reason = "credentials module wraps raw uid/gid/capabilities syscalls; entry points may be conditionally unused when shim-side credential reduction is disabled at build time"
+)]
 
 use std::io;
 

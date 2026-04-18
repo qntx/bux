@@ -130,13 +130,7 @@ fn read_backing_file_none_for_standalone() {
     fs::write(&base, vec![0u8; 1024]).unwrap();
 
     let path = dir.path().join("ovl.qcow2");
-    create_overlay(
-        &path,
-        &base.to_string_lossy(),
-        BackingFormat::Raw,
-        1 << 30,
-    )
-    .unwrap();
+    create_overlay(&path, &base.to_string_lossy(), BackingFormat::Raw, 1 << 30).unwrap();
 
     let flat = dir.path().join("flat.qcow2");
     flatten(&path, &flat).unwrap();
@@ -179,13 +173,7 @@ fn read_backing_chain_respects_depth_cap() {
     fs::write(&base, vec![0u8; 1024]).unwrap();
 
     let layer1 = dir.path().join("l1.qcow2");
-    create_overlay(
-        &layer1,
-        &base.to_string_lossy(),
-        BackingFormat::Raw,
-        1024,
-    )
-    .unwrap();
+    create_overlay(&layer1, &base.to_string_lossy(), BackingFormat::Raw, 1024).unwrap();
 
     let layer2 = dir.path().join("l2.qcow2");
     create_overlay(

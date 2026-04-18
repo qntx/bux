@@ -6,7 +6,11 @@
 //! 2. **FD cleanup** — close all inherited file descriptors ≥ 3, except for
 //!    an optionally preserved FD (used by the watchdog pipe).
 
-#![allow(unsafe_code, reason = "pre_exec requires unsafe for fork/exec safety")]
+#![allow(
+    unsafe_code,
+    clippy::multiple_unsafe_ops_per_block,
+    reason = "pre_exec runs between fork and exec where allocation / external calls are prohibited; clippy's 'one unsafe op per block' rule fights async-signal-safety here"
+)]
 
 use std::process::Command;
 

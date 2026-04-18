@@ -7,6 +7,12 @@ use std::io;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+#[allow(
+    unused_imports,
+    reason = "intra-doc links to Upload/Download variants need these in scope"
+)]
+use crate::{Download, Upload};
+
 /// Maximum allowed frame payload (16 MiB).
 const MAX_FRAME: u32 = 16 * 1024 * 1024;
 

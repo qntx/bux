@@ -63,7 +63,10 @@ fn main() {
 
     let builder = bux::VmBuilder::from_config(&config);
 
-    match builder.build().and_then(bux::Vm::start) {
+    match builder
+        .build()
+        .and_then(|vm| vm.start().map_err(Into::into))
+    {
         Ok(()) => unreachable!(),
         Err(e) => {
             write_exit_error(&exit_path, &format!("VM start failed: {e}"));

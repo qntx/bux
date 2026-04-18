@@ -16,7 +16,7 @@ use super::{JailConfig, Sandbox};
 /// Provides namespace isolation (PID/IPC/UTS/mount), a read-only root
 /// bind, and selective writable mounts for VM resources.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct BwrapSandbox;
+pub(crate) struct BwrapSandbox;
 
 impl Sandbox for BwrapSandbox {
     fn wrap(&self, shim: &Path, config_path: &Path, jail: &JailConfig) -> Option<Command> {

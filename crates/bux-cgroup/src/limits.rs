@@ -54,9 +54,7 @@ impl ResourceLimits {
     /// Returns `true` if no limits are set (cgroup creation is a no-op).
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.cpu_cores.is_none()
-            && self.memory_bytes.is_none()
-            && self.memory_swap_bytes.is_none()
+        self.cpu_cores.is_none() && self.memory_bytes.is_none() && self.memory_swap_bytes.is_none()
     }
 }
 
@@ -125,12 +123,7 @@ mod tests {
     #[test]
     fn is_empty_detects_any_set_field() {
         assert!(!ResourceLimits::builder().cpu_cores(1.0).build().is_empty());
-        assert!(
-            !ResourceLimits::builder()
-                .memory_bytes(1)
-                .build()
-                .is_empty()
-        );
+        assert!(!ResourceLimits::builder().memory_bytes(1).build().is_empty());
         assert!(
             !ResourceLimits::builder()
                 .memory_swap_bytes(1)

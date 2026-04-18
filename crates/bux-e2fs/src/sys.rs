@@ -1,4 +1,4 @@
-//! Raw FFI bindings to [`libext2fs`] and [`create_inode`].
+//! Raw FFI bindings to [`libext2fs`] and `create_inode`.
 //!
 //! All types and functions are **auto-generated** by [`bindgen`](https://docs.rs/bindgen)
 //! from the e2fsprogs headers. Do not edit `bindings.rs` manually.

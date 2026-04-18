@@ -11,7 +11,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Streams a file's contents back as [`Download`] chunks.
-pub async fn handle_read(w: &mut (impl AsyncWrite + Unpin), path: &str) -> io::Result<()> {
+pub async fn handle_read(w: &mut (impl AsyncWrite + Unpin + Send), path: &str) -> io::Result<()> {
     let mut file = match tokio::fs::File::open(path).await {
         Ok(f) => f,
         Err(e) => {
@@ -28,8 +28,8 @@ pub async fn handle_read(w: &mut (impl AsyncWrite + Unpin), path: &str) -> io::R
 
 /// Receives chunked data from the host and writes it to a file with the given mode.
 pub async fn handle_write(
-    r: &mut (impl AsyncRead + Unpin),
-    w: &mut (impl AsyncWrite + Unpin),
+    r: &mut (impl AsyncRead + Unpin + Send),
+    w: &mut (impl AsyncWrite + Unpin + Send),
     path: &str,
     mode: u32,
 ) -> io::Result<()> {
@@ -75,8 +75,8 @@ pub async fn handle_write(
 ///
 /// Validates each entry to reject path-traversal attacks.
 pub async fn handle_copy_in(
-    r: &mut (impl AsyncRead + Unpin),
-    w: &mut (impl AsyncWrite + Unpin),
+    r: &mut (impl AsyncRead + Unpin + Send),
+    w: &mut (impl AsyncWrite + Unpin + Send),
     dest: &str,
 ) -> io::Result<()> {
     let temp_path = match recv_upload_to_file(r).await {
@@ -136,7 +136,7 @@ pub async fn handle_copy_in(
 
 /// Packs a path into a tar archive and streams it as [`Download`] chunks.
 pub async fn handle_copy_out(
-    w: &mut (impl AsyncWrite + Unpin),
+    w: &mut (impl AsyncWrite + Unpin + Send),
     path: &str,
     follow_symlinks: bool,
 ) -> io::Result<()> {
@@ -187,11 +187,13 @@ pub async fn handle_copy_out(
     }
 }
 
-/// Receives [`Upload`] chunks and streams them directly to a temp file.
+/// Receives `Upload` chunks and streams them directly to a temp file.
 ///
 /// Uses `recv_upload_to_writer` so memory usage is O(chunk_size) regardless
 /// of total upload size.
-async fn recv_upload_to_file(r: &mut (impl AsyncRead + Unpin)) -> io::Result<std::path::PathBuf> {
+async fn recv_upload_to_file(
+    r: &mut (impl AsyncRead + Unpin + Send),
+) -> io::Result<std::path::PathBuf> {
     let temp_path = temp_file_path("upload");
     let mut file = tokio::fs::File::create(&temp_path).await?;
     match bux_proto::recv_upload_to_writer(r, &mut file, bux_proto::MAX_UPLOAD_BYTES).await {
