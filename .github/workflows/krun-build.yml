@@ -11,7 +11,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Pin native library versions — keep in sync with bux-krun/build.rs HEADER_URL.
+  # Pin native library versions — keep in sync with crates/bux-krun/build.rs HEADER_URL.
   LIBKRUN_VERSION: "1.17.4"
   LIBKRUNFW_VERSION: "5.2.1"
 

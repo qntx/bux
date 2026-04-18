@@ -11,7 +11,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Pin bubblewrap version — keep in sync with bux-bwrap/build.rs.
+  # Pin bubblewrap version — keep in sync with crates/bux-bwrap/build.rs.
   BUBBLEWRAP_VERSION: "0.11.0"
 
 jobs:

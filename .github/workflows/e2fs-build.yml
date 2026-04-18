@@ -11,7 +11,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Pin e2fsprogs version — keep in sync with bux-e2fs/build.rs.
+  # Pin e2fsprogs version — keep in sync with crates/bux-e2fs/build.rs.
   E2FSPROGS_VERSION: "1.47.1"
 
 jobs:

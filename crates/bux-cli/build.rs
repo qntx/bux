@@ -91,6 +91,7 @@ fn find_guest_binary(guest_target: &str, profile: &str) -> Option<PathBuf> {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").ok()?);
     let workspace_target = manifest_dir
         .parent()?
+        .parent()?
         .join("target")
         .join(guest_target)
         .join(profile)

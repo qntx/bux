@@ -1,21 +1,6 @@
 [workspace]
-members = [
-    "bux",
-    "bux-bwrap",
-    "bux-cgroup",
-    "bux-cli",
-    "bux-e2fs",
-    "bux-guest",
-    "bux-gvproxy",
-    "bux-krun",
-    "bux-landlock",
-    "bux-net",
-    "bux-oci",
-    "bux-proto",
-    "bux-qcow2",
-    "bux-seccomp",
-]
-default-members = ["bux"]
+members = ["crates/*"]
+default-members = ["crates/bux"]
 resolver = "3"
 
 [workspace.package]
@@ -25,19 +10,19 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/qntx/bux"
 
 [workspace.dependencies]
-bux = { version = "0.7", path = "bux" }
-bux-oci = { version = "0.7", path = "bux-oci" }
-bux-proto = { version = "0.7", path = "bux-proto" }
+bux = { version = "0.7", path = "crates/bux" }
+bux-oci = { version = "0.7", path = "crates/bux-oci" }
+bux-proto = { version = "0.7", path = "crates/bux-proto" }
 
-bux-bwrap = { version = "0.1", path = "bux-bwrap" }
-bux-cgroup = { version = "0.1", path = "bux-cgroup" }
-bux-krun = { version = "0.1", path = "bux-krun" }
-bux-e2fs = { version = "0.1.5", path = "bux-e2fs" }
-bux-gvproxy = { version = "0.1", path = "bux-gvproxy" }
-bux-landlock = { version = "0.1", path = "bux-landlock" }
-bux-net = { version = "0.1", path = "bux-net" }
-bux-qcow2 = { version = "0.1", path = "bux-qcow2" }
-bux-seccomp = { version = "0.1", path = "bux-seccomp" }
+bux-bwrap = { version = "0.1", path = "crates/bux-bwrap" }
+bux-cgroup = { version = "0.1", path = "crates/bux-cgroup" }
+bux-krun = { version = "0.1", path = "crates/bux-krun" }
+bux-e2fs = { version = "0.1.5", path = "crates/bux-e2fs" }
+bux-gvproxy = { version = "0.1", path = "crates/bux-gvproxy" }
+bux-landlock = { version = "0.1", path = "crates/bux-landlock" }
+bux-net = { version = "0.1", path = "crates/bux-net" }
+bux-qcow2 = { version = "0.1", path = "crates/bux-qcow2" }
+bux-seccomp = { version = "0.1", path = "crates/bux-seccomp" }
 
 anyhow = "1.0.102"
 clap = { version = "4.6.1", features = ["derive"] }
