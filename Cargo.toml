@@ -26,7 +26,7 @@ bux-seccomp = { version = "0.1", path = "crates/bux-seccomp" }
 
 anyhow = "1.0.102"
 clap = { version = "4.6.1", features = ["derive"] }
-clap_complete = "4.6.2"
+clap_complete = "4.6.4"
 colored = "3.1.1"
 dirs = "6.0.0"
 oci-client = { version = "0.16.1", default-features = false, features = ["rustls-tls"] }
