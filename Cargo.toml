@@ -43,7 +43,7 @@ rusqlite = { version = "0.39.0", features = ["bundled"] }
 tokio-vsock = "0.7.2"
 bindgen = "0.72.1"
 flate2 = "1.1.9"
-tar = "0.4.45"
+tar = "0.4.46"
 ureq = "3.3.0"
 signal-hook = "0.4.4"
 tracing = "0.1.44"
