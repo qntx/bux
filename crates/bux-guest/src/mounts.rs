@@ -62,9 +62,9 @@ const SKIP_FS_TYPES: &[&str] = &[
 //   #define FIFREEZE  _IOWR('X', 119, int)  = 0xC0045877
 //   #define FITHAW    _IOWR('X', 120, int)  = 0xC0045878
 /// `FIFREEZE` ioctl — flush dirty pages and block new writes.
-const FIFREEZE: libc::c_ulong = 0xC004_5877;
+const FIFREEZE: libc::Ioctl = 0xC004_5877_u64 as libc::Ioctl;
 /// `FITHAW` ioctl — unblock writes on a frozen filesystem.
-const FITHAW: libc::c_ulong = 0xC004_5878;
+const FITHAW: libc::Ioctl = 0xC004_5878_u64 as libc::Ioctl;
 
 /// Sets up minimal network configuration so DNS resolution works.
 ///
