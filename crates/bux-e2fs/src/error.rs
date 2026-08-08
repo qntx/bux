@@ -64,6 +64,7 @@ fn describe_ext2fs_error(code: i64) -> String {
         25 => "short read".into(),
         26 => "short write".into(),
         28 => "filesystem too large".into(),
+        79 => "directory already exists".into(),
         85 => "journal too small".into(),
         _ => format!("libext2fs error {code:#x}"),
     }
