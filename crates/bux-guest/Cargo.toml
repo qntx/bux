@@ -17,7 +17,7 @@ libc = { workspace = true }
 libcontainer = { version = "0.6", default-features = false, features = ["v2"] }
 nix = { workspace = true }
 oci-spec = "0.9"
-rtnetlink = "0.14"
+rtnetlink = "0.22"
 serde_json = { workspace = true }
 tar = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "io-util", "process", "fs", "time", "sync", "signal"] }
