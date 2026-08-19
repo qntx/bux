@@ -1,12 +1,20 @@
 # Makefile for Rust project using Cargo
 
-.PHONY: all build check run test bench clippy clippy-fix fmt doc update
+.PHONY: all build check run test bench clippy clippy-fix fmt doc update sign
 
 all: fmt clippy-fix
 
 # Build the project with all features enabled in release mode
 build:
 	cargo build --workspace --release --all-features
+	@$(MAKE) --no-print-directory sign
+
+# macOS: sign bux-shim with the hypervisor entitlement (rebuilds invalidate it); no-op on Linux.
+sign:
+ifeq ($(shell uname -s),Darwin)
+	codesign --entitlements crates/bux-shim/bux-shim.entitlements \
+		-s - --force target/release/bux-shim
+endif
 
 # Check the project for compilation errors without producing binaries
 check:

@@ -96,9 +96,15 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu libcap-ng-dev:arm64
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
 
-      - run: cargo build --release --target ${{ matrix.target }} -p bux-cli
+      - run: cargo build --release --target ${{ matrix.target }} -p bux-cli -p bux-shim
         env:
           BUX_GUEST_DIR: ${{ github.workspace }}/.guest
+
+      - name: Sign bux-shim (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          codesign --entitlements crates/bux-shim/bux-shim.entitlements \
+            -s - --force "target/${{ matrix.target }}/release/bux-shim"
 
       - name: Package
         shell: bash
@@ -116,7 +122,8 @@ jobs:
           esac
 
           mkdir "$staging"
-          cp "target/$target/release/$bin" LICENSE-MIT LICENSE-APACHE "$staging/"
+          cp "target/$target/release/$bin" "target/$target/release/bux-shim" \
+             LICENSE-MIT LICENSE-APACHE "$staging/"
           if [ -n "$guest_target" ]; then
             if [ -f "target/$target/release/bux-guest-$guest_target" ]; then
               cp "target/$target/release/bux-guest-$guest_target" "$staging/"
