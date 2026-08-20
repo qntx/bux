@@ -76,7 +76,8 @@ fn generate_profile(shim: &Path, config_path: &Path, config: &JailConfig) -> Str
     p.push_str("  (literal \"/dev/random\")\n");
     p.push_str(")\n\n");
 
-    p.push_str("(allow file-write*\n");
+    // Allow read+write to temp directories.
+    p.push_str("(allow file-read* file-write*\n");
     p.push_str("  (subpath \"/private/tmp\")\n");
     p.push_str("  (subpath \"/private/var/tmp\")\n");
     p.push_str("  (subpath \"/private/var/folders\")\n");
