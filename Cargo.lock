@@ -309,7 +309,7 @@ dependencies = [
  "libc",
  "libcontainer",
  "nix 0.31.3",
- "oci-spec",
+ "oci-spec 0.10.0",
  "rtnetlink",
  "serde_json",
  "tar",
@@ -1604,7 +1604,7 @@ checksum = "ff828a1e0ab31b46ebefd1e8e231b7572dec6f663d17ecee1bee42a565649672"
 dependencies = [
  "fixedbitset",
  "nix 0.29.0",
- "oci-spec",
+ "oci-spec 0.9.0",
  "pathrs",
  "procfs",
  "serde",
@@ -1628,7 +1628,7 @@ dependencies = [
  "netlink-packet-route 0.26.0",
  "netlink-sys",
  "nix 0.29.0",
- "oci-spec",
+ "oci-spec 0.9.0",
  "pathrs",
  "prctl",
  "procfs",
@@ -1941,7 +1941,7 @@ dependencies = [
  "http-auth",
  "jsonwebtoken",
  "lazy_static",
- "oci-spec",
+ "oci-spec 0.9.0",
  "olpc-cjson",
  "regex",
  "reqwest",
@@ -1959,6 +1959,23 @@ name = "oci-spec"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8445a2631507cec628a15fdd6154b54a3ab3f20ed4fe9d73a3b8b7a4e1ba03a"
+dependencies = [
+ "const_format",
+ "derive_builder",
+ "getset",
+ "regex",
+ "serde",
+ "serde_json",
+ "strum",
+ "strum_macros",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "oci-spec"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3df6f876ad774d6a676f7e968f5c3edacc32f90e65fe680a8b686235396556fb"
 dependencies = [
  "const_format",
  "derive_builder",
