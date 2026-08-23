@@ -129,6 +129,12 @@ fn generate_profile(shim: &Path, config_path: &Path, config: &JailConfig) -> Str
     p.push_str("  (global-name \"com.apple.system.notification_center\")\n");
     p.push_str(")\n");
 
+    // Allow unix socket communication with gvproxy.
+    p.push_str("(allow network-bind network-outbound\n");
+    p.push_str("  (local unix)\n");
+    p.push_str("  (remote unix)\n");
+    p.push_str(")\n");
+
     p
 }
 
