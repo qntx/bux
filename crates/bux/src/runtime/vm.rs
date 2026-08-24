@@ -539,18 +539,17 @@ impl Vm {
             }
         };
 
-        self.state.pid = shim.pid;
-        self.state.status = Status::Running;
         self.state.config.security_status = shim.security.clone();
         if let Err(e) = self
             .db
             .update_pid_status(&self.state.id, shim.pid, Status::Running)
             .and_then(|()| self.db.update_config(&self.state.id, &self.state.config))
         {
-            signal::kill(Pid::from_raw(shim.pid), Signal::SIGKILL).ok();
-            self.net.stop(&self.state.id);
+            self.revert_failed_start(shim.pid);
             return Err(e);
         }
+        self.state.pid = shim.pid;
+        self.state.status = Status::Running;
         self.client = Client::new(&self.state.socket);
         self.keepalive = shim.keepalive;
 
@@ -820,6 +819,17 @@ impl Vm {
     /// Returns an error if the handshake fails.
     pub async fn handshake(&self) -> Result<()> {
         Ok(self.client.handshake().await?)
+    }
+
+    /// Kill a shim that started but was not committed as Running.
+    ///
+    /// Leaves the handle Stopped so `start_with` can be retried. Best-effort
+    /// `update_status(Stopped)` covers a pid row that already landed.
+    fn revert_failed_start(&mut self, pid: i32) {
+        signal::kill(Pid::from_raw(pid), Signal::SIGKILL).ok();
+        self.net.stop(&self.state.id);
+        self.state.status = Status::Stopped;
+        drop(self.db.update_status(&self.state.id, Status::Stopped));
     }
 
     /// Updates status to Stopped and persists. If `auto_remove` is set,
