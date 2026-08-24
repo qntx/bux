@@ -18,6 +18,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
+          components: rustfmt, clippy
+      # Host-only smoke builds bux-cli (links libkrun). Do not install Go here:
+      # FULL=0 does not build bux-shim-bin / libgvproxy.
       # Manual HVF/KVM gate only (CONTRIBUTING.md). Never FULL=1 on GitHub-hosted runners.
       - name: Host-only e2e smoke
         env:
