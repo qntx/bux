@@ -98,7 +98,7 @@ impl Runtime {
     fn recover_dead(&self, vm: &VmState) -> u32 {
         warn!(vm_id = %vm.id, pid = vm.pid, "recovery: marking dead VM as stopped");
         drop(self.db.update_status(&vm.id, Status::Stopped));
-        // auto_remove already unlinks via purge_vm_files → clean_vm_files.
+        // purge_vm_files includes clean_vm_files; do not call both.
         if vm.config.auto_remove {
             self.purge_vm_files(vm);
         } else {
@@ -154,7 +154,7 @@ impl Runtime {
 
             let should_delete =
                 vm.config.auto_remove || expired(vm.config.auto_delete_secs, Some(now));
-            if should_delete && self.remove(&vm.id).is_ok() {
+            if should_delete && self.remove_stored(vm).is_ok() {
                 report.deleted += 1;
             }
             return;
@@ -164,7 +164,7 @@ impl Runtime {
             && expired(vm.config.auto_delete_secs, vm.config.last_activity_at)
         {
             info!(vm_id = %vm.id, "sweep: auto-delete idle stopped VM");
-            if self.remove(&vm.id).is_ok() {
+            if self.remove_stored(vm).is_ok() {
                 report.deleted += 1;
             }
         }

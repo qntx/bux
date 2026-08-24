@@ -427,7 +427,7 @@ impl Runtime {
             self.reconcile_dead_pid(&mut vm);
 
             if vm.status == Status::Stopped && vm.config.auto_remove {
-                drop(self.remove(&vm.id));
+                drop(self.remove_stored(&vm));
                 continue;
             }
 
@@ -499,17 +499,22 @@ impl Runtime {
             )));
         }
 
-        clean_vm_files(&state.socket);
+        self.remove_stored(state)
+    }
+
+    /// Tear down a known row by primary key (no name/prefix lookup).
+    fn remove_stored(&self, vm: &VmState) -> Result<()> {
+        clean_vm_files(&vm.socket);
         self.secrets
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&state.id);
-        drop(self.volumes.unlink_vm(&state.id));
-        drop(self.disk.remove_vm_disk(&state.id));
-        self.db.delete(&state.id)?;
-        info!(vm_id = %state.id, "VM removed");
+            .remove(&vm.id);
+        drop(self.volumes.unlink_vm(&vm.id));
+        drop(self.disk.remove_vm_disk(&vm.id));
+        self.db.delete(&vm.id)?;
+        info!(vm_id = %vm.id, "VM removed");
         self.events.emit(AuditEvent::now(AuditEventKind::VmRemoved {
-            id: state.id.clone(),
+            id: vm.id.clone(),
         }));
         Ok(())
     }
@@ -821,5 +826,86 @@ mod tests {
             )),
             "list auto_remove must emit VmRemoved"
         );
+    }
+
+    #[test]
+    fn list_auto_remove_does_not_delete_name_colliding_with_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let auto_id = "aaaaaaaaaaaa";
+        let named_id = "bbbbbbbbbbbb";
+        insert_cfg(
+            &rt,
+            auto_id,
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig {
+                auto_remove: true,
+                ..VmConfig::default()
+            },
+        );
+        insert_cfg(
+            &rt,
+            named_id,
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig::default(),
+        );
+        rt.db.update_name(named_id, Some(auto_id)).unwrap();
+        let auto_json = plant_shim_json(&rt, auto_id);
+        let named_json = plant_shim_json(&rt, named_id);
+
+        let list = rt.list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, named_id);
+        assert!(!auto_json.exists());
+        assert!(
+            named_json.exists(),
+            "name-collision victim must keep shim JSON"
+        );
+        assert!(rt.db.get_by_id_prefix(auto_id).is_err());
+        assert_eq!(rt.db.get_by_id_prefix(named_id).unwrap().id, named_id);
+    }
+
+    #[test]
+    fn sweep_auto_delete_does_not_delete_name_colliding_with_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = spawn_sleep();
+        let live = child_pid(&child);
+        let rt = Runtime::open(dir.path()).unwrap();
+        let delete_id = "aaaaaaaaaaaa";
+        let named_id = "bbbbbbbbbbbb";
+        insert_cfg(
+            &rt,
+            delete_id,
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig {
+                auto_delete_secs: Some(1),
+                last_activity_at: Some(SystemTime::UNIX_EPOCH),
+                ..VmConfig::default()
+            },
+        );
+        insert_running_cfg(
+            &rt,
+            named_id,
+            live,
+            VmConfig {
+                detach: true,
+                ..VmConfig::default()
+            },
+        );
+        rt.db.update_name(named_id, Some(delete_id)).unwrap();
+
+        let report = rt.sweep().unwrap();
+        assert_eq!(report.deleted, 1);
+        assert!(rt.db.get_by_id_prefix(delete_id).is_err());
+        let named = rt.db.get_by_id_prefix(named_id).unwrap();
+        assert_eq!(named.id, named_id);
+        assert_eq!(named.status, Status::Running);
+        assert!(is_pid_alive(live));
+        drop(rt);
+        drop(child.kill());
+        drop(child.wait());
     }
 }
