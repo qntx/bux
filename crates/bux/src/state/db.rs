@@ -16,8 +16,8 @@ use crate::error::{Error, Result};
 /// Bump only on incompatible schema changes. There is **no** migration
 /// path — callers must wipe the data directory.
 ///
-/// v2: named `volumes` + `vm_volumes` attachment tables (PR9).
-pub const PRODUCT_SCHEMA_VERSION: u32 = 2;
+/// v4: persist `NetworkSpec` in VM config JSON (replaces `network_enabled`).
+pub(crate) const PRODUCT_SCHEMA_VERSION: u32 = 4;
 
 /// DDL for a fresh product database.
 const PRODUCT_SCHEMA_SQL: &str = "
@@ -36,14 +36,14 @@ CREATE TABLE vms (
 
 CREATE TABLE snapshots (
     id          TEXT PRIMARY KEY NOT NULL,
-    box_id      TEXT NOT NULL REFERENCES vms(id) ON DELETE CASCADE,
+    vm_id       TEXT NOT NULL REFERENCES vms(id) ON DELETE CASCADE,
     name        TEXT,
     disk_path   TEXT NOT NULL,
     disk_bytes  INTEGER NOT NULL DEFAULT 0,
     created_at  REAL NOT NULL,
-    UNIQUE(box_id, name)
+    UNIQUE(vm_id, name)
 );
-CREATE INDEX idx_snapshots_box ON snapshots(box_id);
+CREATE INDEX idx_snapshots_vm ON snapshots(vm_id);
 
 CREATE TABLE base_disks (
     id          TEXT PRIMARY KEY NOT NULL,
@@ -72,12 +72,12 @@ CREATE INDEX idx_vm_volumes_volume ON vm_volumes(volume_id);
 /// Persisted snapshot metadata (disk-only; no memory snapshots).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct SnapshotRow {
+pub(crate) struct SnapshotRow {
     /// Unique snapshot identifier.
     pub id: String,
     /// ID of the VM this snapshot belongs to.
-    pub box_id: String,
-    /// Optional human-friendly snapshot name (unique per box).
+    pub vm_id: String,
+    /// Optional human-friendly snapshot name (unique per VM).
     pub name: Option<String>,
     /// Absolute path to the snapshot disk image.
     pub disk_path: String,
@@ -90,7 +90,8 @@ pub struct SnapshotRow {
 /// Persisted base disk metadata with reference counting.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct BaseDiskRow {
+#[allow(dead_code, reason = "row mapped from SQLite; fields used in tests")]
+pub(crate) struct BaseDiskRow {
     /// Unique base disk identifier.
     pub id: String,
     /// Content digest (e.g. `sha256:abcdef...`).
@@ -108,11 +109,15 @@ pub struct BaseDiskRow {
 /// Uses `Mutex<Connection>` to be safely `Send + Sync` without
 /// requiring `unsafe impl`. The mutex is held briefly per operation.
 #[derive(Debug)]
-pub struct StateDb {
+pub(crate) struct StateDb {
     /// Underlying `SQLite` connection, protected by a mutex.
     conn: std::sync::Mutex<Connection>,
 }
 
+#[allow(
+    dead_code,
+    reason = "base-disk refcount helpers used by DiskManager/tests"
+)]
 impl StateDb {
     /// Opens (or creates) the product-schema database at `path`.
     ///
@@ -123,7 +128,7 @@ impl StateDb {
     ///
     /// Returns an error if the database cannot be opened, schema init fails,
     /// or the on-disk schema version is unsupported.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+    pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         ensure_product_schema(&conn)?;
@@ -148,7 +153,7 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if serialization or the database insert fails.
-    pub fn insert(&self, s: &VmState) -> Result<()> {
+    pub(crate) fn insert(&self, s: &VmState) -> Result<()> {
         let config_json = serde_json::to_string(&s.config)?;
         let ts = system_time_to_f64(s.created_at);
         self.lock().execute(
@@ -173,7 +178,7 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the database update fails.
-    pub fn update_status(&self, id: &str, status: Status) -> Result<()> {
+    pub(crate) fn update_status(&self, id: &str, status: Status) -> Result<()> {
         self.lock().execute(
             "UPDATE vms SET status = ?1 WHERE id = ?2",
             params![status_str(status), id],
@@ -186,7 +191,7 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if serialization or the database update fails.
-    pub fn update_config(&self, id: &str, config: &crate::state::VmConfig) -> Result<()> {
+    pub(crate) fn update_config(&self, id: &str, config: &crate::state::VmConfig) -> Result<()> {
         let config_json = serde_json::to_string(config)?;
         self.lock().execute(
             "UPDATE vms SET config = ?1 WHERE id = ?2",
@@ -200,7 +205,7 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the database query fails.
-    pub fn get_by_name(&self, name: &str) -> Result<Option<VmState>> {
+    pub(crate) fn get_by_name(&self, name: &str) -> Result<Option<VmState>> {
         let conn = self.lock();
         Ok(conn
             .prepare("SELECT * FROM vms WHERE name = ?1")?
@@ -224,7 +229,7 @@ impl StateDb {
         clippy::significant_drop_tightening,
         reason = "MutexGuard must live across two queries"
     )]
-    pub fn get_by_id_prefix(&self, prefix: &str) -> Result<VmState> {
+    pub(crate) fn get_by_id_prefix(&self, prefix: &str) -> Result<VmState> {
         let conn = self.lock();
 
         // Try exact match first.
@@ -259,7 +264,7 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the database query fails.
-    pub fn list(&self) -> Result<Vec<VmState>> {
+    pub(crate) fn list(&self) -> Result<Vec<VmState>> {
         let conn = self.lock();
         Ok(conn
             .prepare("SELECT * FROM vms ORDER BY created_at DESC")?
@@ -272,7 +277,7 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the database update fails.
-    pub fn update_name(&self, id: &str, name: Option<&str>) -> Result<()> {
+    pub(crate) fn update_name(&self, id: &str, name: Option<&str>) -> Result<()> {
         self.lock()
             .execute("UPDATE vms SET name = ?1 WHERE id = ?2", params![name, id])?;
         Ok(())
@@ -283,7 +288,7 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the database deletion fails.
-    pub fn delete(&self, id: &str) -> Result<()> {
+    pub(crate) fn delete(&self, id: &str) -> Result<()> {
         self.lock()
             .execute("DELETE FROM vms WHERE id = ?1", params![id])?;
         Ok(())
@@ -294,7 +299,7 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the database update fails.
-    pub fn update_health(&self, id: &str, health: HealthState) -> Result<()> {
+    pub(crate) fn update_health(&self, id: &str, health: HealthState) -> Result<()> {
         self.lock().execute(
             "UPDATE vms SET health = ?1 WHERE id = ?2",
             params![health_str(health), id],
@@ -307,13 +312,13 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the database insert fails.
-    pub fn insert_snapshot(&self, s: &SnapshotRow) -> Result<()> {
+    pub(crate) fn insert_snapshot(&self, s: &SnapshotRow) -> Result<()> {
         self.lock().execute(
-            "INSERT INTO snapshots (id, box_id, name, disk_path, disk_bytes, created_at)
+            "INSERT INTO snapshots (id, vm_id, name, disk_path, disk_bytes, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 s.id,
-                s.box_id,
+                s.vm_id,
                 s.name,
                 s.disk_path,
                 i64::try_from(s.disk_bytes).unwrap_or(i64::MAX),
@@ -328,14 +333,14 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the database query fails.
-    pub fn list_snapshots(&self, box_id: &str) -> Result<Vec<SnapshotRow>> {
+    pub(crate) fn list_snapshots(&self, vm_id: &str) -> Result<Vec<SnapshotRow>> {
         let conn = self.lock();
         Ok(conn
             .prepare(
-                "SELECT id, box_id, name, disk_path, disk_bytes, created_at
-                 FROM snapshots WHERE box_id = ?1 ORDER BY created_at DESC",
+                "SELECT id, vm_id, name, disk_path, disk_bytes, created_at
+                 FROM snapshots WHERE vm_id = ?1 ORDER BY created_at DESC",
             )?
-            .query_map(params![box_id], row_to_snapshot)?
+            .query_map(params![vm_id], row_to_snapshot)?
             .collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
@@ -344,10 +349,10 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns [`Error::NotFound`] if no snapshot matches.
-    pub fn get_snapshot(&self, snapshot_id: &str) -> Result<SnapshotRow> {
+    pub(crate) fn get_snapshot(&self, snapshot_id: &str) -> Result<SnapshotRow> {
         let conn = self.lock();
         conn.query_row(
-            "SELECT id, box_id, name, disk_path, disk_bytes, created_at
+            "SELECT id, vm_id, name, disk_path, disk_bytes, created_at
              FROM snapshots WHERE id = ?1",
             params![snapshot_id],
             row_to_snapshot,
@@ -365,7 +370,7 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the database deletion fails.
-    pub fn delete_snapshot(&self, snapshot_id: &str) -> Result<()> {
+    pub(crate) fn delete_snapshot(&self, snapshot_id: &str) -> Result<()> {
         self.lock()
             .execute("DELETE FROM snapshots WHERE id = ?1", params![snapshot_id])?;
         Ok(())
@@ -376,7 +381,7 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the database upsert fails.
-    pub fn upsert_base_disk(&self, id: &str, digest: &str, path: &str) -> Result<()> {
+    pub(crate) fn upsert_base_disk(&self, id: &str, digest: &str, path: &str) -> Result<()> {
         self.lock().execute(
             "INSERT INTO base_disks (id, digest, path, ref_count, created_at)
              VALUES (?1, ?2, ?3, 0, ?4)
@@ -391,7 +396,7 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the database query fails.
-    pub fn get_base_disk_by_digest(&self, digest: &str) -> Result<Option<BaseDiskRow>> {
+    pub(crate) fn get_base_disk_by_digest(&self, digest: &str) -> Result<Option<BaseDiskRow>> {
         let result = {
             let conn = self.lock();
             conn.query_row(
@@ -412,7 +417,7 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the database update fails.
-    pub fn incr_base_disk_ref(&self, digest: &str) -> Result<()> {
+    pub(crate) fn incr_base_disk_ref(&self, digest: &str) -> Result<()> {
         self.lock().execute(
             "UPDATE base_disks SET ref_count = ref_count + 1 WHERE digest = ?1",
             params![digest],
@@ -425,7 +430,7 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the database update fails.
-    pub fn decr_base_disk_ref(&self, digest: &str) -> Result<()> {
+    pub(crate) fn decr_base_disk_ref(&self, digest: &str) -> Result<()> {
         self.lock().execute(
             "UPDATE base_disks SET ref_count = ref_count - 1 WHERE digest = ?1",
             params![digest],
@@ -438,7 +443,7 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the database query fails.
-    pub fn orphaned_base_disks(&self) -> Result<Vec<BaseDiskRow>> {
+    pub(crate) fn orphaned_base_disks(&self) -> Result<Vec<BaseDiskRow>> {
         let conn = self.lock();
         Ok(conn
             .prepare(
@@ -454,7 +459,7 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the database deletion fails.
-    pub fn delete_base_disk(&self, id: &str) -> Result<()> {
+    pub(crate) fn delete_base_disk(&self, id: &str) -> Result<()> {
         self.lock()
             .execute("DELETE FROM base_disks WHERE id = ?1", params![id])?;
         Ok(())
@@ -467,7 +472,7 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the insert fails (e.g. duplicate name).
-    pub fn insert_volume(&self, v: &crate::volumes::VolumeInfo) -> Result<()> {
+    pub(crate) fn insert_volume(&self, v: &crate::volumes::VolumeInfo) -> Result<()> {
         self.lock().execute(
             "INSERT INTO volumes (id, name, path, created_at) VALUES (?1, ?2, ?3, ?4)",
             params![
@@ -485,7 +490,10 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the query fails.
-    pub fn get_volume_by_name(&self, name: &str) -> Result<Option<crate::volumes::VolumeInfo>> {
+    pub(crate) fn get_volume_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::volumes::VolumeInfo>> {
         let conn = self.lock();
         conn.query_row(
             "SELECT id, name, path, created_at FROM volumes WHERE name = ?1",
@@ -505,7 +513,7 @@ impl StateDb {
         clippy::significant_drop_tightening,
         reason = "stmt borrows conn; collect before drop"
     )]
-    pub fn list_volumes(&self) -> Result<Vec<crate::volumes::VolumeInfo>> {
+    pub(crate) fn list_volumes(&self) -> Result<Vec<crate::volumes::VolumeInfo>> {
         let conn = self.lock();
         let mut stmt =
             conn.prepare("SELECT id, name, path, created_at FROM volumes ORDER BY name")?;
@@ -520,7 +528,7 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the delete fails.
-    pub fn delete_volume(&self, id: &str) -> Result<()> {
+    pub(crate) fn delete_volume(&self, id: &str) -> Result<()> {
         self.lock()
             .execute("DELETE FROM volumes WHERE id = ?1", params![id])?;
         Ok(())
@@ -531,7 +539,7 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the query fails.
-    pub fn count_volume_attachments(&self, volume_id: &str) -> Result<i64> {
+    pub(crate) fn count_volume_attachments(&self, volume_id: &str) -> Result<i64> {
         let n: i64 = self.lock().query_row(
             "SELECT COUNT(*) FROM vm_volumes WHERE volume_id = ?1",
             params![volume_id],
@@ -545,7 +553,12 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the insert fails.
-    pub fn insert_vm_volume(&self, vm_id: &str, volume_id: &str, guest_path: &str) -> Result<()> {
+    pub(crate) fn insert_vm_volume(
+        &self,
+        vm_id: &str,
+        volume_id: &str,
+        guest_path: &str,
+    ) -> Result<()> {
         self.lock().execute(
             "INSERT OR REPLACE INTO vm_volumes (vm_id, volume_id, guest_path)
              VALUES (?1, ?2, ?3)",
@@ -559,7 +572,7 @@ impl StateDb {
     /// # Errors
     ///
     /// Returns an error if the delete fails.
-    pub fn delete_vm_volumes(&self, vm_id: &str) -> Result<()> {
+    pub(crate) fn delete_vm_volumes(&self, vm_id: &str) -> Result<()> {
         self.lock()
             .execute("DELETE FROM vm_volumes WHERE vm_id = ?1", params![vm_id])?;
         Ok(())
@@ -633,7 +646,7 @@ fn row_to_state(row: &rusqlite::Row<'_>) -> rusqlite::Result<VmState> {
 fn row_to_snapshot(row: &rusqlite::Row<'_>) -> rusqlite::Result<SnapshotRow> {
     Ok(SnapshotRow {
         id: row.get(0)?,
-        box_id: row.get(1)?,
+        vm_id: row.get(1)?,
         name: row.get(2)?,
         disk_path: row.get(3)?,
         disk_bytes: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),

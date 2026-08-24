@@ -91,13 +91,48 @@ pub fn start(ctx: u32) -> Result<()> {
     Ok(sys::start_enter(ctx)?)
 }
 
-/// `prepare` then `start`. Never returns on success.
+/// `prepare`, install default seccomp, then `start`. Never returns on success.
+///
+/// Seccomp is installed after libkrun `prepare()` (context fully configured)
+/// and before `krun_start_enter` process takeover.
 ///
 /// # Errors
 ///
-/// Propagates prepare/start errors.
+/// Propagates prepare, seccomp, or start errors. Seccomp install failure
+/// is fail-closed on Linux `x86_64`/`aarch64`.
 pub fn boot(cfg: &ShimConfig) -> Result<()> {
-    prepare(cfg)?.start()
+    let prepared = prepare(cfg)?;
+    install_seccomp()?;
+    prepared.start()
+}
+
+/// Install the default seccomp BPF filter (Linux `x86_64`/`aarch64`).
+///
+/// Other platforms: no-op.
+///
+/// # Errors
+///
+/// Returns [`Error::Seccomp`] if installation fails (fail-closed).
+#[allow(
+    clippy::missing_const_for_fn,
+    clippy::unnecessary_wraps,
+    reason = "Result/errors only arise on Linux x86_64/aarch64; other platforms no-op"
+)]
+fn install_seccomp() -> Result<()> {
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    {
+        bux_seccomp::install_default().map_err(|e| Error::Seccomp(e.to_string()))
+    }
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
+    {
+        Ok(())
+    }
 }
 
 /// Apply every field of `cfg` to an existing libkrun context.
@@ -136,7 +171,8 @@ fn apply_all(ctx: u32, cfg: &ShimConfig) -> Result<()> {
         sys::add_virtiofs(ctx, &share.tag, &share.path)?;
     }
 
-    // Network: virtio-net XOR TSI port map (never both).
+    // Virtio-net only. No TSI `set_port_map` — libkrun must not see a port map
+    // when `network` is None (offline), or it will enable TSI automatically.
     if let Some(ref net) = cfg.network {
         let path = net.socket_path.to_string_lossy();
         match net.connection {
@@ -147,8 +183,6 @@ fn apply_all(ctx: u32, cfg: &ShimConfig) -> Result<()> {
                 sys::add_net_unixgram(ctx, Some(path.as_ref()), -1, &net.mac, 0, 0)?;
             }
         }
-    } else if !cfg.ports.is_empty() {
-        sys::set_port_map(ctx, &cfg.ports)?;
     }
 
     if let Some(ref workdir) = cfg.workdir {

@@ -21,9 +21,8 @@ so that higher layers can consume a tiny, safe Rust API.
 
 **JSON parity:** Rust `GvproxyConfig` field names match `gvproxy-bridge/main.go` (`allow_net`, `secrets`, `ca_cert_pem`, `ca_key_pem`). Empty allow/secrets/CA omit from JSON.
 
-This crate intentionally does **not** depend on any bux trait (e.g.
-`NetworkBackend`); the `bux-net` crate layers that abstraction on top
-so `bux-gvproxy` can be reused independently.
+This crate does not depend on `bux-net`; `bux-net` wraps it as
+`GvproxyBackend`.
 
 ## Build requirements
 
@@ -58,7 +57,7 @@ eprintln!("bytes sent: {}", stats.bytes_sent);
 ## Layering
 
 ```text
-bux-net        (L5 — NetworkBackend trait, GvproxyBackend impl)
+bux-net        (GvproxyBackend)
     │ depends on
     ▼
 bux-gvproxy    (L1 — Go CGO bridge, raw FFI, safe wrappers)

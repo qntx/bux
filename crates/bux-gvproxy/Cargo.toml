@@ -12,6 +12,7 @@ keywords = ["gvproxy", "gvisor", "vsock", "ffi", "networking"]
 rust-version = "1.85"
 
 [dependencies]
+bux-proto = { workspace = true }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

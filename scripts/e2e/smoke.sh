@@ -39,6 +39,10 @@ fi
 
 echo "==> system info"
 bux system info
+info_json="$(bux system info --format json)"
+echo "${info_json}" | grep -q '"krun_features"'
+echo "${info_json}" | grep -q '"isolation_warnings"'
+echo "${info_json}" | grep -q '"virtualization"'
 
 echo "==> volume create/list/rm"
 bux volume create e2e-vol
@@ -52,9 +56,10 @@ echo "==> help for new commands"
 bux create --help >/dev/null
 bux logs --help >/dev/null
 bux run --help | grep -q secret
+bux system reset --help >/dev/null
 
 if [[ "${BUX_E2E_FULL:-}" != "1" ]]; then
-  echo "==> skip full VM e2e (set BUX_E2E_FULL=1 to run image create/exec/stop)"
+  echo "==> skip full VM e2e (set BUX_E2E_FULL=1 on a machine with HVF or KVM)"
   echo "OK (host-only smoke)"
   exit 0
 fi
@@ -64,10 +69,37 @@ echo "==> pull ${IMAGE}"
 bux pull "${IMAGE}"
 
 NAME="e2e-$(date +%s)"
-echo "==> run ${NAME}"
-bux run --name "${NAME}" --rm "${IMAGE}" -- true || {
-  echo "run failed — ensure guest binary and virt are available"
+echo "==> create ${NAME}"
+bux create --name "${NAME}" "${IMAGE}"
+
+echo "==> exec echo"
+bux exec "${NAME}" -- echo e2e-ok
+
+echo "==> egress (unrestricted)"
+bux exec "${NAME}" -- wget -qO- -T 10 http://example.com >/tmp/bux-e2e-egress.out || \
+  bux exec "${NAME}" -- busybox wget -qO- -T 10 http://example.com >/tmp/bux-e2e-egress.out
+test -s /tmp/bux-e2e-egress.out
+
+echo "==> stop/rm ${NAME}"
+bux stop "${NAME}"
+bux rm "${NAME}"
+
+DENY="e2e-deny-$(date +%s)"
+echo "==> allow_net deny ${DENY}"
+bux create --name "${DENY}" --allow-net 127.0.0.1 "${IMAGE}"
+if bux exec "${DENY}" -- wget -qO- -T 3 http://example.com; then
+  echo "allow_net deny failed: wget succeeded"
+  bux rm -f "${DENY}" || true
   exit 1
-}
+fi
+bux rm -f "${DENY}"
+
+PUB="e2e-pub-$(date +%s)"
+echo "==> publish port ${PUB}"
+bux create --name "${PUB}" --publish 0:80 "${IMAGE}"
+insp="$(bux inspect "${PUB}")"
+echo "${insp}" | grep -q '"host"'
+echo "${insp}" | grep -q '"guest": 80'
+bux rm -f "${PUB}"
 
 echo "OK (full e2e)"

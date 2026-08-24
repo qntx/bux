@@ -19,6 +19,10 @@ pub enum Error {
     #[error(transparent)]
     Krun(#[from] bux_krun::Error),
 
+    /// Seccomp filter could not be installed (Linux fail-closed).
+    #[error("seccomp: {0}")]
+    Seccomp(String),
+
     /// I/O (config file, crash dump, …).
     #[error(transparent)]
     Io(#[from] std::io::Error),

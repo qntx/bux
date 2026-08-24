@@ -1,18 +1,9 @@
 # bux-guest
 
-Guest agent (typically PID 1) inside a bux micro-VM.
+Guest agent (PID 1) inside a bux micro-VM.
 
-## Workload isolation
+The agent is the control plane: vsock listener, exec, files, mounts. Workload
+processes share the agent’s namespaces (Phase A). Hardware isolation vs the
+host is the VM boundary.
 
-| Phase | Mode | Behaviour |
-|-------|------|-----------|
-| **A** | `phase_a` | Direct `exec` in the agent mount/PID namespace (shared with agent). |
-| **B** | `phase_b` | Primary OCI container via **libcontainer**; exec enters its namespaces with `nsenter`. |
-
-Boot tries Phase B when `GuestBootConfig.primary_container` is true (default). Failure falls back to Phase A without aborting the agent. Ping reports `workload_isolation`.
-
-Exec flag `ExecStart.in_container`:
-
-- `None` — use container when Phase B ready
-- `Some(true)` — require Phase B
-- `Some(false)` — force Phase A
+In-guest OCI containers are a 1.0 milestone, not this agent.

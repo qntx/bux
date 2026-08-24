@@ -14,6 +14,7 @@
 mod boot;
 mod codec;
 mod message;
+pub mod net;
 
 pub use boot::{GUEST_BOOT_CONFIG_ENV, GuestBootConfig, GuestNetworkMode};
 pub use codec::{

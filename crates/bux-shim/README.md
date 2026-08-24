@@ -7,8 +7,9 @@ plus the `bux-shim` binary that takes over the process via `krun_start_enter`.
 
 - libkrun **process takeover** must not run inside the host tokio Runtime.
 - Host `bux` maps product state → `ShimConfig` JSON; shim never depends on `bux`.
-- Network wiring (`add_net_*`) lands here later (PR2b); managed TSI `set_port_map`
-  remains until PR2c deletes it.
+- Virtio-net via `add_net_unixstream` / `add_net_unixgram`. The shim never
+  calls TSI `set_port_map`. When `network` is `None`, libkrun still
+  auto-enables TSI (known D2).
 
 ## Wire format
 
@@ -27,5 +28,6 @@ Optional env: `BUX_WATCHDOG_FD=<fd>` (read end of parent keepalive pipe).
 | `ShimConfig` | serde JSON config for the engine |
 | `prepare` | create libkrun ctx + apply config |
 | `start` | `krun_start_enter` (never returns on success) |
-| `boot` | `prepare` + `start` |
+| `boot` | `prepare` + seccomp + `start` |
+| `host` | host-side libkrun probes |
 | `ExitInfo` | crash diagnostics JSON |

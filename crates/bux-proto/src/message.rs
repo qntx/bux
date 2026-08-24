@@ -16,8 +16,9 @@ use serde::{Deserialize, Serialize};
 /// Wire protocol version. Bumped on every incompatible change.
 ///
 /// - v7: [`ExecStart::user`] optional name-based user for guest `/etc/passwd` resolution.
-/// - v8: [`ExecStart::in_container`] + [`ControlResp::Pong`] workload isolation phase.
-pub const PROTOCOL_VERSION: u32 = 8;
+/// - v8: in-container exec (removed).
+/// - v9: Phase A only — dropped `in_container` and ping `workload_isolation`.
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Default chunk size for streaming transfers (1 MiB).
 pub const STREAM_CHUNK_SIZE: usize = 1 << 20;
@@ -117,9 +118,6 @@ pub enum ControlResp {
         version: String,
         /// Milliseconds since the agent started.
         uptime_ms: u64,
-        /// Workload isolation mode: `phase_a` (shared NS) or `phase_b` (primary container).
-        #[serde(default = "default_phase_a")]
-        workload_isolation: String,
     },
     /// Shutdown acknowledged — agent will exit imminently.
     ShutdownOk,
@@ -180,23 +178,9 @@ pub struct ExecStart {
     /// Name-based user (`name`, `name:group`, or numeric string).
     ///
     /// Used when [`Self::uid`] / [`Self::gid`] are unset. Guest resolves via
-    /// `/etc/passwd` and `/etc/group` (protocol v7+).
-    ///
-    /// Always serialized (postcard has no field skipping); `None` is the default.
+    /// `/etc/passwd` and `/etc/group`.
     #[serde(default)]
     pub user: Option<String>,
-    /// Run inside the primary OCI container when Phase B is available.
-    ///
-    /// - `None` — guest default (`true` when primary container is ready).
-    /// - `Some(true)` — require container exec (fails if Phase B unavailable).
-    /// - `Some(false)` — force Phase A direct process exec.
-    #[serde(default)]
-    pub in_container: Option<bool>,
-}
-
-/// Default workload isolation label for older peers.
-fn default_phase_a() -> String {
-    "phase_a".into()
 }
 
 impl ExecStart {
@@ -214,7 +198,6 @@ impl ExecStart {
             tty: None,
             timeout_ms: 0,
             user: None,
-            in_container: None,
         }
     }
 
@@ -254,13 +237,6 @@ impl ExecStart {
         self.user = Some(spec.into());
         self.uid = None;
         self.gid = None;
-        self
-    }
-
-    /// Prefer/require primary-container exec (Phase B).
-    #[must_use]
-    pub const fn in_container(mut self, yes: bool) -> Self {
-        self.in_container = Some(yes);
         self
     }
 

@@ -34,8 +34,10 @@ pub(crate) type LogCallbackFn = extern "C" fn(level: c_int, message: *const c_ch
 unsafe extern "C" {
     /// Create a new gvproxy instance from a JSON config string.
     ///
-    /// Returns an instance handle (≥ 0) or −1 on error.
-    fn gvproxy_create(config_json: *const c_char) -> c_longlong;
+    /// Returns an instance handle (≥ 0) or −1 on error. On error, writes a
+    /// heap-allocated C string into `err_out` which the caller must free
+    /// with [`gvproxy_free_string`].
+    fn gvproxy_create(config_json: *const c_char, err_out: *mut *mut c_char) -> c_longlong;
 
     /// Destroy a gvproxy instance and free its resources.
     ///
@@ -64,6 +66,21 @@ unsafe extern "C" {
 // Safe wrappers
 // ============================================================================
 
+/// Takes ownership of a Go-allocated C string, converting it to a Rust
+/// `String` and freeing the original via [`gvproxy_free_string`].
+///
+/// Returns `None` if `ptr` is null. Invalid UTF-8 is replaced (lossy).
+fn take_go_string(ptr: *mut c_char) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    let msg = unsafe { CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { gvproxy_free_string(ptr) };
+    Some(msg)
+}
+
 /// Creates a new gvproxy instance with the given configuration.
 ///
 /// Returns the instance handle on success.
@@ -72,10 +89,11 @@ pub(crate) fn create_instance(config: &GvproxyConfig) -> Result<i64> {
 
     let c_json = CString::new(json).map_err(|e| Error::Ffi(format!("invalid config JSON: {e}")))?;
 
-    let id = unsafe { gvproxy_create(c_json.as_ptr()) };
-
+    let mut err_ptr: *mut c_char = std::ptr::null_mut();
+    let id = unsafe { gvproxy_create(c_json.as_ptr(), &raw mut err_ptr) };
     if id < 0 {
-        return Err(Error::Ffi("gvproxy_create returned -1".into()));
+        let msg = take_go_string(err_ptr).unwrap_or_else(|| "gvproxy_create returned -1".into());
+        return Err(Error::Ffi(msg));
     }
 
     tracing::info!(id, "created gvproxy instance via FFI");

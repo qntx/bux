@@ -48,8 +48,8 @@ const fn default_true() -> bool {
 
 /// Virtio-net attachment to a userspace network proxy (gvproxy).
 ///
-/// When `Some`, the engine calls `add_net_*` and **must not** use TSI
-/// `set_port_map`. When `None`, managed networking uses TSI ports only.
+/// When `Some`, the engine calls `add_net_*`. When `None`, the guest is
+/// offline (no virtio-net, no TSI port map).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShimNetwork {
     /// Unix socket path of the network backend.
@@ -99,15 +99,11 @@ pub struct ShimConfig {
     #[serde(default)]
     pub virtiofs: Vec<ShimVirtioFs>,
 
-    /// TSI-style TCP maps `"host:guest"`. Ignored when [`Self::network`] is `Some`.
-    #[serde(default)]
-    pub ports: Vec<String>,
-
     /// vsock ports (agent socket lives here).
     #[serde(default)]
     pub vsock_ports: Vec<ShimVsockPort>,
 
-    /// Optional virtio-net (gvproxy). `None` = TSI / no virtio-net.
+    /// Optional virtio-net (gvproxy). `None` = offline (no NIC).
     #[serde(default)]
     pub network: Option<ShimNetwork>,
 
@@ -196,7 +192,6 @@ mod tests {
             root_disk: None,
             disk_format: ShimDiskFormat::Raw,
             virtiofs: vec![],
-            ports: vec!["8080:80".into()],
             vsock_ports: vec![ShimVsockPort {
                 port: 1024,
                 path: "/tmp/a.sock".into(),
@@ -219,7 +214,6 @@ mod tests {
         let de = ShimConfig::from_json(&json).unwrap();
         assert_eq!(de.vm_id, "abc");
         assert_eq!(de.vcpus, 2);
-        assert_eq!(de.ports, vec!["8080:80".to_owned()]);
         assert!(de.network.is_none());
         assert_eq!(de.vsock_ports.first().map(|v| v.port), Some(1024));
     }
@@ -234,7 +228,6 @@ mod tests {
             root_disk: Some("/disk.qcow2".into()),
             disk_format: ShimDiskFormat::Qcow2,
             virtiofs: vec![],
-            ports: vec![],
             vsock_ports: vec![],
             network: Some(ShimNetwork {
                 socket_path: PathBuf::from("/tmp/net.sock"),

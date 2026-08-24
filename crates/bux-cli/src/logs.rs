@@ -2,7 +2,7 @@
 
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
@@ -30,13 +30,13 @@ pub struct LogsArgs {
 pub fn logs(args: &LogsArgs) -> Result<()> {
     let rt = open_runtime()?;
     let handle = rt.get(&args.target)?;
-    let state = handle.state();
-    let path = stderr_path(&state.socket);
+    let info = handle.info();
+    let path = handle.log_path();
 
     if !path.exists() {
         anyhow::bail!(
             "no log file for VM {} at {} (shim may not have written stderr yet)",
-            state.id,
+            info.id,
             path.display()
         );
     }
@@ -46,10 +46,6 @@ pub fn logs(args: &LogsArgs) -> Result<()> {
     } else {
         print_file(&path, args.tail)
     }
-}
-
-fn stderr_path(socket: &Path) -> PathBuf {
-    socket.with_extension("stderr")
 }
 
 fn print_file(path: &Path, tail: usize) -> Result<()> {

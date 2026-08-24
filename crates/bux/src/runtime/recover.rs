@@ -10,7 +10,7 @@ use nix::unistd::Pid;
 use tracing::{info, warn};
 
 use super::Runtime;
-use super::spawn::{clean_vm_files, is_pid_alive};
+use super::boot::{clean_vm_files, is_pid_alive};
 use crate::lifecycle::{self, RecoverAction, SECRETS_RESUPPLY_ERROR};
 use crate::ports::{parse_concrete_port_strings, parse_publish_spec, resolve_ports};
 use crate::state::{Status, VmConfig, VmState};
@@ -92,7 +92,7 @@ impl Runtime {
         let action = lifecycle::recover_action(
             is_pid_alive(vm.pid),
             vm.config.secrets_required,
-            vm.config.virtio_net,
+            vm.config.network.is_enabled(),
         );
 
         match action {
@@ -103,7 +103,7 @@ impl Runtime {
                 0
             }
             RecoverAction::ReattachVsockOnly => {
-                info!(vm_id = %vm.id, "recovery: orphaned VM still alive (TSI/vsock only)");
+                info!(vm_id = %vm.id, "recovery: orphaned VM still alive (offline / vsock only)");
                 0
             }
         }
@@ -228,7 +228,9 @@ fn reattach_network_ports(rt: &Runtime, vm_id: &str, config: &VmConfig) -> crate
     if specs.is_empty() && !config.ports.is_empty() {
         specs = parse_concrete_port_strings(&config.ports)?;
     }
-    let _ = rt.net.start(vm_id, specs, config.allow_net.clone(), None)?;
+    let _ = rt
+        .net
+        .start(vm_id, specs, config.network.allow_net().to_vec(), None)?;
     Ok(())
 }
 

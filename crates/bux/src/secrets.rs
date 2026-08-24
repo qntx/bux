@@ -14,7 +14,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 /// Default placeholder brand prefix inside the angle-bracket form.
-pub const SECRET_PLACEHOLDER_PREFIX: &str = "BUX_SECRET";
+pub(crate) const SECRET_PLACEHOLDER_PREFIX: &str = "BUX_SECRET";
 
 /// A secret available for MITM substitution on matching hostnames.
 #[derive(Clone, Serialize, Deserialize)]
@@ -29,7 +29,7 @@ pub struct Secret {
     ///
     /// When `None`, uses [`default_placeholder`] for `name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub placeholder: Option<String>,
+    pub(crate) placeholder: Option<String>,
 }
 
 impl fmt::Debug for Secret {
@@ -69,7 +69,7 @@ impl Secret {
 
     /// Convert to the gvproxy wire type.
     #[must_use]
-    pub fn to_gvproxy(&self) -> bux_net::SecretConfig {
+    pub(crate) fn to_gvproxy(&self) -> bux_net::SecretConfig {
         bux_net::SecretConfig {
             name: self.name.clone(),
             hosts: self.hosts.clone(),
@@ -81,7 +81,7 @@ impl Secret {
 
 /// Default placeholder: `<BUX_SECRET:name>`.
 #[must_use]
-pub fn default_placeholder(name: &str) -> String {
+pub(crate) fn default_placeholder(name: &str) -> String {
     format!("<{SECRET_PLACEHOLDER_PREFIX}:{name}>")
 }
 
@@ -89,11 +89,11 @@ pub fn default_placeholder(name: &str) -> String {
 #[derive(Clone)]
 pub(crate) struct LiveSecrets {
     /// Secrets for MITM.
-    pub secrets: Vec<Secret>,
+    pub(crate) secrets: Vec<Secret>,
     /// MITM CA certificate PEM paired with this secret set.
-    pub ca_cert_pem: String,
+    pub(crate) ca_cert_pem: String,
     /// MITM CA private key PEM (host-only).
-    pub ca_key_pem: String,
+    pub(crate) ca_key_pem: String,
 }
 
 impl fmt::Debug for LiveSecrets {

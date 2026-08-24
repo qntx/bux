@@ -10,23 +10,23 @@ use std::time::{Duration, SystemTime};
 /// Result of evaluating recovery for one VM that was left active in `SQLite`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum RecoverAction {
+pub(crate) enum RecoverAction {
     /// PID is dead — mark stopped (optionally auto-remove).
     MarkDeadStopped,
     /// PID alive but secrets cannot be rehydrated — SIGTERM and mark stopped (K28).
     FailClosedSecrets,
     /// PID alive, virtio-net, no secrets — rebuild gvproxy on the net socket.
     ReattachNetwork,
-    /// PID alive, TSI / no virtio-net — leave process; vsock reattach only.
+    /// PID alive, network disabled — leave process; vsock reattach only.
     ReattachVsockOnly,
 }
 
 /// Decide recovery action for an active-status VM row (unit-testable).
 #[must_use]
-pub const fn recover_action(
+pub(crate) const fn recover_action(
     pid_alive: bool,
     secrets_required: bool,
-    virtio_net: bool,
+    network_enabled: bool,
 ) -> RecoverAction {
     if !pid_alive {
         return RecoverAction::MarkDeadStopped;
@@ -34,19 +34,19 @@ pub const fn recover_action(
     if secrets_required {
         return RecoverAction::FailClosedSecrets;
     }
-    if virtio_net {
+    if network_enabled {
         return RecoverAction::ReattachNetwork;
     }
     RecoverAction::ReattachVsockOnly
 }
 
 /// Human-readable message stored in `last_error` after secrets fail-closed recovery.
-pub const SECRETS_RESUPPLY_ERROR: &str =
+pub(crate) const SECRETS_RESUPPLY_ERROR: &str =
     "secrets re-supply required: call start_with(StartOptions { secrets, .. })";
 
 /// Whether idle duration has exceeded the policy threshold.
 #[must_use]
-pub fn idle_expired(
+pub(crate) fn idle_expired(
     now: SystemTime,
     last_activity: Option<SystemTime>,
     created_at: SystemTime,

@@ -4,6 +4,21 @@ use anyhow::{Context, Result};
 
 use crate::OutputFormat;
 
+/// Parse purely numeric `uid` or `uid:gid`. `None` for name-based specs.
+fn parse_numeric_user(spec: &str) -> Option<(u32, u32)> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return None;
+    }
+    if let Some((u, g)) = spec.split_once(':') {
+        let uid = u.trim().parse().ok()?;
+        let gid = g.trim().parse().ok()?;
+        return Some((uid, gid));
+    }
+    let uid = spec.parse().ok()?;
+    Some((uid, uid))
+}
+
 #[must_use]
 pub fn apply_exec_options(
     mut req: bux::ExecStart,
@@ -20,7 +35,7 @@ pub fn apply_exec_options(
         req = req.cwd(wd);
     }
     if let Some(user_spec) = user {
-        if let Some((uid, gid)) = bux::parse_numeric_user(user_spec) {
+        if let Some((uid, gid)) = parse_numeric_user(user_spec) {
             req = req.user(uid, gid);
         } else {
             // Name-based: guest resolves via /etc/passwd (protocol v7).
@@ -412,23 +427,7 @@ pub fn inspect(args: &InspectArgs) -> Result<()> {
     let mut out = Vec::new();
     for t in &args.targets {
         let h = rt.get(t)?;
-        let s = h.state();
-        out.push(serde_json::json!({
-            "id": s.id,
-            "name": s.name,
-            "pid": s.pid,
-            "image": s.image,
-            "status": s.status,
-            "socket": s.socket,
-            "created_at": s.created_at,
-            "published_ports": h.published_ports(),
-            "allow_net": h.allow_net(),
-            "security": h.security_status(),
-            "security_options": h.security_options(),
-            "last_error": h.last_error(),
-            "phase_a_limits": h.phase_a_limits(),
-            "config": s.config,
-        }));
+        out.push(serde_json::to_value(h.info())?);
     }
 
     if out.len() == 1 {
@@ -600,13 +599,13 @@ pub struct ExportArgs {
 pub async fn restart(args: RestartArgs) -> Result<()> {
     let rt = open_runtime()?;
     let mut handle = rt.get(&args.vm)?;
-    if handle.state().status == bux::Status::Running {
+    if handle.info().status == bux::Status::Running {
         handle.stop().await?;
     }
     handle
         .start(std::time::Duration::from_secs(args.timeout))
         .await?;
-    println!("{}", handle.state().id);
+    println!("{}", handle.info().id);
     Ok(())
 }
 
@@ -614,14 +613,14 @@ pub async fn restart(args: RestartArgs) -> Result<()> {
 pub async fn stats(args: &StatsArgs) -> Result<()> {
     let rt = open_runtime()?;
     let handle = rt.get(&args.vm)?;
-    let state = handle.state();
+    let info = handle.info();
     let health = handle.health().await;
-    let bm = handle.box_metrics();
-    println!("ID:             {}", state.id);
-    println!("Name:           {}", state.name.as_deref().unwrap_or("-"));
-    println!("Status:         {:?}", state.status);
+    let bm = handle.metrics();
+    println!("ID:             {}", info.id);
+    println!("Name:           {}", info.name.as_deref().unwrap_or("-"));
+    println!("Status:         {:?}", info.status);
     println!("Health:         {health:?}");
-    println!("PID:            {}", state.pid);
+    println!("PID:            {}", info.pid);
     println!("Boot time:      {} ms", bm.boot_duration_ms());
     println!("Exec count:     {}", bm.exec_count());
     println!("Last exec:      {} ms", bm.last_exec_duration_ms());
@@ -629,15 +628,10 @@ pub async fn stats(args: &StatsArgs) -> Result<()> {
 }
 
 #[cfg(unix)]
-pub fn clone_box(args: &CloneArgs) -> Result<()> {
+pub async fn clone_box(args: CloneArgs) -> Result<()> {
     let rt = open_runtime()?;
-    let handle = rt.clone_box(
-        &args.source,
-        args.name.clone(),
-        |b| b,
-        &bux::RunOptions::default(),
-    )?;
-    println!("{}", handle.state().id);
+    let handle = rt.clone(&args.source, args.name).await?;
+    println!("{}", handle.info().id);
     Ok(())
 }
 
@@ -690,7 +684,6 @@ unix_only_stub! {
     inspect(args: InspectArgs);
     prune();
     rename(args: RenameArgs);
-    clone_box(args: CloneArgs);
     export(args: ExportArgs);
 }
 
@@ -703,4 +696,5 @@ unix_only_stub! {
     wait(args: WaitArgs);
     restart(args: RestartArgs);
     stats(args: StatsArgs);
+    clone_box(args: CloneArgs);
 }

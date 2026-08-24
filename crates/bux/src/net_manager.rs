@@ -1,19 +1,19 @@
 //! Per-VM gvproxy lifecycle for managed Runtime.
 //!
 //! Owns [`GvproxyBackend`] instances keyed by VM id. When a VM uses
-//! virtio-net (`VmConfig::virtio_net`), Runtime starts a backend before
+//! virtio-net (`NetworkSpec::Enabled`), Runtime starts a backend before
 //! spawning the shim and drops it when the VM stops.
 //!
-//! Managed default uses virtio-net (`virtio_net = true`): guest configures
-//! static eth0 via `BUX_GUEST_CONFIG`. Set `virtio_net = false` for TSI-only.
+//! Managed default uses virtio-net: guest configures static eth0 via
+//! `BUX_GUEST_CONFIG`. `NetworkSpec::Disabled` is offline.
 //!
 //! `allow_net` empty means **unrestricted egress** (K20).
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
-use bux_net::{ConnectionType, GvproxyBackend, NetworkBackend, NetworkConfig};
+use bux_net::{ConnectionType, GvproxyBackend, NetworkConfig};
 use bux_shim::{ShimNetConn, ShimNetwork};
 use tracing::{debug, info, warn};
 
@@ -29,7 +29,7 @@ pub(crate) struct StartNetResult {
 
 /// Owns live gvproxy instances for a Runtime data directory.
 #[derive(Debug)]
-pub struct NetworkManager {
+pub(crate) struct NetworkManager {
     /// Per-VM backends (RAII: drop stops Go side).
     backends: Mutex<HashMap<String, GvproxyBackend>>,
     /// Directory for per-VM net sockets (`{socks_dir}/{id}.net.sock`).
@@ -39,7 +39,7 @@ pub struct NetworkManager {
 impl NetworkManager {
     /// Create a manager that places sockets under `socks_dir`.
     #[must_use]
-    pub fn new(socks_dir: PathBuf) -> Self {
+    pub(crate) fn new(socks_dir: PathBuf) -> Self {
         Self {
             backends: Mutex::new(HashMap::new()),
             socks_dir,
@@ -48,7 +48,7 @@ impl NetworkManager {
 
     /// Socket path for a VM's gvproxy endpoint.
     #[must_use]
-    pub fn socket_path(&self, vm_id: &str) -> PathBuf {
+    pub(crate) fn socket_path(&self, vm_id: &str) -> PathBuf {
         self.socks_dir.join(format!("{vm_id}.net.sock"))
     }
 
@@ -91,7 +91,7 @@ impl NetworkManager {
             );
         }
         let backend = GvproxyBackend::new(config)?;
-        let endpoint = backend.endpoint()?;
+        let endpoint = backend.endpoint();
 
         let (path, connection, mac) = match endpoint {
             bux_net::NetworkEndpoint::UnixSocket {
@@ -138,7 +138,7 @@ impl NetworkManager {
     }
 
     /// Stop and drop the backend for `vm_id` (no-op if absent).
-    pub fn stop(&self, vm_id: &str) {
+    pub(crate) fn stop(&self, vm_id: &str) {
         let removed = self
             .backends
             .lock()
@@ -156,7 +156,7 @@ impl NetworkManager {
     }
 
     /// Stop every backend (Runtime shutdown).
-    pub fn stop_all(&self) {
+    pub(crate) fn stop_all(&self) {
         let ids: Vec<String> = self
             .backends
             .lock()
@@ -167,20 +167,5 @@ impl NetworkManager {
         for id in ids {
             self.stop(&id);
         }
-    }
-
-    /// Whether a backend is live for `vm_id`.
-    #[must_use]
-    pub fn is_running(&self, vm_id: &str) -> bool {
-        self.backends
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(vm_id)
-    }
-
-    /// Socks directory (for tests / diagnostics).
-    #[must_use]
-    pub fn socks_dir(&self) -> &Path {
-        &self.socks_dir
     }
 }

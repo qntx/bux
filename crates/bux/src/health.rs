@@ -17,13 +17,13 @@ use crate::state::{HealthState, StateDb};
 /// Configuration for periodic health checks.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
-pub struct HealthCheckConfig {
+pub(crate) struct HealthCheckConfig {
     /// Interval between health probes (default: 30 s).
-    pub interval: Duration,
+    pub(crate) interval: Duration,
     /// Timeout for each individual probe (default: 5 s).
-    pub timeout: Duration,
+    pub(crate) timeout: Duration,
     /// Number of consecutive failures before marking unhealthy (default: 3).
-    pub failure_threshold: u32,
+    pub(crate) failure_threshold: u32,
 }
 
 impl Default for HealthCheckConfig {
@@ -40,17 +40,18 @@ impl Default for HealthCheckConfig {
 ///
 /// Dropping this handle cancels the background task.
 #[derive(Debug)]
-pub struct HealthCheckHandle {
+pub(crate) struct HealthCheckHandle {
     /// Send to stop the background task.
     _cancel: watch::Sender<bool>,
     /// Current consecutive failure count (shared with the task).
     failures: Arc<AtomicU32>,
 }
 
+#[allow(dead_code, reason = "handle API for optional background health")]
 impl HealthCheckHandle {
     /// Returns the current number of consecutive health check failures.
     #[must_use]
-    pub fn consecutive_failures(&self) -> u32 {
+    pub(crate) fn consecutive_failures(&self) -> u32 {
         self.failures.load(Ordering::Relaxed)
     }
 }
@@ -59,7 +60,7 @@ impl HealthCheckHandle {
 ///
 /// Returns a handle that can be used to query status or cancel the task
 /// (dropping the handle also cancels it).
-pub fn start(
+pub(crate) fn start(
     vm_id: String,
     client: Client,
     db: Arc<StateDb>,

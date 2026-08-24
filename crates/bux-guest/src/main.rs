@@ -28,8 +28,6 @@ fn main() {
 #[cfg(target_os = "linux")]
 mod ca_trust;
 #[cfg(target_os = "linux")]
-mod container;
-#[cfg(target_os = "linux")]
 mod control;
 #[cfg(target_os = "linux")]
 mod exec;

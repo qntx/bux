@@ -23,5 +23,8 @@ thiserror = { workspace = true }
 libc = { workspace = true }
 nix = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+bux-seccomp = { workspace = true }
+
 [lints]
 workspace = true

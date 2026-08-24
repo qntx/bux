@@ -71,14 +71,6 @@ pub async fn run() -> io::Result<()> {
         eprintln!("[bux-guest] T+{}ms: MITM CA installed", uptime_ms());
     }
 
-    // Phase B: primary OCI container (before accepting host traffic).
-    crate::container::try_start_primary(boot.primary_container);
-    eprintln!(
-        "[bux-guest] T+{}ms: workload isolation={}",
-        uptime_ms(),
-        crate::container::workload_isolation()
-    );
-
     let addr = tokio_vsock::VsockAddr::new(libc::VMADDR_CID_ANY, AGENT_PORT);
     let listener =
         VsockListener::bind(addr).map_err(|e| io::Error::new(io::ErrorKind::AddrInUse, e))?;

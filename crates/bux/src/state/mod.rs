@@ -25,7 +25,7 @@ pub enum Status {
     /// VM is frozen via SIGSTOP (vCPUs and virtio backends paused).
     ///
     /// Filesystem may also be quiesced (FIFREEZE) for point-in-time consistency.
-    /// Resume with [`VmHandle::resume()`](crate::runtime::VmHandle::resume).
+    /// Resume with [`Vm::resume()`](crate::runtime::Vm::resume).
     Paused,
     /// A graceful shutdown has been requested; waiting for the process to exit.
     Stopping,
@@ -96,7 +96,7 @@ impl Status {
 /// VM health state, tracked independently of lifecycle [`Status`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
-pub enum HealthState {
+pub(crate) enum HealthState {
     /// Health has not been checked yet.
     Unknown,
     /// Guest agent responded successfully.
@@ -108,7 +108,7 @@ pub enum HealthState {
 /// A virtio-fs shared directory.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VirtioFs {
+pub(crate) struct VirtioFs {
     /// Mount tag visible inside the guest.
     pub tag: String,
     /// Absolute host directory path.
@@ -124,7 +124,7 @@ pub struct VirtioFs {
 /// A vsock port mapping.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VsockPort {
+pub(crate) struct VsockPort {
     /// Guest-side vsock port number.
     pub port: u32,
     /// Host-side Unix socket path.
@@ -133,18 +133,13 @@ pub struct VsockPort {
     pub listen: bool,
 }
 
-/// Default for [`VmConfig::virtio_net`] (gvproxy on).
-const fn default_virtio_net() -> bool {
-    true
-}
-
-/// Complete VM configuration — sufficient to reconstruct a [`crate::VmBuilder`].
+/// Complete VM configuration persisted in `SQLite`.
 ///
 /// Serialized as JSON inside the `SQLite` `config` column. The shim receives
 /// a derived [`bux_shim::ShimConfig`], not this type directly.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VmConfig {
+pub(crate) struct VmConfig {
     /// Number of virtual CPUs.
     pub vcpus: u8,
     /// RAM size in MiB.
@@ -161,9 +156,9 @@ pub struct VmConfig {
     pub disk_format: DiskFormat,
     /// Shared base image path for QCOW2 overlay creation.
     ///
-    /// When set, [`crate::Runtime::spawn()`] creates a per-VM QCOW2 overlay backed
-    /// by this image, then replaces `root_disk` with the overlay path and
-    /// sets `disk_format` to [`DiskFormat::Qcow2`]. Consumed during spawn.
+    /// When set, create builds a per-VM QCOW2 overlay backed by this image,
+    /// then replaces `root_disk` with the overlay path and sets `disk_format`
+    /// to [`DiskFormat::Qcow2`]. Consumed during spawn.
     #[serde(default)]
     pub base_disk: Option<String>,
 
@@ -173,20 +168,13 @@ pub struct VmConfig {
     /// Arguments passed to the executable.
     #[serde(default)]
     pub exec_args: Vec<String>,
-    /// Environment variables (`KEY=VALUE`). `None` = inherit host env.
+    /// Environment variables (`KEY=VALUE`). Managed boot writes only `BUX_GUEST_CONFIG`.
     #[serde(default)]
     pub env: Option<Vec<String>>,
-    /// Working directory inside the VM.
-    #[serde(default)]
-    pub workdir: Option<String>,
 
     /// TCP port mappings as concrete `"host:guest"` after resolution.
     #[serde(default)]
     pub ports: Vec<String>,
-
-    /// Egress allow-list (hostnames / CIDRs). Empty = unrestricted egress.
-    #[serde(default)]
-    pub allow_net: Vec<String>,
 
     /// Resolved published ports (set by Runtime after ephemeral probe).
     #[serde(default)]
@@ -202,31 +190,10 @@ pub struct VmConfig {
     /// Global log level.
     #[serde(default)]
     pub log_level: Option<crate::log_level::LogLevel>,
-    /// UID to set before starting the VM.
-    #[serde(default)]
-    pub uid: Option<u32>,
-    /// GID to set before starting the VM.
-    #[serde(default)]
-    pub gid: Option<u32>,
-    /// Resource limits (`"RESOURCE=RLIM_CUR:RLIM_MAX"`).
-    #[serde(default)]
-    pub rlimits: Vec<String>,
-    /// Enable nested virtualization (macOS only).
-    #[serde(default)]
-    pub nested_virt: Option<bool>,
-    /// Enable/disable virtio-snd.
-    #[serde(default)]
-    pub snd_device: Option<bool>,
-    /// Redirect console output to a file.
-    #[serde(default)]
-    pub console_output: Option<String>,
 
-    /// Use gvproxy virtio-net instead of libkrun TSI networking.
-    ///
-    /// **Default `true`**: Runtime starts gvproxy, shim attaches virtio-net,
-    /// guest configures static eth0. Set `false` for legacy TSI-only boots.
-    #[serde(default = "default_virtio_net")]
-    pub virtio_net: bool,
+    /// Guest network (gvproxy or offline).
+    #[serde(default)]
+    pub network: crate::options::NetworkSpec,
 
     /// When true, restart requires secret re-supply (`StartOptions.secrets`)
     /// if the Runtime process does not still hold memory-only secrets.
@@ -245,9 +212,13 @@ pub struct VmConfig {
 
     /// Workload user for Phase A (`uid[:gid]` or `name[:group]`).
     ///
-    /// Applied at exec time (PR7); not libkrun boot credentials.
+    /// Applied at exec time; not libkrun boot credentials.
     #[serde(default)]
     pub workload_user: Option<String>,
+
+    /// Optional command the CLI may exec after the agent is ready.
+    #[serde(default)]
+    pub workload_cmd: Vec<String>,
 
     /// Requested security policy (persisted; applied at each spawn/start).
     #[serde(default)]
@@ -276,6 +247,40 @@ pub struct VmConfig {
     /// Last fatal/recoverable error message (e.g. secrets re-supply required).
     #[serde(default)]
     pub last_error: Option<String>,
+}
+
+impl Default for VmConfig {
+    fn default() -> Self {
+        Self {
+            vcpus: 1,
+            ram_mib: 512,
+            rootfs: None,
+            root_disk: None,
+            disk_format: DiskFormat::default(),
+            base_disk: None,
+            exec_path: None,
+            exec_args: Vec::new(),
+            env: None,
+            ports: Vec::new(),
+            published_ports: Vec::new(),
+            virtiofs: Vec::new(),
+            vsock_ports: Vec::new(),
+            log_level: None,
+            network: crate::options::NetworkSpec::default(),
+            secrets_required: false,
+            workload_env: Vec::new(),
+            workload_workdir: None,
+            workload_user: None,
+            workload_cmd: Vec::new(),
+            security: crate::security::SecurityOptions::default(),
+            security_status: crate::security::SecurityStatus::default(),
+            auto_remove: false,
+            auto_stop_secs: None,
+            auto_delete_secs: None,
+            last_activity_at: None,
+            last_error: None,
+        }
+    }
 }
 
 /// Serde helpers for `Option<SystemTime>` as optional f64 unix seconds.
@@ -315,7 +320,7 @@ pub(crate) mod opt_system_time {
 /// Persisted state of a managed VM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
-pub struct VmState {
+pub(crate) struct VmState {
     /// Short hex identifier.
     pub id: String,
     /// Optional human-friendly name (unique across the runtime).
@@ -356,7 +361,7 @@ pub(crate) fn gen_id() -> String {
 mod db;
 
 #[cfg(unix)]
-pub use db::{BaseDiskRow, PRODUCT_SCHEMA_VERSION, SnapshotRow, StateDb};
+pub(crate) use db::{SnapshotRow, StateDb};
 
 #[cfg(test)]
 #[cfg(unix)]
@@ -383,39 +388,8 @@ mod tests {
             status: Status::Running,
             config: VmConfig {
                 vcpus: 2,
-                ram_mib: 512,
-                rootfs: None,
-                root_disk: None,
-                disk_format: DiskFormat::default(),
-                base_disk: None,
                 exec_path: Some("/bin/sh".to_owned()),
-                exec_args: vec![],
-                env: None,
-                workdir: None,
-                ports: vec![],
-                allow_net: vec![],
-                published_ports: vec![],
-                virtiofs: vec![],
-                vsock_ports: vec![],
-                log_level: None,
-                uid: None,
-                gid: None,
-                rlimits: vec![],
-                nested_virt: None,
-                snd_device: None,
-                console_output: None,
-                virtio_net: true,
-                secrets_required: false,
-                workload_env: vec![],
-                workload_workdir: None,
-                workload_user: None,
-                security: crate::security::SecurityOptions::default(),
-                security_status: crate::security::SecurityStatus::default(),
-                auto_remove: false,
-                auto_stop_secs: None,
-                auto_delete_secs: None,
-                last_activity_at: None,
-                last_error: None,
+                ..VmConfig::default()
             },
             created_at: SystemTime::now(),
         }
@@ -555,7 +529,7 @@ mod tests {
 
         let snap = SnapshotRow {
             id: "snap1".to_owned(),
-            box_id: "vm1".to_owned(),
+            vm_id: "vm1".to_owned(),
             name: Some("backup1".to_owned()),
             disk_path: "/tmp/snap1.qcow2".to_owned(),
             disk_bytes: 1024 * 1024,
@@ -570,7 +544,7 @@ mod tests {
         assert_eq!(snaps[0].disk_bytes, 1024 * 1024);
 
         let loaded = db.get_snapshot("snap1").unwrap();
-        assert_eq!(loaded.box_id, "vm1");
+        assert_eq!(loaded.vm_id, "vm1");
 
         db.delete_snapshot("snap1").unwrap();
         assert_eq!(db.list_snapshots("vm1").unwrap().len(), 0);
@@ -618,7 +592,7 @@ mod tests {
     fn product_schema_version() {
         let db = open_test_db();
         // Fresh in-memory DB uses product schema.
-        assert_eq!(PRODUCT_SCHEMA_VERSION, 2);
+        assert_eq!(db::PRODUCT_SCHEMA_VERSION, 4);
         db.insert(&test_vm("vm1", None)).unwrap();
         assert_eq!(db.list().unwrap().len(), 1);
     }

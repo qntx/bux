@@ -8,10 +8,9 @@
 //! `PR_SET_PDEATHSIG` which is Linux-only.
 
 use std::io;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 
 use nix::fcntl::{FcntlArg, FdFlag, fcntl};
-use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::unistd::pipe;
 
 /// Parent-side handle that keeps the watchdog pipe alive.
@@ -19,7 +18,7 @@ use nix::unistd::pipe;
 /// When this value is dropped, the write end of the pipe closes,
 /// causing `POLLHUP` on the shim's read end — signaling it to shut down.
 #[derive(Debug)]
-pub struct Keepalive(#[allow(dead_code, reason = "dropped to trigger pipe close")] OwnedFd);
+pub(crate) struct Keepalive(#[allow(dead_code, reason = "dropped to trigger pipe close")] OwnedFd);
 
 /// Creates a watchdog pipe pair.
 ///
@@ -32,7 +31,7 @@ pub struct Keepalive(#[allow(dead_code, reason = "dropped to trigger pipe close"
 /// # Errors
 ///
 /// Returns an error if `pipe()` or `fcntl()` fails.
-pub fn create() -> io::Result<(OwnedFd, Keepalive)> {
+pub(crate) fn create() -> io::Result<(OwnedFd, Keepalive)> {
     let (read_fd, write_fd) = pipe()?;
 
     // Set CLOEXEC on the write end (parent keeps it; must not leak to child).
@@ -40,31 +39,4 @@ pub fn create() -> io::Result<(OwnedFd, Keepalive)> {
     // read end intentionally lacks CLOEXEC — it must survive exec into shim.
 
     Ok((read_fd, Keepalive(write_fd)))
-}
-
-/// Name of the environment variable used to pass the watchdog FD to the shim.
-///
-/// Same string as [`bux_jail::ENV_WATCHDOG_FD`] / [`bux_shim::ENV_WATCHDOG_FD`].
-pub const ENV_WATCHDOG_FD: &str = bux_shim::ENV_WATCHDOG_FD;
-
-/// Blocks the calling thread until `POLLHUP` is detected on the given FD.
-///
-/// This is intended for use inside the shim process. When the parent dies,
-/// the write end of the watchdog pipe closes, producing `POLLHUP`.
-pub fn wait_for_parent_death(fd: BorrowedFd<'_>) {
-    let mut pfd = [PollFd::new(fd, PollFlags::empty())];
-    loop {
-        match poll(&mut pfd, PollTimeout::NONE) {
-            Ok(n) if n > 0 => {
-                if let Some(revents) = pfd[0].revents()
-                    && revents.contains(PollFlags::POLLHUP)
-                {
-                    return;
-                }
-            }
-            Err(nix::errno::Errno::EINTR) => {}
-            Err(_) => return, // fatal poll error — treat as parent death
-            _ => {}
-        }
-    }
 }

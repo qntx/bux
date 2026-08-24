@@ -1,17 +1,13 @@
-//! `NetworkBackend` implementation backed by [`bux_gvproxy`].
+//! gvproxy-backed virtio-net for managed VMs.
 //!
-//! The raw FFI / Go toolchain lives in the `bux-gvproxy` crate. This
-//! module just wires a [`GvproxyInstance`] to the backend-neutral
-//! [`NetworkBackend`] trait.
+//! The raw FFI / Go toolchain lives in the `bux-gvproxy` crate.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use bux_gvproxy::{GvproxyConfig, GvproxyInstance, NetworkStats, constants::GUEST_MAC, version};
 
-use crate::backend::{
-    ConnectionType, NetworkBackend, NetworkConfig, NetworkEndpoint, NetworkMetrics,
-};
+use crate::backend::{ConnectionType, NetworkConfig, NetworkEndpoint, NetworkMetrics};
 use crate::error::Result;
 
 /// `gvisor-tap-vsock` network backend.
@@ -80,35 +76,36 @@ impl GvproxyBackend {
     pub fn get_stats(&self) -> Result<NetworkStats> {
         Ok(self.instance.get_stats()?)
     }
-}
 
-impl NetworkBackend for GvproxyBackend {
-    fn endpoint(&self) -> Result<NetworkEndpoint> {
+    /// Connection information the VM engine needs to attach virtio-net.
+    #[must_use]
+    pub fn endpoint(&self) -> NetworkEndpoint {
         let connection_type = if cfg!(target_os = "macos") {
             ConnectionType::UnixDgram
         } else {
             ConnectionType::UnixStream
         };
 
-        Ok(NetworkEndpoint::UnixSocket {
+        NetworkEndpoint::UnixSocket {
             path: self.socket_path.clone(),
             connection_type,
             mac_address: GUEST_MAC,
-        })
+        }
     }
 
-    fn name(&self) -> &'static str {
-        "gvisor-tap-vsock"
-    }
-
-    fn metrics(&self) -> Result<Option<NetworkMetrics>> {
+    /// Live network counters.
+    ///
+    /// # Errors
+    ///
+    /// Forwards FFI/JSON errors from the Go side.
+    pub fn metrics(&self) -> Result<NetworkMetrics> {
         let stats = self.get_stats()?;
-        Ok(Some(NetworkMetrics {
+        Ok(NetworkMetrics {
             bytes_sent: stats.bytes_sent,
             bytes_received: stats.bytes_received,
             tcp_connections: Some(stats.tcp.current_established),
             tcp_connection_errors: Some(stats.tcp.failed_connection_attempts),
-        }))
+        })
     }
 }
 

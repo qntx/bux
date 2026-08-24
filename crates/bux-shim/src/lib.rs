@@ -9,6 +9,7 @@ mod config;
 mod crash;
 mod error;
 mod exit_info;
+pub mod host;
 mod watchdog;
 
 pub use apply::{PreparedVm, boot, prepare, start};

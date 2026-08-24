@@ -109,7 +109,7 @@ pub struct ResolvedVolume {
 impl ResolvedVolume {
     /// Convert to engine [`VirtioFs`].
     #[must_use]
-    pub fn to_virtiofs(&self) -> VirtioFs {
+    pub(crate) fn to_virtiofs(&self) -> VirtioFs {
         VirtioFs {
             tag: self.tag.clone(),
             path: self.host_path.to_string_lossy().into_owned(),
@@ -148,7 +148,7 @@ impl VolumeManager {
     /// # Errors
     ///
     /// Returns an error if the directory cannot be created.
-    pub fn open(data_dir: impl AsRef<Path>, db: Arc<StateDb>) -> Result<Self> {
+    pub(crate) fn open(data_dir: impl AsRef<Path>, db: Arc<StateDb>) -> Result<Self> {
         let root = data_dir.as_ref().join("volumes");
         fs::create_dir_all(&root)?;
         Ok(Self { root, db })
@@ -526,7 +526,7 @@ mod tests {
             image: None,
             socket: dir.path().join("vm1.sock"),
             status: crate::state::Status::Running,
-            config: crate::vm::Vm::builder().to_config(),
+            config: crate::state::VmConfig::default(),
             created_at: SystemTime::now(),
         };
         db.insert(&vm_state).unwrap();

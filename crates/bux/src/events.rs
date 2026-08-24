@@ -15,35 +15,33 @@ use std::time::SystemTime;
 #[non_exhaustive]
 pub enum AuditEventKind {
     /// A new VM was created.
-    BoxCreated {
+    VmCreated {
         /// VM identifier.
         id: String,
         /// OCI image reference, if any.
         image: Option<String>,
-        /// Tenant the VM belongs to.
-        tenant: String,
     },
     /// A VM was started (or restarted).
-    BoxStarted {
+    VmStarted {
         /// VM identifier.
         id: String,
     },
     /// A VM was stopped.
-    BoxStopped {
+    VmStopped {
         /// VM identifier.
         id: String,
         /// Exit code, if available.
         exit_code: Option<i32>,
     },
     /// A VM was removed.
-    BoxRemoved {
+    VmRemoved {
         /// VM identifier.
         id: String,
     },
     /// A command execution was started inside a VM.
     ExecStarted {
         /// VM identifier.
-        box_id: String,
+        vm_id: String,
         /// Command that was executed.
         command: String,
         /// Unique execution identifier.
@@ -52,7 +50,7 @@ pub enum AuditEventKind {
     /// A command execution completed inside a VM.
     ExecCompleted {
         /// VM identifier.
-        box_id: String,
+        vm_id: String,
         /// Unique execution identifier.
         exec_id: String,
         /// Exit code of the command.
@@ -63,14 +61,14 @@ pub enum AuditEventKind {
     /// A snapshot was created.
     SnapshotCreated {
         /// VM identifier.
-        box_id: String,
+        vm_id: String,
         /// Snapshot identifier.
         snapshot_id: String,
     },
     /// A file was copied into or out of a VM.
     FileCopied {
         /// VM identifier.
-        box_id: String,
+        vm_id: String,
         /// Direction of the copy.
         direction: CopyDirection,
         /// Path involved in the copy.
@@ -167,7 +165,11 @@ impl EventDispatcher {
 ///
 /// Thread-safe: all state is behind a single `Mutex`.
 /// Suitable for in-process querying of recent activity.
-pub struct RingBufferListener {
+#[allow(
+    dead_code,
+    reason = "used by unit tests and optional embedder listeners"
+)]
+pub(crate) struct RingBufferListener {
     /// Mutable state protected by a single lock.
     inner: Mutex<RingBuffer>,
     /// Buffer capacity (immutable after construction).
@@ -175,6 +177,7 @@ pub struct RingBufferListener {
 }
 
 /// Internal mutable state of a [`RingBufferListener`].
+#[allow(dead_code, reason = "used by RingBufferListener")]
 struct RingBuffer {
     /// Fixed-size event slots.
     slots: Vec<Option<AuditEvent>>,
@@ -193,10 +196,11 @@ impl std::fmt::Debug for RingBufferListener {
     }
 }
 
+#[allow(dead_code, reason = "exercised in unit tests")]
 impl RingBufferListener {
     /// Creates a ring buffer with the given capacity.
     #[must_use]
-    pub fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize) -> Self {
         let cap = capacity.max(1);
         Self {
             inner: Mutex::new(RingBuffer {
@@ -209,14 +213,14 @@ impl RingBufferListener {
     }
 
     /// Total number of events ever recorded (may exceed capacity).
-    pub fn total_events(&self) -> u64 {
+    pub(crate) fn total_events(&self) -> u64 {
         self.inner.lock().map_or(0, |g| g.total)
     }
 
     /// Returns the most recent events, up to `limit`.
     ///
     /// Events are returned in chronological order (oldest first).
-    pub fn recent(&self, limit: usize) -> Vec<AuditEvent> {
+    pub(crate) fn recent(&self, limit: usize) -> Vec<AuditEvent> {
         let Ok(guard) = self.inner.lock() else {
             return Vec::new();
         };
@@ -275,10 +279,9 @@ mod tests {
     use super::*;
 
     fn make_event(id: &str) -> AuditEvent {
-        AuditEvent::now(AuditEventKind::BoxCreated {
+        AuditEvent::now(AuditEventKind::VmCreated {
             id: id.to_owned(),
             image: None,
-            tenant: "default".to_owned(),
         })
     }
 
@@ -305,10 +308,10 @@ mod tests {
         assert_eq!(events.len(), 2);
 
         // Should have vm2 and vm3 (vm1 was evicted).
-        if let AuditEventKind::BoxCreated { ref id, .. } = events[0].kind {
+        if let AuditEventKind::VmCreated { ref id, .. } = events[0].kind {
             assert_eq!(id, "vm2");
         }
-        if let AuditEventKind::BoxCreated { ref id, .. } = events[1].kind {
+        if let AuditEventKind::VmCreated { ref id, .. } = events[1].kind {
             assert_eq!(id, "vm3");
         }
     }

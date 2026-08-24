@@ -19,7 +19,6 @@ mod vm;
 mod volume;
 
 use anyhow::Result;
-use bux::{Feature, Vm};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
@@ -164,6 +163,8 @@ enum SystemAction {
         #[arg(long, default_value = "table")]
         format: OutputFormat,
     },
+    /// Delete the runtime data directory (requires no other Runtime).
+    Reset,
 }
 
 /// Subcommands for `bux snapshot`.
@@ -247,7 +248,7 @@ impl Cli {
             Command::Restart(args) => vm::restart(args).await,
             Command::Stats(ref args) => vm::stats(args).await,
             Command::Snapshot { action } => snapshot_cmd(action).await,
-            Command::Clone(ref args) => vm::clone_box(args),
+            Command::Clone(args) => vm::clone_box(args).await,
             Command::Export(ref args) => vm::export(args),
             Command::Pull { image } => pull(&image).await,
             Command::Images { format } => images(format),
@@ -255,6 +256,7 @@ impl Cli {
             Command::Info { format } => system_info(format),
             Command::System { action } => match action {
                 SystemAction::Info { format } => system_info(format),
+                SystemAction::Reset => system_reset(),
             },
             Command::Volume { action } => volume::dispatch(action),
             Command::Sweep => sweep_cmd(),
@@ -293,7 +295,7 @@ async fn snapshot_cmd(action: SnapshotAction) -> Result<()> {
             }
         }
         SnapshotAction::Rm { id } => {
-            rt.snapshots().delete(&id)?;
+            rt.delete_snapshot(&id)?;
             println!("{id}");
         }
     }
@@ -301,15 +303,15 @@ async fn snapshot_cmd(action: SnapshotAction) -> Result<()> {
 }
 
 async fn pull(image: &str) -> Result<()> {
-    let oci = bux_oci::Oci::open()?;
-    let result = oci.pull(image, |msg| eprintln!("{msg}")).await?;
+    let rt = vm::open_runtime()?;
+    let result = rt.pull(image, |msg| eprintln!("{msg}")).await?;
     println!("{}", result.reference);
     Ok(())
 }
 
 fn images(format: OutputFormat) -> Result<()> {
-    let oci = bux_oci::Oci::open()?;
-    let list = oci.images()?;
+    let rt = vm::open_runtime()?;
+    let list = rt.images()?;
 
     if matches!(format, OutputFormat::Json) {
         println!("{}", serde_json::to_string_pretty(&list)?);
@@ -334,27 +336,13 @@ fn images(format: OutputFormat) -> Result<()> {
 }
 
 fn rmi(refs: &[String]) -> Result<()> {
-    let oci = bux_oci::Oci::open()?;
+    let rt = vm::open_runtime()?;
     for r in refs {
-        oci.remove(r)?;
+        rt.remove_image(r)?;
         println!("{r}");
     }
     Ok(())
 }
-
-const FEATURES: &[(Feature, &str)] = &[
-    (Feature::Net, "net"),
-    (Feature::Blk, "blk"),
-    (Feature::Gpu, "gpu"),
-    (Feature::Snd, "snd"),
-    (Feature::Input, "input"),
-    (Feature::Efi, "efi"),
-    (Feature::Tee, "tee"),
-    (Feature::AmdSev, "amd-sev"),
-    (Feature::IntelTdx, "intel-tdx"),
-    (Feature::AwsNitro, "aws-nitro"),
-    (Feature::VirglResourceMap2, "virgl-resource-map2"),
-];
 
 /// Environment variables that affect host capture / paths (documented for operators).
 const CAPTURE_ENV: &[(&str, &str)] = &[
@@ -378,17 +366,8 @@ const CAPTURE_ENV: &[(&str, &str)] = &[
 ];
 
 fn system_info(format: OutputFormat) -> Result<()> {
-    let max_vcpus = Vm::max_vcpus().ok();
-    let supported: Vec<&str> = FEATURES
-        .iter()
-        .filter(|(f, _)| Vm::has_feature(*f).unwrap_or(false))
-        .map(|(_, name)| *name)
-        .collect();
-    let nested = Vm::check_nested_virt().ok();
     let host = bux::HostInfo::probe();
     let data_dir = bux::default_data_dir();
-    let caps = bux::check_host();
-    let isolation = bux::audit_isolation(&caps);
 
     if matches!(format, OutputFormat::Json) {
         let env: serde_json::Map<String, serde_json::Value> = CAPTURE_ENV
@@ -405,30 +384,25 @@ fn system_info(format: OutputFormat) -> Result<()> {
             .collect();
         let obj = serde_json::json!({
             "data_dir": data_dir,
-            "max_vcpus": max_vcpus,
-            "features": supported,
-            "nested_virt": nested,
             "host": host,
-            "isolation_warnings": isolation,
             "env": env,
             "protocol_version": bux_proto::PROTOCOL_VERSION,
-            "phase_a_limits": bux::PHASE_A_LIMITS,
         });
         println!("{}", serde_json::to_string_pretty(&obj)?);
         return Ok(());
     }
 
     println!("data dir:     {}", data_dir.display());
-    if let Some(n) = max_vcpus {
+    if let Some(n) = host.max_vcpus {
         println!("max vCPUs:    {n}");
     }
-    let label = if supported.is_empty() {
-        "none"
+    let label = if host.krun_features.is_empty() {
+        "none".to_owned()
     } else {
-        &supported.join(", ")
+        host.krun_features.join(", ")
     };
     println!("libkrun:      {label}");
-    match nested {
+    match host.nested_virt {
         Some(true) => println!("nested virt:  supported"),
         Some(false) => println!("nested virt:  not supported"),
         None => {}
@@ -440,9 +414,9 @@ fn system_info(format: OutputFormat) -> Result<()> {
     println!("cgroups v2:     {}", yn(host.cgroups));
     println!("MAC:            {}", yn(host.mandatory_access_control));
     println!("protocol:       v{}", bux_proto::PROTOCOL_VERSION);
-    if !isolation.is_empty() {
+    if !host.isolation_warnings.is_empty() {
         println!("warnings:");
-        for w in &isolation {
+        for w in &host.isolation_warnings {
             println!("  - {w}");
         }
     }
@@ -470,29 +444,40 @@ fn sweep_cmd() -> Result<()> {
 }
 
 #[cfg(unix)]
+fn system_reset() -> Result<()> {
+    bux::Runtime::reset(bux::default_data_dir())?;
+    println!("reset {}", bux::default_data_dir().display());
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn system_reset() -> Result<()> {
+    anyhow::bail!("system reset requires Linux or macOS")
+}
+
+#[cfg(unix)]
 fn disk_cmd(action: DiskAction) -> Result<()> {
-    let data_dir = bux::default_data_dir();
-    let dm = bux::DiskManager::open(&data_dir)?;
+    let rt = vm::open_runtime()?;
 
     match action {
         DiskAction::Create { rootfs, digest } => {
-            let path = dm.create_base(std::path::Path::new(&rootfs), &digest)?;
+            let path = rt.create_base(std::path::Path::new(&rootfs), &digest)?;
             println!("{}", path.display());
         }
         DiskAction::List => {
-            let bases = dm.list_bases()?;
+            let bases = rt.list_bases()?;
             if bases.is_empty() {
                 println!("No disk images.");
             } else {
                 for d in &bases {
-                    let path = dm.base_path(d);
+                    let path = rt.base_path(d);
                     let size = std::fs::metadata(&path).map_or(0, |m| m.len());
                     println!("{:<40} {:>10}", d, human_size(size));
                 }
             }
         }
         DiskAction::Rm { digest } => {
-            dm.remove_base(&digest)?;
+            rt.remove_base(&digest)?;
             println!("{digest}");
         }
     }

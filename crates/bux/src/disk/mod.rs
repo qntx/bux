@@ -24,7 +24,7 @@ use std::{fs, io};
 use serde::{Deserialize, Serialize};
 
 #[cfg(unix)]
-pub use bux_qcow2::Header as QcowHeader;
+pub(crate) use bux_qcow2::Header as QcowHeader;
 
 #[cfg(unix)]
 use crate::Result;
@@ -35,11 +35,11 @@ use crate::util::push_unique_path;
 
 /// Disk image format.
 ///
-/// Used across `VmConfig`, `VmBuilder`, and the FFI layer (`sys::add_disk2`).
+/// Used across `VmConfig` and the shim disk format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
-pub enum DiskFormat {
+pub(crate) enum DiskFormat {
     /// Raw disk image (default).
     #[default]
     Raw,
@@ -47,10 +47,14 @@ pub enum DiskFormat {
     Qcow2,
 }
 
+#[allow(
+    dead_code,
+    reason = "format helpers used when overlay paths are constructed"
+)]
 impl DiskFormat {
     /// Returns the file extension for this format.
     #[must_use]
-    pub const fn extension(self) -> &'static str {
+    pub(crate) const fn extension(self) -> &'static str {
         match self {
             Self::Raw => "raw",
             Self::Qcow2 => "qcow2",
@@ -83,7 +87,11 @@ impl From<DiskFormat> for bux_qcow2::BackingFormat {
 /// per-VM overlays that should be cleaned up when the VM is removed.
 #[cfg(unix)]
 #[derive(Debug)]
-pub struct Disk {
+#[allow(
+    dead_code,
+    reason = "RAII overlay handle kept for DiskManager internals"
+)]
+pub(crate) struct Disk {
     /// Absolute path to the disk image.
     path: PathBuf,
     /// Image format.
@@ -93,9 +101,13 @@ pub struct Disk {
 }
 
 #[cfg(unix)]
+#[allow(
+    dead_code,
+    reason = "RAII overlay handle kept for DiskManager internals"
+)]
 impl Disk {
     /// Creates a new handle. Does **not** touch the filesystem.
-    pub fn new(path: impl Into<PathBuf>, format: DiskFormat, persistent: bool) -> Self {
+    pub(crate) fn new(path: impl Into<PathBuf>, format: DiskFormat, persistent: bool) -> Self {
         Self {
             path: path.into(),
             format,
@@ -105,24 +117,24 @@ impl Disk {
 
     /// Returns the disk image path.
     #[must_use]
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
     /// Returns the disk format.
     #[must_use]
-    pub const fn format(&self) -> DiskFormat {
+    pub(crate) const fn format(&self) -> DiskFormat {
         self.format
     }
 
     /// Returns whether the disk survives drop.
     #[must_use]
-    pub const fn is_persistent(&self) -> bool {
+    pub(crate) const fn is_persistent(&self) -> bool {
         self.persistent
     }
 
     /// Marks the disk as persistent (will **not** be deleted on drop).
-    pub const fn set_persistent(&mut self, persistent: bool) {
+    pub(crate) const fn set_persistent(&mut self, persistent: bool) {
         self.persistent = persistent;
     }
 
@@ -131,7 +143,7 @@ impl Disk {
     /// Use when transferring ownership to another component that manages
     /// the file's lifetime independently.
     #[must_use]
-    pub fn into_path(self) -> PathBuf {
+    pub(crate) fn into_path(self) -> PathBuf {
         let this = std::mem::ManuallyDrop::new(self);
         this.path.clone()
     }
@@ -141,7 +153,7 @@ impl Disk {
     /// # Errors
     ///
     /// Returns an error if the format is not QCOW2 or the file cannot be parsed.
-    pub fn inspect(&self) -> Result<QcowHeader> {
+    pub(crate) fn inspect(&self) -> Result<QcowHeader> {
         if self.format != DiskFormat::Qcow2 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -160,7 +172,7 @@ impl Disk {
     /// # Errors
     ///
     /// Returns an error if the format is not QCOW2 or the resize fails.
-    pub fn resize(&self, new_size: u64) -> Result<()> {
+    pub(crate) fn resize(&self, new_size: u64) -> Result<()> {
         if self.format != DiskFormat::Qcow2 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -188,7 +200,7 @@ impl Drop for Disk {
 /// semantics via a backing file reference to the shared base.
 #[cfg(unix)]
 #[derive(Debug, Clone)]
-pub struct DiskManager {
+pub(crate) struct DiskManager {
     /// Directory for shared base images.
     bases_dir: PathBuf,
     /// Directory for per-VM QCOW2 overlays.
@@ -196,13 +208,17 @@ pub struct DiskManager {
 }
 
 #[cfg(unix)]
+#[allow(
+    dead_code,
+    reason = "disk helpers kept for Runtime and overlay maintenance"
+)]
 impl DiskManager {
     /// Opens (or creates) the disk storage directories under `data_dir`.
     ///
     /// # Errors
     ///
     /// Returns an error if directory creation fails.
-    pub fn open(data_dir: impl AsRef<Path>) -> io::Result<Self> {
+    pub(crate) fn open(data_dir: impl AsRef<Path>) -> io::Result<Self> {
         let base = data_dir.as_ref().join("disks");
         let bases_dir = base.join("bases");
         let vms_dir = base.join("vms");
@@ -213,19 +229,19 @@ impl DiskManager {
 
     /// Returns the directory where base disk images are stored.
     #[must_use]
-    pub fn bases_dir(&self) -> &Path {
+    pub(crate) fn bases_dir(&self) -> &Path {
         &self.bases_dir
     }
 
     /// Returns `true` if a base image for the given digest already exists.
     #[must_use]
-    pub fn has_base(&self, digest: &str) -> bool {
+    pub(crate) fn has_base(&self, digest: &str) -> bool {
         self.base_path(digest).exists()
     }
 
     /// Returns the path for a base image (may or may not exist).
     #[must_use]
-    pub fn base_path(&self, digest: &str) -> PathBuf {
+    pub(crate) fn base_path(&self, digest: &str) -> PathBuf {
         self.bases_dir.join(format!("{digest}.raw"))
     }
 
@@ -237,7 +253,7 @@ impl DiskManager {
     /// # Errors
     ///
     /// Returns an error if ext4 image creation or rename fails.
-    pub fn create_base(&self, rootfs: &Path, digest: &str) -> Result<PathBuf> {
+    pub(crate) fn create_base(&self, rootfs: &Path, digest: &str) -> Result<PathBuf> {
         let path = self.base_path(digest);
         if path.exists() {
             return Ok(path);
@@ -258,7 +274,7 @@ impl DiskManager {
     /// # Errors
     ///
     /// Returns an error if image creation, injection, or rename fails.
-    pub fn create_managed_base(&self, rootfs: &Path, digest: &str) -> Result<PathBuf> {
+    pub(crate) fn create_managed_base(&self, rootfs: &Path, digest: &str) -> Result<PathBuf> {
         let guest = ManagedGuestBinary::resolve()?;
         let versioned = guest.versioned_cache_key(digest);
         let path = self.base_path(&versioned);
@@ -299,7 +315,7 @@ impl DiskManager {
     /// # Errors
     ///
     /// Returns an error if the overlay creation or rename fails.
-    pub fn create_overlay(
+    pub(crate) fn create_overlay(
         &self,
         base: &Path,
         backing_format: DiskFormat,
@@ -322,7 +338,7 @@ impl DiskManager {
 
     /// Returns the QCOW2 overlay path for a VM (may or may not exist).
     #[must_use]
-    pub fn vm_disk_path(&self, vm_id: &str) -> PathBuf {
+    pub(crate) fn vm_disk_path(&self, vm_id: &str) -> PathBuf {
         self.vms_dir.join(format!("{vm_id}.qcow2"))
     }
 
@@ -331,7 +347,7 @@ impl DiskManager {
     /// # Errors
     ///
     /// Returns an error if the header cannot be read.
-    pub fn inspect_vm_disk(&self, vm_id: &str) -> Result<QcowHeader> {
+    pub(crate) fn inspect_vm_disk(&self, vm_id: &str) -> Result<QcowHeader> {
         Ok(bux_qcow2::read_header(&self.vm_disk_path(vm_id))?)
     }
 
@@ -340,7 +356,7 @@ impl DiskManager {
     /// # Errors
     ///
     /// Returns an error if the resize operation fails.
-    pub fn resize_vm_disk(&self, vm_id: &str, new_size: u64) -> Result<()> {
+    pub(crate) fn resize_vm_disk(&self, vm_id: &str, new_size: u64) -> Result<()> {
         Ok(bux_qcow2::resize(&self.vm_disk_path(vm_id), new_size)?)
     }
 
@@ -350,7 +366,7 @@ impl DiskManager {
     /// # Errors
     ///
     /// Returns an error if the flatten operation fails.
-    pub fn flatten_vm_disk(&self, vm_id: &str, dst: &Path) -> Result<()> {
+    pub(crate) fn flatten_vm_disk(&self, vm_id: &str, dst: &Path) -> Result<()> {
         Ok(bux_qcow2::flatten(&self.vm_disk_path(vm_id), dst)?)
     }
 
@@ -359,7 +375,7 @@ impl DiskManager {
     /// # Errors
     ///
     /// Returns an error if the file cannot be removed.
-    pub fn remove_vm_disk(&self, vm_id: &str) -> io::Result<()> {
+    pub(crate) fn remove_vm_disk(&self, vm_id: &str) -> io::Result<()> {
         let path = self.vm_disk_path(vm_id);
         if path.exists() {
             fs::remove_file(&path)?;
@@ -372,7 +388,7 @@ impl DiskManager {
     /// # Errors
     ///
     /// Returns an error if the directory cannot be read.
-    pub fn list_bases(&self) -> io::Result<Vec<String>> {
+    pub(crate) fn list_bases(&self) -> io::Result<Vec<String>> {
         let mut digests = Vec::new();
         for dir_entry in fs::read_dir(&self.bases_dir)? {
             let name = dir_entry?.file_name();
@@ -390,7 +406,7 @@ impl DiskManager {
     /// # Errors
     ///
     /// Returns an error if the file cannot be removed.
-    pub fn remove_base(&self, digest: &str) -> io::Result<()> {
+    pub(crate) fn remove_base(&self, digest: &str) -> io::Result<()> {
         let path = self.base_path(digest);
         if path.exists() {
             fs::remove_file(&path)?;
@@ -403,7 +419,7 @@ impl DiskManager {
     /// # Errors
     ///
     /// Returns an error if filesystem stat operations fail.
-    pub fn disk_usage(&self) -> io::Result<u64> {
+    pub(crate) fn disk_usage(&self) -> io::Result<u64> {
         let bases = dir_size(&self.bases_dir)?;
         let vms = dir_size(&self.vms_dir)?;
         Ok(bases + vms)
@@ -417,7 +433,7 @@ impl DiskManager {
     /// # Errors
     ///
     /// Returns an error if the stat fails or space is insufficient.
-    pub fn check_space(&self, needed_bytes: u64) -> io::Result<()> {
+    pub(crate) fn check_space(&self, needed_bytes: u64) -> io::Result<()> {
         let stat = nix::sys::statvfs::statvfs(&self.bases_dir)?;
         let frag = stat.fragment_size();
         #[allow(
