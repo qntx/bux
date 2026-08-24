@@ -124,13 +124,16 @@ jobs:
           mkdir "$staging"
           cp "target/$target/release/$bin" "target/$target/release/bux-shim" \
              LICENSE-MIT LICENSE-APACHE "$staging/"
-          if [ -n "$guest_target" ]; then
-            if [ -f "target/$target/release/bux-guest-$guest_target" ]; then
-              cp "target/$target/release/bux-guest-$guest_target" "$staging/"
-            elif [ -f ".guest/bux-guest-$guest_target" ]; then
-              cp ".guest/bux-guest-$guest_target" "$staging/"
-            fi
+          guest_src=""
+          if [ -f "target/$target/release/bux-guest-$guest_target" ]; then
+            guest_src="target/$target/release/bux-guest-$guest_target"
+          elif [ -f ".guest/bux-guest-$guest_target" ]; then
+            guest_src=".guest/bux-guest-$guest_target"
+          else
+            echo "missing bux-guest-$guest_target"
+            exit 1
           fi
+          cp "$guest_src" "$staging/"
 
           tar czf "$staging.tar.gz" -C "$staging" .
 
