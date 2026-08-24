@@ -124,7 +124,12 @@ pub fn mount_virtiofs_volumes(volumes: &[GuestVolume]) -> io::Result<()> {
 
 fn mount_virtiofs_volume(vol: &GuestVolume) -> io::Result<()> {
     vol.validate().map_err(io::Error::other)?;
-    fs::create_dir_all(&vol.guest_path)?;
+    fs::create_dir_all(&vol.guest_path).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("virtiofs tag {} mkdir {}: {e}", vol.tag, vol.guest_path),
+        )
+    })?;
 
     let source = CString::new(vol.tag.as_str()).map_err(|e| {
         io::Error::new(
@@ -269,5 +274,22 @@ mod tests {
     fn rejects_parent_dir_component() {
         let err = mount_virtiofs_volume(&vol("/var/../etc")).unwrap_err();
         assert!(err.to_string().contains(".."), "{err}");
+    }
+
+    #[test]
+    fn rejects_filesystem_root() {
+        let err = mount_virtiofs_volume(&vol("/")).unwrap_err();
+        assert!(err.to_string().contains("root"), "{err}");
+    }
+
+    #[test]
+    fn rejects_empty_tag() {
+        let v = GuestVolume {
+            tag: String::new(),
+            guest_path: "/data".into(),
+            read_only: false,
+        };
+        let err = mount_virtiofs_volume(&v).unwrap_err();
+        assert!(err.to_string().contains("tag"), "{err}");
     }
 }

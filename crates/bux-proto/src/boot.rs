@@ -28,7 +28,7 @@ pub enum GuestNetworkMode {
 pub struct GuestVolume {
     /// libkrun virtio-fs tag from `krun_add_virtiofs`.
     pub tag: String,
-    /// Absolute guest mount point (no `..` components).
+    /// Absolute guest mount point (no `..`; not filesystem root).
     pub guest_path: String,
     /// Read-only preference recorded by the host.
     ///
@@ -39,30 +39,46 @@ pub struct GuestVolume {
 }
 
 impl GuestVolume {
-    /// Reject non-absolute `guest_path` and any `..` component.
+    /// Reject empty `tag`, non-absolute `guest_path`, `..`, or filesystem root.
     ///
     /// # Errors
     ///
-    /// Returns a message if the path is empty, relative, or contains `..`.
+    /// Returns a message if the tag is empty or the path is not a safe mount point.
     pub fn validate(&self) -> Result<(), String> {
+        if self.tag.is_empty() {
+            return Err("virtiofs tag must not be empty".into());
+        }
         validate_guest_mount_path(&self.guest_path)
     }
 }
 
-/// Absolute POSIX guest mount point with no `..` component.
+/// Absolute POSIX guest mount point with a normal component and no `..`.
 ///
 /// # Errors
 ///
-/// Returns a message if the path is empty, relative, or contains `..`.
+/// Returns a message if the path is empty, relative, contains `..`, or is only
+/// root / `.` (`/` or `/./`).
 pub fn validate_guest_mount_path(guest_path: &str) -> Result<(), String> {
     if guest_path.is_empty() || !guest_path.starts_with('/') {
         return Err(format!("guest_path must be absolute: {guest_path:?}"));
     }
-    if Path::new(guest_path)
-        .components()
-        .any(|c| matches!(c, Component::ParentDir))
-    {
-        return Err(format!("guest_path must not contain '..': {guest_path:?}"));
+    let mut saw_name = false;
+    for c in Path::new(guest_path).components() {
+        match c {
+            Component::ParentDir => {
+                return Err(format!("guest_path must not contain '..': {guest_path:?}"));
+            }
+            Component::Normal(_) => saw_name = true,
+            Component::RootDir | Component::CurDir => {}
+            Component::Prefix(_) => {
+                return Err(format!("guest_path must be absolute: {guest_path:?}"));
+            }
+        }
+    }
+    if !saw_name {
+        return Err(format!(
+            "guest_path must not be filesystem root: {guest_path:?}"
+        ));
     }
     Ok(())
 }
@@ -197,9 +213,32 @@ mod tests {
 
     #[test]
     fn guest_path_accepts_absolute_without_parent() {
-        for path in ["/data", "/var/cache", "/", "/mnt/vol-1"] {
+        for path in ["/data", "/var/cache", "/mnt/vol-1", "/data/."] {
             vol(path).validate().unwrap();
             validate_guest_mount_path(path).unwrap();
         }
+    }
+
+    #[test]
+    fn guest_path_rejects_filesystem_root() {
+        for path in ["/", "/./", "/././"] {
+            let err = vol(path).validate().unwrap_err();
+            assert!(
+                err.contains("root"),
+                "expected root rejection for {path:?}, got {err}"
+            );
+            assert!(validate_guest_mount_path(path).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_empty_tag() {
+        let v = GuestVolume {
+            tag: String::new(),
+            guest_path: "/data".into(),
+            read_only: false,
+        };
+        let err = v.validate().unwrap_err();
+        assert!(err.contains("tag"), "{err}");
     }
 }

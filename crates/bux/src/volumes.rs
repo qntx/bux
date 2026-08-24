@@ -38,7 +38,7 @@ pub enum VolumeSource {
 pub struct VolumeMount {
     /// Where data lives on the host (bind or named).
     pub source: VolumeSource,
-    /// Intended guest mount point (recorded for inspect / future auto-mount).
+    /// Guest mount point. The agent mounts this at PID 1 from `GuestBootConfig.volumes`.
     pub guest_path: String,
     /// Prefer read-only exposure (recorded; engine virtiofs is still RW in v1).
     #[serde(default)]
@@ -96,7 +96,7 @@ pub struct ResolvedVolume {
     pub tag: String,
     /// Absolute host directory.
     pub host_path: PathBuf,
-    /// Guest path (product metadata).
+    /// Guest mount point. The agent mounts this at PID 1 from `GuestBootConfig.volumes`.
     pub guest_path: String,
     /// Read-only preference.
     pub read_only: bool,
@@ -453,6 +453,8 @@ mod tests {
     fn reject_parent_dir_in_guest() {
         assert!(validate_guest_path("/app/../etc").is_err());
         assert!(validate_guest_path("relative").is_err());
+        assert!(validate_guest_path("/").is_err());
+        assert!(validate_guest_path("/./").is_err());
         assert!(validate_guest_path("/data").is_ok());
     }
 

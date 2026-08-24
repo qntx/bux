@@ -113,7 +113,7 @@ pub(crate) struct VirtioFs {
     pub tag: String,
     /// Absolute host directory path.
     pub path: String,
-    /// Intended guest mount path (product metadata; guest may auto-mount later).
+    /// Guest mount point; the agent mounts this at PID 1 from `GuestBootConfig.volumes`.
     #[serde(default)]
     pub guest_path: String,
     /// Read-only preference (metadata; engine may still expose RW in v1).

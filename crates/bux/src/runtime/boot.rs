@@ -563,15 +563,17 @@ pub(super) fn inject_guest_boot_env(
     };
     let mut boot = GuestBootConfig::new(vm_id, mode);
     boot.mitm_ca_pem = mitm_ca_pem;
-    boot.volumes = config
-        .virtiofs
-        .iter()
-        .map(|v| GuestVolume {
+    let mut volumes = Vec::with_capacity(config.virtiofs.len());
+    for v in &config.virtiofs {
+        let vol = GuestVolume {
             tag: v.tag.clone(),
             guest_path: v.guest_path.clone(),
             read_only: v.read_only,
-        })
-        .collect();
+        };
+        vol.validate().map_err(crate::Error::InvalidConfig)?;
+        volumes.push(vol);
+    }
+    boot.volumes = volumes;
     let entry = boot
         .to_env_assignment()
         .map_err(crate::Error::InvalidConfig)?;
@@ -1000,6 +1002,39 @@ mod tests {
         assert_eq!(vol.tag, "vol0");
         assert_eq!(vol.guest_path, "/data");
         assert!(vol.read_only);
+    }
+
+    #[test]
+    fn guest_boot_env_rejects_empty_tag_or_root_path() {
+        let mut cfg = VmConfig {
+            virtiofs: vec![VirtioFs {
+                tag: String::new(),
+                path: "/host/data".into(),
+                guest_path: "/data".into(),
+                read_only: false,
+            }],
+            ..VmConfig::default()
+        };
+        assert!(matches!(
+            inject_guest_boot_env(&mut cfg, "abc", None),
+            Err(crate::Error::InvalidConfig(_))
+        ));
+
+        {
+            let share = cfg.virtiofs.first_mut().expect("one virtiofs");
+            share.tag = "vol0".into();
+            share.guest_path.clear();
+        }
+        assert!(matches!(
+            inject_guest_boot_env(&mut cfg, "abc", None),
+            Err(crate::Error::InvalidConfig(_))
+        ));
+
+        cfg.virtiofs.first_mut().expect("one virtiofs").guest_path = "/".into();
+        assert!(matches!(
+            inject_guest_boot_env(&mut cfg, "abc", None),
+            Err(crate::Error::InvalidConfig(_))
+        ));
     }
 
     #[test]
