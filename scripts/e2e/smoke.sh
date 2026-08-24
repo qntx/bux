@@ -75,7 +75,7 @@ if [[ "${BUX_E2E_FULL:-}" != "1" ]]; then
   exit 0
 fi
 
-# Guest wget to example.com (busybox or GNU). Used for egress, allow_net, offline.
+# Guest wget body (busybox or GNU). Caller requires a non-empty file for egress.
 guest_wget() {
   local target="$1"
   local timeout="${2:-10}"
@@ -83,21 +83,81 @@ guest_wget() {
     || bux exec "${target}" -- busybox wget -qO- -T "${timeout}" http://example.com
 }
 
-# Serve a marker on guest :80 (daemonizing httpd, else a one-shot nc in the background).
-start_guest_port80() {
-  local name="$1"
-  if bux exec "${name}" -- sh -c \
-    'mkdir -p /tmp/www && printf "bux-e2e-pub\n" > /tmp/www/index.html && (httpd -p 80 -h /tmp/www || busybox httpd -p 80 -h /tmp/www)'; then
-    return 0
-  fi
-  echo "==> guest httpd missing; background nc on :80"
-  bux exec "${name}" -- sh -c \
-    'printf "HTTP/1.0 200 OK\r\nContent-Length: 12\r\n\r\nbux-e2e-pub\n" | (nc -l -p 80 || nc -l 80 || busybox nc -l -p 80)' \
-    >/tmp/bux-e2e-pub-nc.out 2>&1 &
-  sleep 1
+# One of WGET_OK / WGET_FAIL / WGET_MISSING. Exec transport errors abort (set -e).
+guest_wget_probe() {
+  local target="$1"
+  local timeout="${2:-10}"
+  bux exec "${target}" -- sh -c "
+    if command -v wget >/dev/null 2>&1; then
+      w() { wget -qO- -T ${timeout} http://example.com; }
+    elif command -v busybox >/dev/null 2>&1; then
+      w() { busybox wget -qO- -T ${timeout} http://example.com; }
+    else
+      echo WGET_MISSING
+      exit 0
+    fi
+    if w >/dev/null 2>&1; then
+      echo WGET_OK
+    else
+      echo WGET_FAIL
+    fi
+  "
 }
 
-# Host TCP to a published port must carry the guest payload (gvproxy bind alone is not enough).
+require_wget_ok() {
+  local status
+  status="$(guest_wget_probe "$1" "$2")"
+  if [[ "${status}" != *WGET_OK* ]]; then
+    echo "$3: expected wget success, got ${status:-empty}"
+    return 1
+  fi
+}
+
+require_wget_fail() {
+  local status
+  status="$(guest_wget_probe "$1" "$2")"
+  case "${status}" in
+    *WGET_FAIL*) return 0 ;;
+    *WGET_OK*)
+      echo "$3: wget succeeded"
+      return 1
+      ;;
+    *)
+      echo "$3: exec/wget missing (${status:-empty})"
+      return 1
+      ;;
+  esac
+}
+
+# Alpine busybox has no httpd; busybox-extras does. httpd without -f daemonizes
+# so this exec returns and releases bux.lock. Never background bux exec.
+start_guest_port80() {
+  local name="$1"
+  bux exec "${name}" -- sh -c '
+    mkdir -p /tmp/www
+    printf "bux-e2e-pub\n" > /tmp/www/index.html
+    if ! command -v httpd >/dev/null 2>&1; then
+      if ! command -v apk >/dev/null 2>&1; then
+        echo "start_guest_port80: no httpd and no apk" >&2
+        exit 1
+      fi
+      apk add --no-cache busybox-extras
+    fi
+    if command -v httpd >/dev/null 2>&1; then
+      httpd -p 80 -h /tmp/www
+      exit 0
+    fi
+    if command -v busybox >/dev/null 2>&1; then
+      busybox httpd -p 80 -h /tmp/www
+      exit 0
+    fi
+    echo "start_guest_port80: no daemonizing httpd after install" >&2
+    exit 1
+  '
+}
+
+# Host TCP must carry the guest payload (gvproxy bind alone is not enough).
+# Heredoc body must sit inside $(...) — closing ) belongs after PY.
 assert_host_reaches_guest() {
   local port="$1"
   local i out py=0
@@ -107,7 +167,7 @@ assert_host_reaches_guest() {
   for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     out=""
     if [[ "${py}" == 1 ]]; then
-      out="$(python3 - "${port}" <<'PY' 2>/dev/null || true)
+      out="$(python3 - "${port}" 2>/dev/null <<'PY' || true
 import socket, sys
 port = int(sys.argv[1])
 s = socket.create_connection(("127.0.0.1", port), 2)
@@ -135,11 +195,8 @@ PY
     elif command -v wget >/dev/null 2>&1; then
       out="$(wget -qO- -T 2 "http://127.0.0.1:${port}/" 2>/dev/null || true)"
     else
-      if bash -c "printf 'GET / HTTP/1.0\r\nHost: x\r\n\r\n' >&3; cat <&3" 3<>"/dev/tcp/127.0.0.1/${port}" \
-        2>/dev/null | grep -q bux-e2e-pub; then
-        echo "==> host TCP ${port} reached guest"
-        return 0
-      fi
+      echo "D1 publish failed: need python3, curl, or wget for the host TCP client"
+      return 1
     fi
     if [[ "${out}" == *bux-e2e-pub* ]]; then
       echo "==> host TCP ${port} reached guest"
@@ -164,6 +221,7 @@ echo "==> exec echo"
 bux exec "${NAME}" -- echo e2e-ok
 
 echo "==> egress (unrestricted)"
+require_wget_ok "${NAME}" 10 "egress"
 guest_wget "${NAME}" 10 >/tmp/bux-e2e-egress.out
 test -s /tmp/bux-e2e-egress.out
 
@@ -174,8 +232,7 @@ bux rm "${NAME}"
 DENY="e2e-deny-$(date +%s)"
 echo "==> allow_net deny ${DENY}"
 bux create --name "${DENY}" --allow-net 127.0.0.1 "${IMAGE}"
-if guest_wget "${DENY}" 3 >/dev/null; then
-  echo "allow_net deny failed: wget succeeded"
+if ! require_wget_fail "${DENY}" 3 "allow_net deny"; then
   bux rm -f "${DENY}" || true
   exit 1
 fi
@@ -206,16 +263,25 @@ bux rm -f "${PUB}"
 OFF="e2e-offline-$(date +%s)"
 echo "==> offline-no-eth0 ${OFF}"
 bux create --name "${OFF}" --network=disabled "${IMAGE}"
-if guest_wget "${OFF}" 3 >/dev/null; then
-  echo "offline-no-eth0 failed: wget succeeded (TSI leak)"
+if ! require_wget_fail "${OFF}" 3 "offline-no-eth0"; then
   bux rm -f "${OFF}" || true
   exit 1
 fi
-if bux exec "${OFF}" -- test -e /sys/class/net/eth0; then
-  echo "offline-no-eth0 failed: eth0 present"
-  bux rm -f "${OFF}" || true
-  exit 1
-fi
+# Tokenize so exec-dead / missing sysfs cannot look like "no eth0".
+off_net="$(bux exec "${OFF}" -- sh -c 'test -d /sys/class/net && echo SYSFS_OK || echo SYSFS_MISSING; test -e /sys/class/net/eth0 && echo HAS_ETH0 || echo NO_ETH0')"
+case "${off_net}" in
+  *SYSFS_OK*NO_ETH0*) ;;
+  *HAS_ETH0*)
+    echo "offline-no-eth0 failed: eth0 present (${off_net})"
+    bux rm -f "${OFF}" || true
+    exit 1
+    ;;
+  *)
+    echo "offline-no-eth0 failed: /sys/class/net missing or exec dead (${off_net:-empty})"
+    bux rm -f "${OFF}" || true
+    exit 1
+    ;;
+esac
 bux rm -f "${OFF}"
 
 VOL="e2e-vol-$(date +%s)"
