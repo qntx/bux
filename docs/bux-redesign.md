@@ -17,17 +17,17 @@ Spine:
 5. Host `Client` uses postcard protocol v9 (one Unix-socket connection per op).
 6. SQLite `user_version` 4; mismatch refuses to open (wipe `data_dir`).
 
-## Known defects (not this landing)
+## Known defects
 
-| ID | Defect |
+| ID | Status |
 |----|--------|
-| D1 | ~~gvproxy in Runtime; detach broken~~ — fixed: gvproxy in `bux-shim-bin`; `VmConfig.detach` gates parent-death |
-| D2 | `NetworkSpec::Disabled` does not disable libkrun TSI |
-| D3 | virtio-fs volumes are attached on the host and never mounted in the guest |
-| D4 | `BUX_E2E_FULL=1` is a manual HVF/KVM gate; CI stays host-only (`BUX_E2E_FULL=0`) |
+| D1 | Fixed: gvproxy in `bux-shim-bin`; `VmConfig.detach` gates parent-death |
+| D2 | Fixed in engine: `disable_implicit_vsock` + `add_vsock(0)`; **guest proof is FULL `offline-no-eth0`** |
+| D3 | Fixed in agent: virtiofs mount from `GuestBootConfig`; **guest proof is FULL volume ls** |
+| D4 | Open: FULL never recorded green |
 
-Do not treat this landing as production-ready until those are fixed and the
-scripted full e2e checklist is green on a hypervisor machine.
+D1–D3 are complete in code. Production is a recorded green `BUX_E2E_FULL=1` on
+local HVF (Apple Silicon). Host CI (`BUX_E2E_FULL=0`) is not that proof.
 
 ## See also
 

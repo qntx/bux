@@ -12,9 +12,8 @@
 //! - [`NetworkStats`] / [`TcpStats`] — live counters decoded from JSON.
 //! - [`init_logging`] — Go `slog` → Rust `tracing` bridge (idempotent).
 //!
-//! Higher layers (`bux-net` and callers) wire the `GvproxyInstance`
-//! into their own network-backend abstractions; this crate does not
-//! depend on any bux trait so it remains independently usable.
+//! `bux-shim-bin` constructs [`GvproxyInstance`] in-process. This crate
+//! does not depend on any bux trait so it remains independently usable.
 //!
 //! [gvisor-tap-vsock]: https://github.com/containers/gvisor-tap-vsock
 //!

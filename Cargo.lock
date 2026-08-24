@@ -357,16 +357,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bux-net"
-version = "0.1.0"
-dependencies = [
- "bux-gvproxy",
- "serde",
- "thiserror 2.0.20",
- "tracing",
-]
-
-[[package]]
 name = "bux-oci"
 version = "0.7.0"
 dependencies = [
