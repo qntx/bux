@@ -33,8 +33,6 @@ mod events;
 #[cfg(unix)]
 mod guest;
 #[cfg(unix)]
-mod health;
-#[cfg(unix)]
 mod lifecycle;
 mod log_level;
 mod metrics;
@@ -61,7 +59,9 @@ pub use bux_proto::ExecStart;
 #[cfg(unix)]
 pub use client::{ExecHandle, ExecOutput, PongInfo};
 pub use error::{Error, Result};
-pub use events::{AuditEvent, AuditEventKind, EventDispatcher, EventListener};
+pub use events::{
+    AuditEvent, AuditEventKind, CopyDirection, EventDispatcher, EventListener, RingBufferListener,
+};
 #[cfg(unix)]
 pub use lifecycle::SweepReport;
 pub use metrics::{RuntimeMetrics, VmMetrics};

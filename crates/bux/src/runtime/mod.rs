@@ -343,7 +343,14 @@ impl Runtime {
         Ok(removed)
     }
 
-    /// Clone a VM by flattening its overlay into a new base disk, then boot.
+    /// Disk-clone a VM: flatten its QCOW2 overlay into a new base, then boot.
+    ///
+    /// Copied from the source: overlay contents, `vcpus`, `ram_mib`, `network`,
+    /// and `auto_remove`.
+    ///
+    /// Not copied: ports, volumes, secrets, security, command, env, workdir,
+    /// user, detach, auto-stop/delete, ready timeout, or name (unless `name`
+    /// is passed).
     ///
     /// # Errors
     ///

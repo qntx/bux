@@ -3,9 +3,9 @@
 //! # Architecture
 //!
 //! - [`DiskFormat`] — Type-safe disk format enum (Raw / Qcow2) with serde support.
-//! - [`Disk`] — RAII handle that optionally auto-removes the file on drop.
 //! - [`DiskManager`] — Manages shared ext4 bases and per-VM QCOW2 overlays.
-//! - QCOW2 operations themselves live in the [`bux_qcow2`] sub-crate.
+//! - QCOW2 operations themselves live in the `bux_qcow2` crate.
+//!   Product code does not expose resize; callers that need it use `bux_qcow2::resize`.
 //!
 //! # Storage layout
 //!
@@ -22,9 +22,6 @@ use std::path::{Path, PathBuf};
 use std::{fs, io};
 
 use serde::{Deserialize, Serialize};
-
-#[cfg(unix)]
-pub(crate) use bux_qcow2::Header as QcowHeader;
 
 #[cfg(unix)]
 use crate::Result;
@@ -47,21 +44,6 @@ pub(crate) enum DiskFormat {
     Qcow2,
 }
 
-#[allow(
-    dead_code,
-    reason = "format helpers used when overlay paths are constructed"
-)]
-impl DiskFormat {
-    /// Returns the file extension for this format.
-    #[must_use]
-    pub(crate) const fn extension(self) -> &'static str {
-        match self {
-            Self::Raw => "raw",
-            Self::Qcow2 => "qcow2",
-        }
-    }
-}
-
 impl fmt::Display for DiskFormat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -81,118 +63,6 @@ impl From<DiskFormat> for bux_qcow2::BackingFormat {
     }
 }
 
-/// RAII handle for a disk image file.
-///
-/// When `persistent` is `false`, the file is deleted on drop — useful for
-/// per-VM overlays that should be cleaned up when the VM is removed.
-#[cfg(unix)]
-#[derive(Debug)]
-#[allow(
-    dead_code,
-    reason = "RAII overlay handle kept for DiskManager internals"
-)]
-pub(crate) struct Disk {
-    /// Absolute path to the disk image.
-    path: PathBuf,
-    /// Image format.
-    format: DiskFormat,
-    /// If `false`, the file is removed on drop.
-    persistent: bool,
-}
-
-#[cfg(unix)]
-#[allow(
-    dead_code,
-    reason = "RAII overlay handle kept for DiskManager internals"
-)]
-impl Disk {
-    /// Creates a new handle. Does **not** touch the filesystem.
-    pub(crate) fn new(path: impl Into<PathBuf>, format: DiskFormat, persistent: bool) -> Self {
-        Self {
-            path: path.into(),
-            format,
-            persistent,
-        }
-    }
-
-    /// Returns the disk image path.
-    #[must_use]
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Returns the disk format.
-    #[must_use]
-    pub(crate) const fn format(&self) -> DiskFormat {
-        self.format
-    }
-
-    /// Returns whether the disk survives drop.
-    #[must_use]
-    pub(crate) const fn is_persistent(&self) -> bool {
-        self.persistent
-    }
-
-    /// Marks the disk as persistent (will **not** be deleted on drop).
-    pub(crate) const fn set_persistent(&mut self, persistent: bool) {
-        self.persistent = persistent;
-    }
-
-    /// Consumes the handle and returns the path without deleting the file.
-    ///
-    /// Use when transferring ownership to another component that manages
-    /// the file's lifetime independently.
-    #[must_use]
-    pub(crate) fn into_path(self) -> PathBuf {
-        let this = std::mem::ManuallyDrop::new(self);
-        this.path.clone()
-    }
-
-    /// Reads the QCOW2 header.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the format is not QCOW2 or the file cannot be parsed.
-    pub(crate) fn inspect(&self) -> Result<QcowHeader> {
-        if self.format != DiskFormat::Qcow2 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "inspect is only supported for QCOW2 images",
-            )
-            .into());
-        }
-        Ok(bux_qcow2::read_header(&self.path)?)
-    }
-
-    /// Resizes the virtual size of a QCOW2 image using `qemu-img`.
-    ///
-    /// This is a no-op if the format is `Raw` (raw images do not have
-    /// a virtual size distinct from their file size).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the format is not QCOW2 or the resize fails.
-    pub(crate) fn resize(&self, new_size: u64) -> Result<()> {
-        if self.format != DiskFormat::Qcow2 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "resize is only supported for QCOW2 images",
-            )
-            .into());
-        }
-        Ok(bux_qcow2::resize(&self.path, new_size)?)
-    }
-}
-
-#[cfg(unix)]
-impl Drop for Disk {
-    fn drop(&mut self) {
-        if !self.persistent {
-            drop(fs::remove_file(&self.path));
-        }
-    }
-}
-
 /// Manages ext4 base images and per-VM QCOW2 overlay disks.
 ///
 /// Base images are created once per OCI image digest and shared across VMs.
@@ -208,10 +78,6 @@ pub(crate) struct DiskManager {
 }
 
 #[cfg(unix)]
-#[allow(
-    dead_code,
-    reason = "disk helpers kept for Runtime and overlay maintenance"
-)]
 impl DiskManager {
     /// Opens (or creates) the disk storage directories under `data_dir`.
     ///
@@ -231,12 +97,6 @@ impl DiskManager {
     #[must_use]
     pub(crate) fn bases_dir(&self) -> &Path {
         &self.bases_dir
-    }
-
-    /// Returns `true` if a base image for the given digest already exists.
-    #[must_use]
-    pub(crate) fn has_base(&self, digest: &str) -> bool {
-        self.base_path(digest).exists()
     }
 
     /// Returns the path for a base image (may or may not exist).
@@ -342,24 +202,6 @@ impl DiskManager {
         self.vms_dir.join(format!("{vm_id}.qcow2"))
     }
 
-    /// Reads the QCOW2 header of a VM's overlay disk.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the header cannot be read.
-    pub(crate) fn inspect_vm_disk(&self, vm_id: &str) -> Result<QcowHeader> {
-        Ok(bux_qcow2::read_header(&self.vm_disk_path(vm_id))?)
-    }
-
-    /// Resizes the virtual size of a VM's QCOW2 overlay.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the resize operation fails.
-    pub(crate) fn resize_vm_disk(&self, vm_id: &str, new_size: u64) -> Result<()> {
-        Ok(bux_qcow2::resize(&self.vm_disk_path(vm_id), new_size)?)
-    }
-
     /// Flattens a VM's QCOW2 overlay and its entire backing chain into
     /// a standalone QCOW2 file at `dst`.
     ///
@@ -424,34 +266,6 @@ impl DiskManager {
         let vms = dir_size(&self.vms_dir)?;
         Ok(bases + vms)
     }
-
-    /// Checks if at least `needed_bytes` of free space is available
-    /// on the filesystem where the disk storage is located.
-    ///
-    /// Returns `Ok(())` if sufficient space exists, or an error if not.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the stat fails or space is insufficient.
-    pub(crate) fn check_space(&self, needed_bytes: u64) -> io::Result<()> {
-        let stat = nix::sys::statvfs::statvfs(&self.bases_dir)?;
-        let frag = stat.fragment_size();
-        #[allow(
-            clippy::useless_conversion,
-            reason = "fsblkcnt_t is u32 on macOS but u64 on Linux; explicit conversion keeps code portable"
-        )]
-        let blocks: u64 = stat.blocks_available().into();
-        let available = frag * blocks;
-        if available < needed_bytes {
-            return Err(io::Error::new(
-                io::ErrorKind::StorageFull,
-                format!(
-                    "insufficient disk space: need {needed_bytes} bytes, only {available} available",
-                ),
-            ));
-        }
-        Ok(())
-    }
 }
 
 /// Calculates total size of all regular files in a directory (non-recursive).
@@ -474,12 +288,8 @@ fn dir_size(dir: &Path) -> io::Result<u64> {
     Ok(total)
 }
 
+/// Backing-chain paths that the jail should bind read-only (parents + files).
 #[cfg(unix)]
-#[allow(
-    dead_code,
-    clippy::missing_docs_in_private_items,
-    reason = "internal helper reserved for sandbox ro-path wiring (wired up in a later phase)"
-)]
 pub(crate) fn readonly_disk_paths(path: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for backing in bux_qcow2::read_backing_chain(path) {

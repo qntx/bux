@@ -56,8 +56,14 @@ pub struct RunArgs {
     network: String,
 
     /// Host MITM secret (`name=value@host1,host2` or `name=value` using --allow-net hosts).
+    ///
+    /// Visible on `/proc/<pid>/cmdline`. Prefer `--secret-file` on shared hosts.
     #[arg(long = "secret")]
     secrets: Vec<String>,
+
+    /// Host MITM secrets from a file. Mode must be `0600`. One `name=value[@host]` per line.
+    #[arg(long = "secret-file", value_name = "PATH")]
+    secret_file: Vec<String>,
 
     /// Bind mount a volume (format: `hostPath:guestPath[:ro]`).
     #[arg(short = 'v', long = "volume")]
@@ -128,8 +134,14 @@ pub struct CreateArgs {
     network: String,
 
     /// Host MITM secret (`name=value@host` or `name=value`).
+    ///
+    /// Visible on `/proc/<pid>/cmdline`. Prefer `--secret-file` on shared hosts.
     #[arg(long = "secret")]
     secrets: Vec<String>,
+
+    /// Host MITM secrets from a file. Mode must be `0600`. One `name=value[@host]` per line.
+    #[arg(long = "secret-file", value_name = "PATH")]
+    secret_file: Vec<String>,
 
     /// Bind mount (`hostPath:guestPath[:ro]`).
     #[arg(short = 'v', long = "volume")]
@@ -152,6 +164,7 @@ impl CreateArgs {
             allow_net: self.allow_net,
             network: self.network,
             secrets: self.secrets,
+            secret_file: self.secret_file,
             volume: self.volume,
             env: vec![],
             env_file: vec![],
@@ -206,11 +219,15 @@ impl RunArgs {
             opts = opts.allow_net(self.allow_net.clone());
         }
 
-        if !self.secrets.is_empty() {
+        let mut secrets = parse_secrets(&self.secrets, &self.allow_net)?;
+        for path in &self.secret_file {
+            secrets.extend(parse_secret_file(path, &self.allow_net)?);
+        }
+        if !secrets.is_empty() {
             if !opts.network.is_enabled() {
-                anyhow::bail!("--secret requires --network=enabled (gvproxy MITM)");
+                anyhow::bail!("--secret/--secret-file requires --network=enabled (gvproxy MITM)");
             }
-            opts = opts.secrets(parse_secrets(&self.secrets, &self.allow_net)?);
+            opts = opts.secrets(secrets);
         }
 
         for spec in &self.volume {
@@ -343,6 +360,35 @@ pub fn parse_secrets(specs: &[String], allow_net: &[String]) -> Result<Vec<bux::
     Ok(out)
 }
 
+/// Load `--secret` specs from a file that must be mode `0600`.
+fn parse_secret_file(path: &str, allow_net: &[String]) -> Result<Vec<bux::Secret>> {
+    #[cfg(not(unix))]
+    {
+        let _ = (path, allow_net);
+        anyhow::bail!("--secret-file requires Linux or macOS");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let meta =
+            std::fs::metadata(path).with_context(|| format!("cannot stat --secret-file {path}"))?;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode != 0o600 {
+            anyhow::bail!("--secret-file {path} must have mode 0600 (got {mode:04o})");
+        }
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("cannot read --secret-file {path}"))?;
+        let specs: Vec<String> = content
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(ToOwned::to_owned)
+            .collect();
+        parse_secrets(&specs, allow_net)
+    }
+}
+
 fn parse_one_secret(spec: &str, allow_net: &[String]) -> Result<bux::Secret> {
     let (left, hosts_part) = match spec.rsplit_once('@') {
         Some((l, h)) if l.contains('=') => (l, Some(h)),
@@ -398,5 +444,64 @@ mod secret_tests {
     fn parse_star_default() {
         let s = parse_one_secret("t=val", &[]).unwrap();
         assert_eq!(s.hosts, vec!["*"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_file_rejects_non_0600() {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "bux-secret-bad-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o644)
+                .open(&path)
+                .unwrap();
+            f.write_all(b"t=val@h\n").unwrap();
+        }
+        let err = parse_secret_file(path.to_str().unwrap(), &[]).unwrap_err();
+        drop(std::fs::remove_file(&path));
+        assert!(err.to_string().contains("0600"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_file_reads_0600() {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "bux-secret-ok-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+                .unwrap();
+            f.write_all(b"k=v@api.example.com\n").unwrap();
+        }
+        let secrets = parse_secret_file(path.to_str().unwrap(), &[]).unwrap();
+        drop(std::fs::remove_file(&path));
+        assert_eq!(secrets.len(), 1);
+        assert_eq!(secrets[0].name, "k");
+        assert_eq!(secrets[0].value, "v");
+        assert_eq!(secrets[0].hosts, vec!["api.example.com"]);
     }
 }

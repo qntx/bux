@@ -87,7 +87,7 @@ enum Command {
         action: SnapshotAction,
     },
 
-    /// Clone a VM (creates an independent copy with the same disk state).
+    /// Disk-clone a VM (overlay flatten; copies `vcpus`, ram, network, `auto_remove`).
     Clone(vm::CloneArgs),
 
     /// Export a VM's disk as a standalone QCOW2 image.

@@ -10,9 +10,6 @@
 
 /// Host / guest capability probes.
 pub mod checks;
-/// Linux credential dropping (uid/gid/caps).
-#[cfg(target_os = "linux")]
-pub mod credentials;
 mod error;
 mod pre_exec;
 /// Security layer status types.

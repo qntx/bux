@@ -576,7 +576,7 @@ pub struct StatsArgs {
     pub vm: String,
 }
 
-/// Arguments for `bux clone`.
+/// Arguments for `bux clone` (disk-clone: overlay flatten; copies `vcpus`, ram, network, `auto_remove`).
 #[derive(clap::Args)]
 pub struct CloneArgs {
     /// Source VM ID or name.

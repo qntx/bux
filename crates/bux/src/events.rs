@@ -165,11 +165,7 @@ impl EventDispatcher {
 ///
 /// Thread-safe: all state is behind a single `Mutex`.
 /// Suitable for in-process querying of recent activity.
-#[allow(
-    dead_code,
-    reason = "used by unit tests and optional embedder listeners"
-)]
-pub(crate) struct RingBufferListener {
+pub struct RingBufferListener {
     /// Mutable state protected by a single lock.
     inner: Mutex<RingBuffer>,
     /// Buffer capacity (immutable after construction).
@@ -177,7 +173,6 @@ pub(crate) struct RingBufferListener {
 }
 
 /// Internal mutable state of a [`RingBufferListener`].
-#[allow(dead_code, reason = "used by RingBufferListener")]
 struct RingBuffer {
     /// Fixed-size event slots.
     slots: Vec<Option<AuditEvent>>,
@@ -196,11 +191,10 @@ impl std::fmt::Debug for RingBufferListener {
     }
 }
 
-#[allow(dead_code, reason = "exercised in unit tests")]
 impl RingBufferListener {
     /// Creates a ring buffer with the given capacity.
     #[must_use]
-    pub(crate) fn new(capacity: usize) -> Self {
+    pub fn new(capacity: usize) -> Self {
         let cap = capacity.max(1);
         Self {
             inner: Mutex::new(RingBuffer {
@@ -213,14 +207,16 @@ impl RingBufferListener {
     }
 
     /// Total number of events ever recorded (may exceed capacity).
-    pub(crate) fn total_events(&self) -> u64 {
+    #[must_use]
+    pub fn total_events(&self) -> u64 {
         self.inner.lock().map_or(0, |g| g.total)
     }
 
     /// Returns the most recent events, up to `limit`.
     ///
     /// Events are returned in chronological order (oldest first).
-    pub(crate) fn recent(&self, limit: usize) -> Vec<AuditEvent> {
+    #[must_use]
+    pub fn recent(&self, limit: usize) -> Vec<AuditEvent> {
         let Ok(guard) = self.inner.lock() else {
             return Vec::new();
         };
@@ -314,6 +310,23 @@ mod tests {
         if let AuditEventKind::VmCreated { ref id, .. } = events[1].kind {
             assert_eq!(id, "vm3");
         }
+    }
+
+    #[test]
+    fn file_copied_variant_round_trip() {
+        let event = AuditEvent::now(AuditEventKind::FileCopied {
+            vm_id: "vm1".into(),
+            direction: CopyDirection::In,
+            path: "/tmp/x".into(),
+        });
+        assert!(matches!(
+            event.kind,
+            AuditEventKind::FileCopied {
+                ref vm_id,
+                direction: CopyDirection::In,
+                ref path,
+            } if vm_id == "vm1" && path == "/tmp/x"
+        ));
     }
 
     #[test]

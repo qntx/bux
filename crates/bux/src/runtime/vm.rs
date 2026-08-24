@@ -20,7 +20,7 @@ use super::boot::{
 use crate::Result;
 use crate::client::{Client, ExecHandle, ExecOutput, PongInfo};
 use crate::disk::DiskManager;
-use crate::events::{AuditEvent, AuditEventKind, EventDispatcher};
+use crate::events::{AuditEvent, AuditEventKind, CopyDirection, EventDispatcher};
 use crate::metrics::{RuntimeMetrics, VmMetrics};
 use crate::options::NetworkSpec;
 use crate::ports::PublishedPort;
@@ -178,6 +178,8 @@ impl Vm {
 
     /// Tear down a VM that never became ready (create failure).
     pub(super) fn abort_unready(&mut self) {
+        let uptime_ms = u64::try_from(self.spawned_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.runtime_metrics.on_vm_failed(uptime_ms);
         signal::kill(Pid::from_raw(self.state.pid), Signal::SIGKILL).ok();
         self.secrets
             .lock()
@@ -343,23 +345,6 @@ impl Vm {
         self.disk.flatten_vm_disk(vm_id, dest)?;
         info!(vm_id = %vm_id, dest = %dest.display(), "VM disk exported");
         Ok(())
-    }
-
-    /// Starts a background health check task for this VM.
-    #[allow(
-        dead_code,
-        reason = "opt-in background health; not on the product inspect path"
-    )]
-    pub(crate) fn enable_health_check(
-        &self,
-        config: crate::health::HealthCheckConfig,
-    ) -> crate::health::HealthCheckHandle {
-        crate::health::start(
-            self.state.id.clone(),
-            self.client.clone(),
-            Arc::clone(&self.db),
-            config,
-        )
     }
 
     /// Probes the guest agent and returns the current health status.
@@ -550,6 +535,7 @@ impl Vm {
         if !ready_timeout.is_zero()
             && let Err(e) = self.wait_ready(ready_timeout).await
         {
+            self.runtime_metrics.record_failed();
             if let Err(kill_err) = self.kill() {
                 tracing::warn!(error = %kill_err, "failed to stop VM after ready failure");
             }
@@ -750,7 +736,9 @@ impl Vm {
     ///
     /// Returns an error if the copy operation fails.
     pub async fn copy_in(&self, dest: &str, tar_data: &[u8]) -> Result<()> {
-        Ok(self.client.copy_in(dest, tar_data).await?)
+        self.client.copy_in(dest, tar_data).await?;
+        self.emit_file_copied(CopyDirection::In, dest);
+        Ok(())
     }
 
     /// Streams a tar archive from `reader` into the guest, unpacking at `dest`.
@@ -763,7 +751,9 @@ impl Vm {
         dest: &str,
         reader: &mut (impl tokio::io::AsyncRead + Unpin + Send),
     ) -> Result<()> {
-        Ok(self.client.copy_in_from_reader(dest, reader).await?)
+        self.client.copy_in_from_reader(dest, reader).await?;
+        self.emit_file_copied(CopyDirection::In, dest);
+        Ok(())
     }
 
     /// Copies a path from the guest as a tar archive.
@@ -772,7 +762,9 @@ impl Vm {
     ///
     /// Returns an error if the copy operation fails.
     pub async fn copy_out(&self, path: &str) -> Result<Vec<u8>> {
-        Ok(self.client.copy_out(path).await?)
+        let data = self.client.copy_out(path).await?;
+        self.emit_file_copied(CopyDirection::Out, path);
+        Ok(data)
     }
 
     /// Streams a path from the guest as a tar archive directly to `writer`.
@@ -786,10 +778,22 @@ impl Vm {
         follow_symlinks: bool,
         writer: &mut (impl tokio::io::AsyncWrite + Unpin + Send),
     ) -> Result<u64> {
-        Ok(self
+        let n = self
             .client
             .copy_out_to_writer(path, follow_symlinks, writer)
-            .await?)
+            .await?;
+        self.emit_file_copied(CopyDirection::Out, path);
+        Ok(n)
+    }
+
+    /// Emits [`AuditEventKind::FileCopied`] after a successful copy.
+    fn emit_file_copied(&self, direction: CopyDirection, path: &str) {
+        self.events
+            .emit(AuditEvent::now(AuditEventKind::FileCopied {
+                vm_id: self.state.id.clone(),
+                direction,
+                path: path.to_owned(),
+            }));
     }
 
     /// Performs a version handshake with the guest agent.

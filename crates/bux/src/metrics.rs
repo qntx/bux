@@ -80,12 +80,15 @@ impl RuntimeMetrics {
         self.total_uptime_ms.fetch_add(uptime_ms, Ordering::Relaxed);
     }
 
-    /// Records that a VM exited with an error.
-    ///
-    /// Called by the health check system when a VM process dies unexpectedly.
-    pub fn on_vm_failed(&self, uptime_ms: u64) {
-        self.vms_running.fetch_sub(1, Ordering::Relaxed);
+    /// Increments the failed-VM counter only (running gauge already adjusted).
+    pub(crate) fn record_failed(&self) {
         self.vms_failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records that a VM counted as running then failed (create abort).
+    pub(crate) fn on_vm_failed(&self, uptime_ms: u64) {
+        self.vms_running.fetch_sub(1, Ordering::Relaxed);
+        self.record_failed();
         self.total_uptime_ms.fetch_add(uptime_ms, Ordering::Relaxed);
     }
 
@@ -177,6 +180,10 @@ mod tests {
         assert_eq!(m.num_running_vms(), 0);
         assert_eq!(m.vms_failed_total(), 1);
         assert_eq!(m.total_uptime_ms(), 8000);
+
+        m.record_failed();
+        assert_eq!(m.vms_failed_total(), 2);
+        assert_eq!(m.num_running_vms(), 0);
     }
 
     #[test]

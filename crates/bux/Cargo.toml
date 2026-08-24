@@ -29,7 +29,7 @@ bux-shim.workspace = true
 dirs.workspace = true
 nix.workspace = true
 rusqlite.workspace = true
-tokio = { workspace = true, features = ["io-util", "net", "time", "sync"] }
+tokio = { workspace = true, features = ["io-util", "net", "time"] }
 
 [dev-dependencies]
 tempfile.workspace = true
