@@ -26,10 +26,10 @@ use crate::Result;
 use crate::disk::DiskManager;
 use crate::events::{AuditEvent, AuditEventKind, EventDispatcher};
 use crate::metrics::RuntimeMetrics;
-use crate::options::VmOptions;
+use crate::options::{ImageRef, VmOptions};
 use crate::secrets::LiveSecrets;
 use crate::snapshot::SnapshotManager;
-use crate::state::{StateDb, Status, VmState};
+use crate::state::{StateDb, Status, VmConfig, VmState};
 use crate::volumes::VolumeManager;
 use boot::{clean_vm_files, is_pid_alive};
 
@@ -343,14 +343,15 @@ impl Runtime {
         Ok(removed)
     }
 
-    /// Disk-clone a VM: flatten its QCOW2 overlay into a new base, then boot.
+    /// Disk-clone a VM: flatten its QCOW2 overlay into a new base, then boot a
+    /// detached VM.
     ///
     /// Copied from the source: overlay contents, `vcpus`, `ram_mib`, `network`,
-    /// and `auto_remove`.
+    /// and `auto_remove`. Always `detach: true` so CLI/`Runtime` Drop does not
+    /// SIGTERM the clone (same process model as `bux create`).
     ///
     /// Not copied: ports, volumes, secrets, security, command, env, workdir,
-    /// user, detach, auto-stop/delete, ready timeout, or name (unless `name`
-    /// is passed).
+    /// user, auto-stop/delete, ready timeout, or name (unless `name` is passed).
     ///
     /// # Errors
     ///
@@ -363,15 +364,7 @@ impl Runtime {
         let clone_base = self.disk.bases_dir().join(format!("clone-{clone_id}.raw"));
         self.disk.flatten_vm_disk(&source_state.id, &clone_base)?;
 
-        let mut opts = VmOptions::from_image(crate::options::ImageRef::BaseDisk(clone_base))
-            .vcpus(source_state.config.vcpus)
-            .ram_mib(source_state.config.ram_mib)
-            .auto_remove(source_state.config.auto_remove);
-        if let Some(n) = name {
-            opts = opts.name(n);
-        }
-        opts = opts.network(source_state.config.network.clone());
-
+        let opts = clone_vm_options(&source_state.config, name, clone_base);
         let handle = self.create(opts).await?;
         info!(
             source_id = %source_state.id,
@@ -427,9 +420,7 @@ impl Runtime {
             self.reconcile_dead_pid(&mut vm);
 
             if vm.status == Status::Stopped && vm.config.auto_remove {
-                drop(fs::remove_file(&vm.socket));
-                drop(self.disk.remove_vm_disk(&vm.id));
-                drop(self.db.delete(&vm.id));
+                drop(self.remove_stored(&vm));
                 continue;
             }
 
@@ -501,17 +492,22 @@ impl Runtime {
             )));
         }
 
-        clean_vm_files(&state.socket);
+        self.remove_stored(state)
+    }
+
+    /// Tear down a known row by primary key (no name/prefix lookup).
+    fn remove_stored(&self, vm: &VmState) -> Result<()> {
+        clean_vm_files(&vm.socket);
         self.secrets
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&state.id);
-        drop(self.volumes.unlink_vm(&state.id));
-        drop(self.disk.remove_vm_disk(&state.id));
-        self.db.delete(&state.id)?;
-        info!(vm_id = %state.id, "VM removed");
+            .remove(&vm.id);
+        drop(self.volumes.unlink_vm(&vm.id));
+        drop(self.disk.remove_vm_disk(&vm.id));
+        self.db.delete(&vm.id)?;
+        info!(vm_id = %vm.id, "VM removed");
         self.events.emit(AuditEvent::now(AuditEventKind::VmRemoved {
-            id: state.id.clone(),
+            id: vm.id.clone(),
         }));
         Ok(())
     }
@@ -521,9 +517,24 @@ impl Runtime {
         if vm.status.is_active() && !is_pid_alive(vm.pid) {
             vm.status = Status::Stopped;
             drop(self.db.update_status(&vm.id, Status::Stopped));
-            boot::clean_net_sock(&vm.socket);
+            clean_vm_files(&vm.socket);
         }
     }
+}
+
+/// Create-options for a disk-clone: copy `vcpus`/`ram_mib`/`network`/`auto_remove`; always detach.
+#[must_use]
+fn clone_vm_options(config: &VmConfig, name: Option<String>, clone_base: PathBuf) -> VmOptions {
+    let mut opts = VmOptions::from_image(ImageRef::BaseDisk(clone_base))
+        .vcpus(config.vcpus)
+        .ram_mib(config.ram_mib)
+        .auto_remove(config.auto_remove)
+        .detach(true) // durable disk-clone; CLI drop must not SIGTERM
+        .network(config.network.clone());
+    if let Some(n) = name {
+        opts = opts.name(n);
+    }
+    opts
 }
 
 impl Drop for Runtime {
@@ -541,7 +552,13 @@ impl Drop for Runtime {
 )]
 mod tests {
     use super::*;
+    use crate::events::{AuditEventKind, RingBufferListener};
+    use crate::options::NetworkSpec;
+    use crate::secrets::LiveSecrets;
     use crate::state::VmConfig;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::SystemTime;
 
     fn insert_running(rt: &Runtime, id: &str, pid: i32) {
@@ -549,6 +566,10 @@ mod tests {
     }
 
     fn insert_running_cfg(rt: &Runtime, id: &str, pid: i32, config: VmConfig) {
+        insert_cfg(rt, id, pid, Status::Running, config);
+    }
+
+    fn insert_cfg(rt: &Runtime, id: &str, pid: i32, status: Status, config: VmConfig) {
         rt.db
             .insert(&VmState {
                 id: id.to_owned(),
@@ -556,11 +577,28 @@ mod tests {
                 pid,
                 image: None,
                 socket: rt.socks_dir.join(format!("{id}.sock")),
-                status: Status::Running,
+                status,
                 config,
                 created_at: SystemTime::now(),
             })
             .unwrap();
+    }
+
+    fn wait_dead_pid() -> i32 {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child_pid(&child);
+        drop(child.wait());
+        pid
+    }
+
+    fn shim_json(rt: &Runtime, id: &str) -> PathBuf {
+        rt.socks_dir.join(format!("{id}.json"))
+    }
+
+    fn plant_shim_json(rt: &Runtime, id: &str) -> PathBuf {
+        let path = shim_json(rt, id);
+        fs::write(&path, "{\"secret\":\"s3cret\"}").unwrap();
+        path
     }
 
     fn spawn_sleep() -> std::process::Child {
@@ -594,14 +632,17 @@ mod tests {
     fn list_marks_dead_pid_stopped() {
         let dir = tempfile::tempdir().unwrap();
         let rt = Runtime::open(dir.path()).unwrap();
-        let mut child = std::process::Command::new("true").spawn().unwrap();
-        let dead = child_pid(&child);
-        drop(child.wait());
+        let dead = wait_dead_pid();
         insert_running(&rt, "deadpid000001", dead);
+        let json = plant_shim_json(&rt, "deadpid000001");
         let list = rt.list().unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].status, Status::Stopped);
         assert_eq!(list[0].pid, dead);
+        assert!(
+            !json.exists(),
+            "reconcile_dead_pid must unlink leftover shim JSON"
+        );
     }
 
     #[test]
@@ -652,6 +693,32 @@ mod tests {
     }
 
     #[test]
+    fn clone_boots_detached() {
+        let source = VmConfig {
+            detach: false,
+            vcpus: 2,
+            ram_mib: 1024,
+            auto_remove: true,
+            network: NetworkSpec::Disabled,
+            ..VmConfig::default()
+        };
+        let opts = clone_vm_options(&source, Some("n".into()), PathBuf::from("/tmp/clone.raw"));
+        assert!(
+            opts.detach,
+            "disk-clone must boot detached even if source is attached"
+        );
+        assert_eq!(opts.vcpus, 2);
+        assert_eq!(opts.ram_mib, 1024);
+        assert!(opts.auto_remove);
+        assert_eq!(opts.name.as_deref(), Some("n"));
+        assert_eq!(opts.network, NetworkSpec::Disabled);
+        assert!(
+            matches!(&opts.image, ImageRef::BaseDisk(p) if p == Path::new("/tmp/clone.raw")),
+            "clone image must be the flattened base"
+        );
+    }
+
+    #[test]
     fn recover_live_secrets_shim_is_vsock_only() {
         let dir = tempfile::tempdir().unwrap();
         let mut child = spawn_sleep();
@@ -667,15 +734,212 @@ mod tests {
                 ..VmConfig::default()
             },
         );
+        let json = plant_shim_json(&rt, "secretlive0001");
         rt.recover();
         assert!(
             is_pid_alive(pid),
             "live secrets + live shim must not be SIGTERM'd"
         );
+        assert!(
+            json.exists(),
+            "live shim JSON must not be unlinked (ReattachVsockOnly)"
+        );
         let row = rt.db.get_by_id_prefix("secretlive0001").unwrap();
         assert_eq!(row.status, Status::Running);
         drop(rt);
         assert!(is_pid_alive(pid));
+        drop(child.kill());
+        drop(child.wait());
+    }
+
+    #[test]
+    fn recover_dead_unlinks_shim_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let dead = wait_dead_pid();
+        insert_running(&rt, "deadjson000001", dead);
+        let json = plant_shim_json(&rt, "deadjson000001");
+        rt.recover();
+        assert!(
+            !json.exists(),
+            "recover_dead must unlink leftover shim JSON"
+        );
+        let row = rt.db.get_by_id_prefix("deadjson000001").unwrap();
+        assert_eq!(row.status, Status::Stopped);
+    }
+
+    #[test]
+    fn recover_dead_auto_remove_purges_shim_json_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let dead = wait_dead_pid();
+        insert_running_cfg(
+            &rt,
+            "deadauto000001",
+            dead,
+            VmConfig {
+                auto_remove: true,
+                ..VmConfig::default()
+            },
+        );
+        let json = plant_shim_json(&rt, "deadauto000001");
+        rt.recover();
+        assert!(
+            !json.exists(),
+            "auto_remove recover_dead must purge shim JSON"
+        );
+        assert!(rt.db.get_by_id_prefix("deadauto000001").is_err());
+    }
+
+    #[test]
+    fn sweep_auto_stop_unlinks_shim_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let dead = wait_dead_pid();
+        insert_running_cfg(
+            &rt,
+            "sweepjson00001",
+            dead,
+            VmConfig {
+                auto_stop_secs: Some(1),
+                last_activity_at: Some(SystemTime::UNIX_EPOCH),
+                ..VmConfig::default()
+            },
+        );
+        let json = plant_shim_json(&rt, "sweepjson00001");
+        let report = rt.sweep().unwrap();
+        assert_eq!(report.stopped, 1);
+        assert_eq!(report.deleted, 0);
+        assert!(
+            !json.exists(),
+            "sweep auto-stop must unlink leftover shim JSON"
+        );
+        let row = rt.db.get_by_id_prefix("sweepjson00001").unwrap();
+        assert_eq!(row.status, Status::Stopped);
+    }
+
+    #[test]
+    fn list_auto_remove_matches_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let id = "listauto000001";
+        insert_cfg(
+            &rt,
+            id,
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig {
+                auto_remove: true,
+                ..VmConfig::default()
+            },
+        );
+        let json = plant_shim_json(&rt, id);
+        rt.secrets.lock().unwrap().insert(
+            id.to_owned(),
+            LiveSecrets {
+                secrets: Vec::new(),
+                ca_cert_pem: String::new(),
+                ca_key_pem: String::new(),
+            },
+        );
+        let vol = rt.volumes().create("vol1").unwrap();
+        rt.db.insert_vm_volume(id, &vol.id, "/data").unwrap();
+        let ring = Arc::new(RingBufferListener::new(8));
+        let listener = Arc::clone(&ring);
+        rt.events().add_listener(listener);
+
+        let list = rt.list().unwrap();
+        assert!(list.is_empty());
+        assert!(!json.exists(), "list auto_remove must clean_vm_files");
+        assert!(rt.secrets.lock().unwrap().get(id).is_none());
+        assert_eq!(rt.db.count_volume_attachments(&vol.id).unwrap(), 0);
+        assert!(rt.db.get_by_id_prefix(id).is_err());
+        assert!(
+            ring.recent(8).iter().any(|e| matches!(
+                &e.kind,
+                AuditEventKind::VmRemoved { id: removed } if removed == id
+            )),
+            "list auto_remove must emit VmRemoved"
+        );
+    }
+
+    #[test]
+    fn list_auto_remove_does_not_delete_name_colliding_with_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let auto_id = "aaaaaaaaaaaa";
+        let named_id = "bbbbbbbbbbbb";
+        insert_cfg(
+            &rt,
+            auto_id,
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig {
+                auto_remove: true,
+                ..VmConfig::default()
+            },
+        );
+        insert_cfg(
+            &rt,
+            named_id,
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig::default(),
+        );
+        rt.db.update_name(named_id, Some(auto_id)).unwrap();
+        let auto_json = plant_shim_json(&rt, auto_id);
+        let named_json = plant_shim_json(&rt, named_id);
+
+        let list = rt.list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, named_id);
+        assert!(!auto_json.exists());
+        assert!(
+            named_json.exists(),
+            "name-collision victim must keep shim JSON"
+        );
+        assert!(rt.db.get_by_id_prefix(auto_id).is_err());
+        assert_eq!(rt.db.get_by_id_prefix(named_id).unwrap().id, named_id);
+    }
+
+    #[test]
+    fn sweep_auto_delete_does_not_delete_name_colliding_with_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = spawn_sleep();
+        let live = child_pid(&child);
+        let rt = Runtime::open(dir.path()).unwrap();
+        let delete_id = "aaaaaaaaaaaa";
+        let named_id = "bbbbbbbbbbbb";
+        insert_cfg(
+            &rt,
+            delete_id,
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig {
+                auto_delete_secs: Some(1),
+                last_activity_at: Some(SystemTime::UNIX_EPOCH),
+                ..VmConfig::default()
+            },
+        );
+        insert_running_cfg(
+            &rt,
+            named_id,
+            live,
+            VmConfig {
+                detach: true,
+                ..VmConfig::default()
+            },
+        );
+        rt.db.update_name(named_id, Some(delete_id)).unwrap();
+
+        let report = rt.sweep().unwrap();
+        assert_eq!(report.deleted, 1);
+        assert!(rt.db.get_by_id_prefix(delete_id).is_err());
+        let named = rt.db.get_by_id_prefix(named_id).unwrap();
+        assert_eq!(named.id, named_id);
+        assert_eq!(named.status, Status::Running);
+        assert!(is_pid_alive(live));
+        drop(rt);
         drop(child.kill());
         drop(child.wait());
     }

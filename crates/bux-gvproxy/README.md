@@ -14,15 +14,14 @@ so that higher layers can consume a tiny, safe Rust API.
 | `ca::generate` / `MitmCa` | Ephemeral ECDSA P-256 MITM CA (PEM) |
 | `GvproxyInstance` | RAII handle that owns the Go-side resources and releases them on drop |
 | `NetworkStats` / `TcpStats` | Live counters decoded from `gvproxy_get_stats` |
-| `start_stats_logging` | Opt-in background stats task (not started by default from `bux-net`) |
+| `start_stats_logging` | Opt-in background stats task (not started by default from `bux-shim-bin`) |
 | `init_logging` | Go `slog` → Rust `tracing` bridge (idempotent) |
 | `version()` | `libgvproxy.a` version string |
 | `constants` | Default subnet / gateway / guest IP & MAC values |
 
 **JSON parity:** Rust `GvproxyConfig` field names match `gvproxy-bridge/main.go` (`allow_net`, `secrets`, `ca_cert_pem`, `ca_key_pem`). Empty allow/secrets/CA omit from JSON.
 
-This crate does not depend on `bux-net`; `bux-net` wraps it as
-`GvproxyBackend`.
+The product consumer is `bux-shim-bin`. `bux` does not depend on this crate.
 
 ## Build requirements
 
@@ -57,10 +56,10 @@ eprintln!("bytes sent: {}", stats.bytes_sent);
 ## Layering
 
 ```text
-bux-net        (GvproxyBackend)
+bux-shim-bin   (owns GvproxyInstance)
     │ depends on
     ▼
-bux-gvproxy    (L1 — Go CGO bridge, raw FFI, safe wrappers)
+bux-gvproxy    (Go CGO bridge, raw FFI, safe wrappers)
     │ depends on
     ▼
 libgvproxy.a   (Go c-archive built from gvproxy-bridge/)

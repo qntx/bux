@@ -88,6 +88,8 @@ enum Command {
     },
 
     /// Disk-clone a VM (overlay flatten; copies `vcpus`, ram, network, `auto_remove`).
+    ///
+    /// The clone always boots detached and survives CLI exit, matching `bux create`.
     Clone(vm::CloneArgs),
 
     /// Export a VM's disk as a standalone QCOW2 image.

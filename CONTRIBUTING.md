@@ -50,16 +50,37 @@ cargo test -p bux --lib
 cargo test -p bux-proto --lib
 # Host-only smoke (no hypervisor). This is the GitHub-hosted CI gate:
 ./scripts/e2e/smoke.sh
-# Full VM e2e — documented **manual** gate on a local HVF (macOS) or KVM (Linux)
-# machine. Requires a Linux guest ELF (see above) and a network-capable image.
+# Full VM e2e — documented **manual** gate on local HVF (Apple Silicon).
 # Never set BUX_E2E_FULL=1 on GitHub-hosted runners.
 BUX_E2E_FULL=1 ./scripts/e2e/smoke.sh
 ```
 
 `.github/workflows/e2e-host.yml` forces `BUX_E2E_FULL=0` on `ubuntu-latest` and
 `macos-latest`. Host-only is not production proof. `BUX_E2E_FULL=1` is not a CI
-job; it is a scripted checklist you run on a local hypervisor. Self-hosted
-runners can take it later without redesign.
+job. GitHub-hosted runners must not set `BUX_E2E_FULL=1`. Self-hosted runners
+can take it later without redesign.
+
+The first green FULL is recorded by the operator on **local HVF (Apple
+Silicon)**. Until this file contains that record (OS, arch, `bux system info`
+libkrun features, image ref/digest, date), do not call the tree
+production-ready. KVM later without redesign.
+
+FULL always builds `target/debug/bux` and `target/debug/bux-shim` and ignores a
+PATH `bux`. On Darwin the script ad-hoc codesigns the shim with
+`crates/bux-shim/bux-shim.entitlements`. Darwin HVF needs that codesign plus a
+guest ELF via `BUX_GUEST_PATH` (CD `workflow_dispatch` artifact, or a prior
+`aarch64-unknown-linux-musl` build). Darwin does not compile the guest and does
+not use zig cc. Linux FULL may `cargo build -p bux-guest --target
+$ARCH-unknown-linux-musl` only when `musl-gcc` and that rustc target are already
+present; the ELF must still pass validation (64-bit LE, host guest arch
+x86_64/aarch64, no `PT_INTERP`). Missing or dynamic ELF exits before `bux
+create`.
+
+Pin `$BUX_E2E_IMAGE` if alpine wget/httpd is missing. There is no in-repo
+custom e2e image.
+
+`bux disk create` / `ImageRef::BaseDisk` does not inject guest PID 1. FULL uses
+OCI (`bux pull` / `bux create IMAGE`).
 
 `scripts/e2e/smoke.sh` with `BUX_E2E_FULL=1` covers:
 
@@ -77,7 +98,7 @@ runners can take it later without redesign.
    restart must still survive CLI exit)
 10. secrets: value not in `bux.db` or guest `/proc/1/environ`
 
-Until that checklist is green on a local HVF or KVM machine, do not call the
+Until that checklist is green on local HVF (Apple Silicon), do not call the
 tree production-ready.
 
 Schema mismatches require `bux system reset` (or wiping `$BUX_HOME`).

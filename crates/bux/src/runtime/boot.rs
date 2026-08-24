@@ -153,6 +153,21 @@ pub(crate) async fn create(
     Ok(vm)
 }
 
+/// macOS pathname `sun_path` is 104 bytes (trailing NUL); Linux is 108.
+const MAX_SUN_PATH: usize = 104;
+
+/// Fail closed when a unix socket path cannot fit in `sockaddr_un.sun_path`.
+fn reject_long_unix_path(path: &Path) -> Result<()> {
+    let len = path.as_os_str().as_encoded_bytes().len();
+    if len >= MAX_SUN_PATH {
+        return Err(crate::Error::InvalidConfig(format!(
+            "unix socket path {} ({len} bytes) exceeds sun_path {MAX_SUN_PATH}; use a shorter BUX_HOME",
+            path.display(),
+        )));
+    }
+    Ok(())
+}
+
 /// Spawn a shim from a fully built [`VmConfig`].
 ///
 /// # Errors
@@ -176,6 +191,7 @@ pub(crate) fn spawn_config(
 
     let id = state::gen_id();
     let socket = rt.socks_dir.join(format!("{id}.sock"));
+    reject_long_unix_path(&socket)?;
     let socket_str = socket.to_string_lossy().into_owned();
 
     prepare_managed_config(&mut config)?;
@@ -627,6 +643,7 @@ pub(super) fn prepare_virtio_net(
     config.published_ports = published;
 
     let socket_path = socks_dir.join(format!("{id}.net.sock"));
+    reject_long_unix_path(&socket_path)?;
     if socket_path.exists() {
         fs::remove_file(&socket_path)?;
     }
@@ -925,6 +942,51 @@ mod tests {
         assert!(!policy.watch_parent);
         assert!(!policy.die_with_parent);
         assert!(!policy.network_host);
+    }
+
+    #[test]
+    fn reject_long_unix_path_threshold() {
+        let ok = PathBuf::from("a".repeat(103));
+        assert!(reject_long_unix_path(&ok).is_ok());
+        let err = reject_long_unix_path(&PathBuf::from("a".repeat(104))).unwrap_err();
+        assert!(matches!(err, crate::Error::InvalidConfig(_)));
+        assert!(err.to_string().contains("sun_path"));
+    }
+
+    #[test]
+    fn spawn_config_rejects_long_sock_path_when_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let long = dir.path().join("x".repeat(120));
+        fs::create_dir_all(&long).unwrap();
+        let rt = Runtime::open(&long).unwrap();
+        let cfg = VmConfig {
+            network: NetworkSpec::Disabled,
+            ..VmConfig::default()
+        };
+        let err = spawn_config(&rt, cfg, Vec::new(), None, None, false).unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, crate::Error::InvalidConfig(_)));
+        assert!(msg.contains("sun_path"), "{msg}");
+        assert!(msg.contains(".sock"), "{msg}");
+        assert!(!msg.contains(".net.sock"), "{msg}");
+    }
+
+    #[test]
+    fn prepare_virtio_net_rejects_long_unix_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let long = dir.path().join("x".repeat(120));
+        fs::create_dir_all(&long).unwrap();
+        let mut cfg = VmConfig {
+            network: NetworkSpec::Enabled {
+                allow_net: Vec::new(),
+            },
+            ..VmConfig::default()
+        };
+        let err = prepare_virtio_net("abc", &long, &mut cfg, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, crate::Error::InvalidConfig(_)));
+        assert!(msg.contains("sun_path"), "{msg}");
+        assert!(msg.contains(".net.sock"), "{msg}");
     }
 
     #[test]

@@ -22,7 +22,6 @@ bux-shim = { version = "0.1", path = "crates/bux-shim" }
 bux-e2fs = { version = "0.1.5", path = "crates/bux-e2fs" }
 bux-gvproxy = { version = "0.1", path = "crates/bux-gvproxy" }
 bux-landlock = { version = "0.1", path = "crates/bux-landlock" }
-bux-net = { version = "0.1", path = "crates/bux-net" }
 bux-qcow2 = { version = "0.1", path = "crates/bux-qcow2" }
 bux-seccomp = { version = "0.1", path = "crates/bux-seccomp" }
 

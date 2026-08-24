@@ -7,7 +7,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-export BUX_HOME="${BUX_HOME:-$(mktemp -d -t bux-e2e.XXXXXX)}"
+export BUX_HOME="${BUX_HOME:-$(mktemp -d /tmp/bux-e2e.XXXXXX)}"
 cleanup() {
   # Only touch the temp data dir this script created (name contains bux-e2e).
   if [[ "${BUX_E2E_FULL:-}" == "1" && "${BUX_HOME:-}" == *bux-e2e* ]] \
@@ -25,13 +25,133 @@ trap cleanup EXIT
 
 echo "==> BUX_HOME=${BUX_HOME}"
 
-if ! command -v bux >/dev/null 2>&1; then
-  echo "building bux-cli..."
-  pkgs=(-p bux-cli)
-  if [[ "${BUX_E2E_FULL:-}" == "1" ]]; then
-    pkgs+=(-p bux-shim-bin)
+full_guest_fail() {
+  echo "FULL requires a static Linux bux-guest ELF (CONTRIBUTING.md)" >&2
+  exit 1
+}
+
+# Same offsets as crates/bux/src/guest.rs validate_guest_binary (no readelf).
+validate_guest_elf() {
+  local path="$1"
+  local arch="$2"
+  python3 - "${path}" "${arch}" <<'PY' || return 1
+import struct, sys
+path, arch = sys.argv[1], sys.argv[2]
+expected = {"x86_64": 0x3E, "aarch64": 0xB7}.get(arch)
+if expected is None:
+    sys.exit(1)
+try:
+    data = open(path, "rb").read()
+except OSError:
+    sys.exit(1)
+if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+    sys.exit(1)
+machine = struct.unpack_from("<H", data, 18)[0]
+if machine != expected:
+    sys.exit(1)
+e_phoff = struct.unpack_from("<Q", data, 32)[0]
+e_phentsize = struct.unpack_from("<H", data, 54)[0]
+e_phnum = struct.unpack_from("<H", data, 56)[0]
+if e_phoff == 0 or e_phentsize == 0 or e_phnum == 0:
+    sys.exit(0)
+for i in range(e_phnum):
+    off = e_phoff + i * e_phentsize
+    end = off + 4
+    if end > len(data):
+        break
+    p_type = struct.unpack_from("<I", data, off)[0]
+    if p_type == 3:
+        sys.exit(1)
+sys.exit(0)
+PY
+}
+
+linux_musl_target_present() {
+  local triple="$1"
+  local sysroot
+  if command -v rustup >/dev/null 2>&1 \
+    && rustup target list --installed 2>/dev/null | grep -qx "${triple}"; then
+    return 0
   fi
-  cargo build -q "${pkgs[@]}" --manifest-path "${ROOT}/Cargo.toml"
+  sysroot="$(rustc --print sysroot 2>/dev/null || true)"
+  [[ -n "${sysroot}" && -d "${sysroot}/lib/rustlib/${triple}" ]]
+}
+
+pin_full_guest() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "FULL requires python3 to validate the guest ELF (CONTRIBUTING.md)" >&2
+    exit 1
+  fi
+  local arch musl_triple guest="" c env_var
+  case "$(uname -m)" in
+    x86_64|amd64)
+      arch=x86_64
+      musl_triple=x86_64-unknown-linux-musl
+      ;;
+    aarch64|arm64)
+      arch=aarch64
+      musl_triple=aarch64-unknown-linux-musl
+      ;;
+    *)
+      full_guest_fail
+      ;;
+  esac
+  if [[ -n "${BUX_GUEST_PATH:-}" ]]; then
+    if [[ ! -f "${BUX_GUEST_PATH}" ]] || ! validate_guest_elf "${BUX_GUEST_PATH}" "${arch}"; then
+      full_guest_fail
+    fi
+    guest="${BUX_GUEST_PATH}"
+  else
+    for c in \
+      "${ROOT}/target/debug/bux-guest-${musl_triple}" \
+      "${ROOT}/target/${musl_triple}/debug/bux-guest"
+    do
+      if [[ -f "${c}" ]] && validate_guest_elf "${c}" "${arch}"; then
+        guest="${c}"
+        break
+      fi
+    done
+    if [[ -z "${guest}" && "$(uname -s)" == "Linux" ]] \
+      && command -v musl-gcc >/dev/null 2>&1 \
+      && linux_musl_target_present "${musl_triple}"; then
+      echo "building bux-guest (${musl_triple})..."
+      env_var="CARGO_TARGET_$(echo "${musl_triple}" | tr '[:lower:]-' '[:upper:]_')_LINKER"
+      env "${env_var}=musl-gcc" cargo build -p bux-guest --target "${musl_triple}" \
+        --manifest-path "${ROOT}/Cargo.toml"
+      mkdir -p "${ROOT}/target/debug"
+      cp "${ROOT}/target/${musl_triple}/debug/bux-guest" \
+        "${ROOT}/target/debug/bux-guest-${musl_triple}"
+      guest="${ROOT}/target/debug/bux-guest-${musl_triple}"
+      validate_guest_elf "${guest}" "${arch}" || full_guest_fail
+    fi
+  fi
+  [[ -n "${guest}" && -f "${guest}" ]] || full_guest_fail
+  export BUX_GUEST_PATH="${guest}"
+}
+
+create_or_dump() {
+  if bux create "$@"; then
+    return 0
+  fi
+  echo "==> bux create failed; shim stderr:" >&2
+  cat "${BUX_HOME}/socks/"*.stderr >&2 2>/dev/null || true
+  return 1
+}
+
+if [[ "${BUX_E2E_FULL:-}" == "1" ]]; then
+  echo "building bux-cli and bux-shim-bin (FULL pin)..."
+  cargo build -p bux-cli -p bux-shim-bin --manifest-path "${ROOT}/Cargo.toml"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    codesign --entitlements "${ROOT}/crates/bux-shim/bux-shim.entitlements" \
+      -s - --force "${ROOT}/target/debug/bux-shim"
+  fi
+  pin_full_guest
+  export PATH="${ROOT}/target/debug:${PATH}"
+  export BUX_SHIM_PATH="${ROOT}/target/debug/bux-shim"
+  test -x "${BUX_SHIM_PATH}"
+elif ! command -v bux >/dev/null 2>&1; then
+  echo "building bux-cli..."
+  cargo build -q -p bux-cli --manifest-path "${ROOT}/Cargo.toml"
   export PATH="${ROOT}/target/debug:${PATH}"
 fi
 
@@ -226,7 +346,7 @@ bux pull "${IMAGE}"
 # create already detach=true: this CLI process exits; later commands are new processes.
 NAME="e2e-t1-$(date +%s)"
 echo "==> create ${NAME} (CLI exits; VM must survive)"
-bux create --name "${NAME}" "${IMAGE}"
+create_or_dump --name "${NAME}" "${IMAGE}"
 
 echo "==> exec echo"
 bux exec "${NAME}" -- echo e2e-ok
@@ -242,7 +362,7 @@ bux rm "${NAME}"
 
 DENY="e2e-deny-$(date +%s)"
 echo "==> allow_net deny ${DENY}"
-bux create --name "${DENY}" --allow-net 127.0.0.1 "${IMAGE}"
+create_or_dump --name "${DENY}" --allow-net 127.0.0.1 "${IMAGE}"
 if ! require_wget_fail "${DENY}" 3 "allow_net deny"; then
   bux rm -f "${DENY}" || true
   exit 1
@@ -251,7 +371,7 @@ bux rm -f "${DENY}"
 
 PUB="e2e-pub-$(date +%s)"
 echo "==> D1 publish ${PUB} (-p 0:80; CLI exits; host TCP must reach guest)"
-bux create --name "${PUB}" -p 0:80 "${IMAGE}"
+create_or_dump --name "${PUB}" -p 0:80 "${IMAGE}"
 insp="$(bux inspect "${PUB}")"
 echo "${insp}" | grep -E '"bind_addr":[[:space:]]*"0.0.0.0"' >/dev/null
 echo "${insp}" | grep -E '"guest":[[:space:]]*80' >/dev/null
@@ -273,7 +393,7 @@ bux rm -f "${PUB}"
 # Offline gate: no TSI and no eth0. Do not assert a dummy NIC.
 OFF="e2e-offline-$(date +%s)"
 echo "==> offline-no-eth0 ${OFF}"
-bux create --name "${OFF}" --network=disabled "${IMAGE}"
+create_or_dump --name "${OFF}" --network=disabled "${IMAGE}"
 if ! require_wget_fail "${OFF}" 3 "offline-no-eth0"; then
   bux rm -f "${OFF}" || true
   exit 1
@@ -300,7 +420,7 @@ VOL_HOST="${BUX_HOME}/vol-src"
 mkdir -p "${VOL_HOST}"
 printf 'vol-ok\n' > "${VOL_HOST}/marker"
 echo "==> volume ${VOL} (${VOL_HOST}:/data)"
-bux create --name "${VOL}" -v "${VOL_HOST}:/data" "${IMAGE}"
+create_or_dump --name "${VOL}" -v "${VOL_HOST}:/data" "${IMAGE}"
 vol_ls="$(bux exec "${VOL}" -- ls /data)"
 echo "${vol_ls}" | grep -q marker
 bux rm -f "${VOL}"
@@ -308,7 +428,7 @@ bux rm -f "${VOL}"
 # stop / restart / rm of a detach=true VM: each CLI exit must leave the VM as designed.
 LIFE="e2e-life-$(date +%s)"
 echo "==> detach lifecycle ${LIFE} (stop/restart/rm)"
-bux create --name "${LIFE}" "${IMAGE}"
+create_or_dump --name "${LIFE}" "${IMAGE}"
 bux exec "${LIFE}" -- echo life-ok
 bux stop "${LIFE}"
 bux restart "${LIFE}"
@@ -319,7 +439,7 @@ bux rm "${LIFE}"
 SEC="e2e-sec-$(date +%s)"
 SECRET_VAL="e2e-s3cr3t-n0t-persisted-$$"
 echo "==> secrets not in sqlite or guest environ ${SEC}"
-bux create --name "${SEC}" --secret "e2e=${SECRET_VAL}@example.com" "${IMAGE}"
+create_or_dump --name "${SEC}" --secret "e2e=${SECRET_VAL}@example.com" "${IMAGE}"
 if grep -a -F "${SECRET_VAL}" "${BUX_HOME}/bux.db" >/dev/null 2>&1; then
   echo "secrets: value found in bux.db"
   bux rm -f "${SEC}" || true

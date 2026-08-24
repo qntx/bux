@@ -22,6 +22,11 @@ jobs:
       # Host-only smoke builds bux-cli (links libkrun). Do not install Go here:
       # FULL=0 does not build bux-shim-bin / libgvproxy.
       # Manual HVF/KVM gate only (CONTRIBUTING.md). Never FULL=1 on GitHub-hosted runners.
+      # Seatbelt profile-string tests are Darwin-only and never run on ubuntu CI.
+      # Do not cargo test -p bux-shim --lib here: apply.rs calls live create_ctx.
+      - name: Jail lib tests (seatbelt profile strings)
+        if: runner.os == 'macOS'
+        run: cargo test -p bux-jail --lib
       - name: Host-only e2e smoke
         env:
           BUX_E2E_FULL: "0"

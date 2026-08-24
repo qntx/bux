@@ -10,7 +10,7 @@ use nix::unistd::Pid;
 use tracing::{info, warn};
 
 use super::Runtime;
-use super::boot::{clean_net_sock, clean_vm_files, is_pid_alive};
+use super::boot::{clean_vm_files, is_pid_alive};
 use crate::lifecycle::{self, RecoverAction};
 use crate::state::{Status, VmState};
 
@@ -98,13 +98,13 @@ impl Runtime {
     fn recover_dead(&self, vm: &VmState) -> u32 {
         warn!(vm_id = %vm.id, pid = vm.pid, "recovery: marking dead VM as stopped");
         drop(self.db.update_status(&vm.id, Status::Stopped));
-        clean_net_sock(&vm.socket);
+        // purge_vm_files includes clean_vm_files; do not call both.
         if vm.config.auto_remove {
             self.purge_vm_files(vm);
-            1
         } else {
-            0
+            clean_vm_files(&vm.socket);
         }
+        1
     }
 
     /// Delete sock/disk/db rows for a VM.
@@ -146,7 +146,7 @@ impl Runtime {
                 terminate_pid(vm.pid, &vm.id);
             }
             drop(self.db.update_status(&vm.id, Status::Stopped));
-            clean_net_sock(&vm.socket);
+            clean_vm_files(&vm.socket);
             let mut cfg = vm.config.clone();
             cfg.last_activity_at = Some(now);
             drop(self.db.update_config(&vm.id, &cfg));
@@ -154,7 +154,7 @@ impl Runtime {
 
             let should_delete =
                 vm.config.auto_remove || expired(vm.config.auto_delete_secs, Some(now));
-            if should_delete && self.remove(&vm.id).is_ok() {
+            if should_delete && self.remove_stored(vm).is_ok() {
                 report.deleted += 1;
             }
             return;
@@ -164,7 +164,7 @@ impl Runtime {
             && expired(vm.config.auto_delete_secs, vm.config.last_activity_at)
         {
             info!(vm_id = %vm.id, "sweep: auto-delete idle stopped VM");
-            if self.remove(&vm.id).is_ok() {
+            if self.remove_stored(vm).is_ok() {
                 report.deleted += 1;
             }
         }
