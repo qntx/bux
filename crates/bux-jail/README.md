@@ -18,7 +18,6 @@ primitives (`bux-bwrap`, `bux-seccomp`, `bux-cgroup`).
 - [`Sandbox`] / [`NoopSandbox`] — pluggable sandbox trait
 - [`ResourceLimits`] — re-export of `bux_cgroup::ResourceLimits`
 - Host capability probes (`check_host`, `audit_isolation`)
-- Linux credential drop (`CredentialConfig`)
 
 ## Dependency rules
 

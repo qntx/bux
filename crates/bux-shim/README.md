@@ -1,14 +1,15 @@
 # bux-shim
 
-Owns the **engine boundary**: serializable [`ShimConfig`] applied to libkrun,
-plus the `bux-shim` binary that takes over the process via `krun_start_enter`.
+Owns the **engine boundary**: serializable [`ShimConfig`] applied to libkrun.
+The process-takeover binary lives in `bux-shim-bin` (`[[bin]] name = "bux-shim"`).
 
 ## Why a separate crate
 
 - libkrun **process takeover** must not run inside the host tokio Runtime.
 - Host `bux` maps product state → `ShimConfig` JSON; shim never depends on `bux`.
-- Network wiring (`add_net_*`) lands here later (PR2b); managed TSI `set_port_map`
-  remains until PR2c deletes it.
+- Virtio-net via `add_net_unixstream` / `add_net_unixgram`. The shim never
+  calls TSI `set_port_map`. When `network` is `None`, implicit TSI is
+  disabled (`disable_implicit_vsock` + `add_vsock(0)`).
 
 ## Wire format
 
@@ -25,7 +26,8 @@ Optional env: `BUX_WATCHDOG_FD=<fd>` (read end of parent keepalive pipe).
 | Item | Role |
 |------|------|
 | `ShimConfig` | serde JSON config for the engine |
-| `prepare` | create libkrun ctx + apply config |
+| `prepare` | create libkrun ctx + apply config (never starts gvproxy) |
+| `install_seccomp` | default VMM seccomp (binary skips this when gvproxy is in-process) |
 | `start` | `krun_start_enter` (never returns on success) |
-| `boot` | `prepare` + `start` |
+| `host` | host-side libkrun probes |
 | `ExitInfo` | crash diagnostics JSON |

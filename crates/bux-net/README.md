@@ -1,15 +1,12 @@
 # bux-net
 
-Network backend abstraction for bux micro-VMs.
+gvproxy virtio-net for bux micro-VMs.
 
 ## Overview
 
-This crate exposes a small, backend-neutral API:
-
-- **`NetworkBackend` trait** — test/mock surface; product path is gvproxy only.
 - **`NetworkConfig`** — concrete port mappings, `allow_net`, secrets + CA PEMs,
   optional stats logging (off by default).
-- **`GvproxyBackend`** — concrete backend over [`bux-gvproxy`](../bux-gvproxy/).
+- **`GvproxyBackend`** — gvproxy instance over [`bux-gvproxy`](../bux-gvproxy/).
 - **`SocketShortener`** — Unix domain socket `sun_path` length workaround.
 
 Network-topology defaults (subnet, gateway/guest IP & MAC, MTU, DNS

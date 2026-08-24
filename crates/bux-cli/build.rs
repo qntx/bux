@@ -6,17 +6,10 @@
 
 use std::env;
 use std::fs;
-use std::io::Read;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-
-const GITHUB_REPO: &str = "qntx/bux";
 
 fn main() {
     println!("cargo:rerun-if-env-changed=BUX_GUEST_DIR");
-    println!("cargo:rerun-if-env-changed=BUX_GUEST_DOWNLOAD");
-    println!("cargo:rerun-if-env-changed=BUX_GUEST_VERSION");
     if let Ok(lib_dir) = env::var("DEP_KRUN_LIB_DIR") {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{lib_dir}");
     }
@@ -46,7 +39,7 @@ fn stage_guest_binary() {
     let dest = bin_dir.join(format!("bux-guest-{guest_target}"));
     let Some(source) = find_guest_binary(guest_target, &profile) else {
         println!(
-            "cargo:warning=no Linux bux-guest binary found for {guest_target}; build one and point BUX_GUEST_DIR at it, run cargo build --target {guest_target} -p bux-guest, or set BUX_GUEST_DOWNLOAD=1 to fetch a release artifact"
+            "cargo:warning=no Linux bux-guest binary found for {guest_target}; build one and point BUX_GUEST_DIR at it, or run cargo build --target {guest_target} -p bux-guest"
         );
         return;
     };
@@ -100,17 +93,7 @@ fn find_guest_binary(guest_target: &str, profile: &str) -> Option<PathBuf> {
         return Some(workspace_target);
     }
 
-    if env::var("BUX_GUEST_DOWNLOAD").ok().as_deref() != Some("1") {
-        return None;
-    }
-
-    match download_guest_binary(guest_target) {
-        Ok(path) => Some(path),
-        Err(err) => {
-            println!("cargo:warning={err}");
-            None
-        }
-    }
+    None
 }
 
 fn candidate_paths(base: &Path, guest_target: &str, profile: &str) -> [PathBuf; 4] {
@@ -142,37 +125,4 @@ fn copy_if_needed(source: &Path, dest: &Path) -> std::io::Result<()> {
         dest.display()
     );
     Ok(())
-}
-
-fn download_guest_binary(guest_target: &str) -> Result<PathBuf, String> {
-    let out_dir = PathBuf::from(env::var("OUT_DIR").map_err(|err| err.to_string())?);
-    let cache_dir = out_dir.join("guest-cache");
-    let dest = cache_dir.join(format!("bux-guest-{guest_target}"));
-    if dest.exists() {
-        return Ok(dest);
-    }
-
-    fs::create_dir_all(&cache_dir).map_err(|err| err.to_string())?;
-    let version = env::var("BUX_GUEST_VERSION")
-        .or_else(|_| env::var("CARGO_PKG_VERSION"))
-        .map_err(|err| err.to_string())?;
-    let url = format!(
-        "https://github.com/{GITHUB_REPO}/releases/download/v{version}/bux-guest-{guest_target}"
-    );
-    let response = ureq::get(&url)
-        .call()
-        .map_err(|err| format!("failed to download guest binary from {url}: {err}"))?;
-
-    let mut body = response.into_body().into_reader();
-    let mut bytes = Vec::new();
-    body.read_to_end(&mut bytes)
-        .map_err(|err| format!("failed to read guest binary from {url}: {err}"))?;
-
-    let tmp = dest.with_extension("tmp");
-    fs::write(&tmp, &bytes).map_err(|err| err.to_string())?;
-    #[cfg(unix)]
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).map_err(|err| err.to_string())?;
-    fs::rename(&tmp, &dest).map_err(|err| err.to_string())?;
-    println!("cargo:warning=downloaded guest binary from {url}");
-    Ok(dest)
 }

@@ -51,18 +51,8 @@ async fn handle_pipe(
         }
     };
 
-    let (program, args) =
-        match crate::container::resolve_exec_argv(&req.cmd, &req.args, req.in_container) {
-            Ok(v) => v,
-            Err(e) => {
-                let err = ErrorInfo::new(ErrorCode::Internal, e.to_string());
-                bux_proto::send(w, &HelloAck::Error(err)).await?;
-                return w.flush().await;
-            }
-        };
-
-    let mut cmd = Command::new(&program);
-    cmd.args(&args)
+    let mut cmd = Command::new(&req.cmd);
+    cmd.args(&req.args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 

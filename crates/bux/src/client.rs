@@ -5,7 +5,7 @@
 //! operations can proceed concurrently without any locking.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use bux_proto::{
     ControlReq, ControlResp, ExecIn, ExecOut, ExecStart, Hello, HelloAck, PROTOCOL_VERSION,
@@ -47,8 +47,6 @@ pub struct PongInfo {
     pub version: String,
     /// Guest uptime in milliseconds.
     pub uptime_ms: u64,
-    /// Workload isolation: `phase_a` or `phase_b`.
-    pub workload_isolation: String,
 }
 
 /// Handle to a running exec with a dedicated connection.
@@ -281,7 +279,7 @@ impl ExecHandle {
 /// to identify the operation, and processes the response on that connection.
 /// Multiple operations can run concurrently without contention.
 #[derive(Debug, Clone)]
-pub struct Client {
+pub(crate) struct Client {
     /// Socket path (Unix socket mapped from vsock by libkrun).
     socket_path: PathBuf,
 }
@@ -290,7 +288,7 @@ impl Client {
     /// Creates a new client targeting the given Unix socket path.
     ///
     /// Does **not** connect immediately — connections are opened per-operation.
-    pub fn new(path: impl Into<PathBuf>) -> Self {
+    pub(crate) fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             socket_path: path.into(),
         }
@@ -302,7 +300,7 @@ impl Client {
     /// # Errors
     ///
     /// Returns an error if the connection fails or versions mismatch.
-    pub async fn handshake(&self) -> io::Result<()> {
+    pub(crate) async fn handshake(&self) -> io::Result<()> {
         let mut stream = self.connect_raw().await?;
         bux_proto::send(
             &mut stream,
@@ -330,7 +328,7 @@ impl Client {
     /// # Errors
     ///
     /// Returns an error if the connection or shutdown request fails.
-    pub async fn shutdown(&self) -> io::Result<()> {
+    pub(crate) async fn shutdown(&self) -> io::Result<()> {
         let mut stream = self.open_control().await?;
         bux_proto::send(&mut stream, &ControlReq::Shutdown).await?;
         match bux_proto::recv::<ControlResp>(&mut stream).await? {
@@ -348,19 +346,11 @@ impl Client {
     /// # Errors
     ///
     /// Returns an error if the connection or ping fails.
-    pub async fn ping(&self) -> io::Result<PongInfo> {
+    pub(crate) async fn ping(&self) -> io::Result<PongInfo> {
         let mut stream = self.open_control().await?;
         bux_proto::send(&mut stream, &ControlReq::Ping).await?;
         match bux_proto::recv::<ControlResp>(&mut stream).await? {
-            ControlResp::Pong {
-                version,
-                uptime_ms,
-                workload_isolation,
-            } => Ok(PongInfo {
-                version,
-                uptime_ms,
-                workload_isolation,
-            }),
+            ControlResp::Pong { version, uptime_ms } => Ok(PongInfo { version, uptime_ms }),
             ControlResp::Error(e) => Err(io::Error::other(e)),
             _ => Err(io::Error::new(io::ErrorKind::InvalidData, "expected Pong")),
         }
@@ -371,7 +361,7 @@ impl Client {
     /// # Errors
     ///
     /// Returns an error if the quiesce operation fails.
-    pub async fn quiesce(&self) -> io::Result<u32> {
+    pub(crate) async fn quiesce(&self) -> io::Result<u32> {
         let mut stream = self.open_control().await?;
         bux_proto::send(&mut stream, &ControlReq::Quiesce).await?;
         match bux_proto::recv::<ControlResp>(&mut stream).await? {
@@ -389,7 +379,7 @@ impl Client {
     /// # Errors
     ///
     /// Returns an error if the thaw operation fails.
-    pub async fn thaw(&self) -> io::Result<u32> {
+    pub(crate) async fn thaw(&self) -> io::Result<u32> {
         let mut stream = self.open_control().await?;
         bux_proto::send(&mut stream, &ControlReq::Thaw).await?;
         match bux_proto::recv::<ControlResp>(&mut stream).await? {
@@ -409,7 +399,7 @@ impl Client {
     /// # Errors
     ///
     /// Returns an error if the connection or exec start fails.
-    pub async fn exec(&self, req: ExecStart) -> io::Result<ExecHandle> {
+    pub(crate) async fn exec(&self, req: ExecStart) -> io::Result<ExecHandle> {
         let mut stream = self.connect_raw().await?;
         bux_proto::send(&mut stream, &Hello::Exec(req)).await?;
         match bux_proto::recv::<HelloAck>(&mut stream).await? {
@@ -435,7 +425,7 @@ impl Client {
     /// # Errors
     ///
     /// Returns an error if the connection or command execution fails.
-    pub async fn exec_output(&self, req: ExecStart) -> io::Result<ExecOutput> {
+    pub(crate) async fn exec_output(&self, req: ExecStart) -> io::Result<ExecOutput> {
         self.exec(req).await?.wait_with_output().await
     }
 
@@ -444,7 +434,7 @@ impl Client {
     /// # Errors
     ///
     /// Returns an error if the file cannot be read.
-    pub async fn read_file(&self, path: &str) -> io::Result<Vec<u8>> {
+    pub(crate) async fn read_file(&self, path: &str) -> io::Result<Vec<u8>> {
         let mut stream = self.connect_raw().await?;
         bux_proto::send(
             &mut stream,
@@ -462,7 +452,7 @@ impl Client {
     /// # Errors
     ///
     /// Returns an error if the file cannot be written.
-    pub async fn write_file(&self, path: &str, data: &[u8], mode: u32) -> io::Result<()> {
+    pub(crate) async fn write_file(&self, path: &str, data: &[u8], mode: u32) -> io::Result<()> {
         let mut stream = self.connect_raw().await?;
         bux_proto::send(
             &mut stream,
@@ -482,7 +472,7 @@ impl Client {
     /// # Errors
     ///
     /// Returns an error if the copy operation fails.
-    pub async fn copy_in(&self, dest: &str, tar_data: &[u8]) -> io::Result<()> {
+    pub(crate) async fn copy_in(&self, dest: &str, tar_data: &[u8]) -> io::Result<()> {
         let mut stream = self.connect_raw().await?;
         bux_proto::send(
             &mut stream,
@@ -504,7 +494,7 @@ impl Client {
     /// # Errors
     ///
     /// Returns an error if the streaming copy fails.
-    pub async fn copy_in_from_reader(
+    pub(crate) async fn copy_in_from_reader(
         &self,
         dest: &str,
         reader: &mut (impl AsyncRead + Unpin + Send),
@@ -527,7 +517,7 @@ impl Client {
     /// # Errors
     ///
     /// Returns an error if the copy operation fails.
-    pub async fn copy_out(&self, path: &str) -> io::Result<Vec<u8>> {
+    pub(crate) async fn copy_out(&self, path: &str) -> io::Result<Vec<u8>> {
         self.copy_out_opts(path, false).await
     }
 
@@ -536,7 +526,11 @@ impl Client {
     /// # Errors
     ///
     /// Returns an error if the copy operation fails.
-    pub async fn copy_out_opts(&self, path: &str, follow_symlinks: bool) -> io::Result<Vec<u8>> {
+    pub(crate) async fn copy_out_opts(
+        &self,
+        path: &str,
+        follow_symlinks: bool,
+    ) -> io::Result<Vec<u8>> {
         let mut stream = self.connect_raw().await?;
         bux_proto::send(
             &mut stream,
@@ -558,7 +552,7 @@ impl Client {
     /// # Errors
     ///
     /// Returns an error if the streaming copy fails.
-    pub async fn copy_out_to_writer(
+    pub(crate) async fn copy_out_to_writer(
         &self,
         path: &str,
         follow_symlinks: bool,
@@ -575,12 +569,6 @@ impl Client {
         .await?;
         Self::expect_ready(&mut stream).await?;
         bux_proto::recv_download_to_writer(&mut stream, writer).await
-    }
-
-    /// Returns the socket path this client targets.
-    #[must_use]
-    pub fn socket_path(&self) -> &Path {
-        &self.socket_path
     }
 
     /// Opens a raw Unix socket connection to the guest agent.

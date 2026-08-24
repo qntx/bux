@@ -28,7 +28,7 @@ pub struct SnapshotInfo {
     /// Unique snapshot identifier.
     pub id: String,
     /// ID of the VM this snapshot belongs to.
-    pub box_id: String,
+    pub vm_id: String,
     /// Optional human-friendly name.
     pub name: Option<String>,
     /// Absolute path to the snapshot disk image.
@@ -43,7 +43,7 @@ impl From<SnapshotRow> for SnapshotInfo {
     fn from(row: SnapshotRow) -> Self {
         Self {
             id: row.id,
-            box_id: row.box_id,
+            vm_id: row.vm_id,
             name: row.name,
             disk_path: PathBuf::from(&row.disk_path),
             disk_bytes: row.disk_bytes,
@@ -54,7 +54,7 @@ impl From<SnapshotRow> for SnapshotInfo {
 
 /// Manages snapshot lifecycle: create, list, restore, delete.
 #[derive(Debug, Clone)]
-pub struct SnapshotManager {
+pub(crate) struct SnapshotManager {
     /// Shared state database.
     db: Arc<StateDb>,
     /// Directory for snapshot disk images.
@@ -67,7 +67,7 @@ impl SnapshotManager {
     /// # Errors
     ///
     /// Returns an error if the snapshots directory cannot be created.
-    pub fn new(db: Arc<StateDb>, data_dir: &Path) -> io::Result<Self> {
+    pub(crate) fn new(db: Arc<StateDb>, data_dir: &Path) -> io::Result<Self> {
         let snapshots_dir = data_dir.join("snapshots");
         fs::create_dir_all(&snapshots_dir)?;
         Ok(Self { db, snapshots_dir })
@@ -81,7 +81,7 @@ impl SnapshotManager {
     /// # Errors
     ///
     /// Returns an error if the disk copy or database insert fails.
-    pub async fn create(
+    pub(crate) async fn create(
         &self,
         vm_id: &str,
         vm_status: Status,
@@ -109,7 +109,7 @@ impl SnapshotManager {
 
         let row = SnapshotRow {
             id: snapshot_id.clone(),
-            box_id: vm_id.to_owned(),
+            vm_id: vm_id.to_owned(),
             name: name.map(ToOwned::to_owned),
             disk_path: dest.to_string_lossy().into_owned(),
             disk_bytes,
@@ -126,22 +126,13 @@ impl SnapshotManager {
     /// # Errors
     ///
     /// Returns an error if the database query fails.
-    pub fn list(&self, box_id: &str) -> Result<Vec<SnapshotInfo>> {
+    pub(crate) fn list(&self, vm_id: &str) -> Result<Vec<SnapshotInfo>> {
         Ok(self
             .db
-            .list_snapshots(box_id)?
+            .list_snapshots(vm_id)?
             .into_iter()
             .map(SnapshotInfo::from)
             .collect())
-    }
-
-    /// Gets a snapshot by ID.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the snapshot is not found.
-    pub fn get(&self, snapshot_id: &str) -> Result<SnapshotInfo> {
-        Ok(SnapshotInfo::from(self.db.get_snapshot(snapshot_id)?))
     }
 
     /// Deletes a snapshot (both the DB record and the disk file).
@@ -149,7 +140,7 @@ impl SnapshotManager {
     /// # Errors
     ///
     /// Returns an error if the database record cannot be removed.
-    pub fn delete(&self, snapshot_id: &str) -> Result<()> {
+    pub(crate) fn delete(&self, snapshot_id: &str) -> Result<()> {
         let snap = self.db.get_snapshot(snapshot_id)?;
         fs::remove_file(&snap.disk_path).ok();
         self.db.delete_snapshot(snapshot_id)?;

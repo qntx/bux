@@ -1,7 +1,7 @@
 //! Apply [`ShimConfig`] to a libkrun context and start the VM.
 //!
-//! Single code path used by the `bux-shim` binary and by host-side
-//! builders that prepare a context without process takeover.
+//! Product callers are [`prepare`] / optional [`install_seccomp`] / [`start`].
+//! This module never constructs gvproxy.
 
 use bux_krun::ctx as sys;
 
@@ -91,13 +91,34 @@ pub fn start(ctx: u32) -> Result<()> {
     Ok(sys::start_enter(ctx)?)
 }
 
-/// `prepare` then `start`. Never returns on success.
+/// Install the default seccomp BPF filter (Linux `x86_64`/`aarch64`).
+///
+/// Other platforms: no-op. The `bux-shim` binary skips this when gvproxy
+/// is in-process.
 ///
 /// # Errors
 ///
-/// Propagates prepare/start errors.
-pub fn boot(cfg: &ShimConfig) -> Result<()> {
-    prepare(cfg)?.start()
+/// Returns [`Error::Seccomp`] if installation fails (fail-closed).
+#[allow(
+    clippy::missing_const_for_fn,
+    clippy::unnecessary_wraps,
+    reason = "Result/errors only arise on Linux x86_64/aarch64; other platforms no-op"
+)]
+pub fn install_seccomp() -> Result<()> {
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    {
+        bux_seccomp::install_default().map_err(|e| Error::Seccomp(e.to_string()))
+    }
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
+    {
+        Ok(())
+    }
 }
 
 /// Apply every field of `cfg` to an existing libkrun context.
@@ -136,19 +157,27 @@ fn apply_all(ctx: u32, cfg: &ShimConfig) -> Result<()> {
         sys::add_virtiofs(ctx, &share.tag, &share.path)?;
     }
 
-    // Network: virtio-net XOR TSI port map (never both).
+    // Virtio-net only. Never `set_port_map`.
+    // Skipping `add_net_*` would auto-enable TSI (host-stack leak).
     if let Some(ref net) = cfg.network {
+        const FEATURES: u32 = bux_krun::sys::COMPAT_NET_FEATURES;
+        let flags = match net.connection {
+            ShimNetConn::UnixDgram => bux_krun::sys::NET_FLAG_VFKIT,
+            ShimNetConn::UnixStream => 0,
+        };
         let path = net.socket_path.to_string_lossy();
         match net.connection {
             ShimNetConn::UnixStream => {
-                sys::add_net_unixstream(ctx, Some(path.as_ref()), -1, &net.mac, 0, 0)?;
+                sys::add_net_unixstream(ctx, Some(path.as_ref()), -1, &net.mac, FEATURES, flags)?;
             }
             ShimNetConn::UnixDgram => {
-                sys::add_net_unixgram(ctx, Some(path.as_ref()), -1, &net.mac, 0, 0)?;
+                sys::add_net_unixgram(ctx, Some(path.as_ref()), -1, &net.mac, FEATURES, flags)?;
             }
         }
-    } else if !cfg.ports.is_empty() {
-        sys::set_port_map(ctx, &cfg.ports)?;
+    }
+    if cfg.network.is_none() {
+        disable_implicit_vsock(ctx)?;
+        add_vsock(ctx, 0)?;
     }
 
     if let Some(ref workdir) = cfg.workdir {
@@ -184,4 +213,135 @@ fn apply_all(ctx: u32, cfg: &ShimConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Real libkrun `krun_disable_implicit_vsock`. Tests record through this wrapper.
+fn disable_implicit_vsock(ctx: u32) -> Result<()> {
+    #[cfg(test)]
+    krun_spy::record(krun_spy::Call::DisableImplicitVsock);
+    Ok(sys::disable_implicit_vsock(ctx)?)
+}
+
+/// Real libkrun `krun_add_vsock`. Tests record through this wrapper. `0` = no TSI.
+fn add_vsock(ctx: u32, tsi_features: u32) -> Result<()> {
+    #[cfg(test)]
+    krun_spy::record(krun_spy::Call::AddVsock { tsi_features });
+    Ok(sys::add_vsock(ctx, tsi_features)?)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::missing_docs_in_private_items,
+    reason = "test spy for TSI-off FFI order"
+)]
+mod krun_spy {
+    use std::cell::RefCell;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Call {
+        DisableImplicitVsock,
+        AddVsock { tsi_features: u32 },
+    }
+
+    thread_local! {
+        static CALLS: RefCell<Vec<Call>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record(call: Call) {
+        CALLS.with(|c| c.borrow_mut().push(call));
+    }
+
+    pub(super) fn take() -> Vec<Call> {
+        CALLS.with(|c| std::mem::take(&mut *c.borrow_mut()))
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::missing_docs_in_private_items,
+    reason = "unit tests"
+)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::config::{ShimDiskFormat, ShimVsockPort};
+
+    fn offline_cfg(rootfs: &str, vsock: &str) -> ShimConfig {
+        ShimConfig {
+            vm_id: "offline-tsi".into(),
+            vcpus: 1,
+            ram_mib: 128,
+            rootfs: Some(rootfs.into()),
+            root_disk: None,
+            disk_format: ShimDiskFormat::Raw,
+            virtiofs: vec![],
+            vsock_ports: vec![ShimVsockPort {
+                port: 1024,
+                path: vsock.into(),
+                listen: true,
+            }],
+            network: None,
+            gvproxy: None,
+            log_level: None,
+            exec_path: None,
+            exec_args: vec![],
+            env: None,
+            workdir: None,
+            uid: None,
+            gid: None,
+            rlimits: vec![],
+            nested_virt: None,
+            snd_device: None,
+            console_output: None,
+        }
+    }
+
+    fn scratch_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bux-shim-offline-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn disable_implicit_vsock_then_add_vsock_zero() {
+        // Implicit vsock must be disabled before add_vsock; 0 = no TSI.
+        let ctx = sys::create_ctx().expect("create_ctx");
+        let applied = sys::disable_implicit_vsock(ctx).and_then(|()| sys::add_vsock(ctx, 0));
+        drop(sys::free_ctx(ctx));
+        applied.expect("disable_implicit_vsock + add_vsock(0)");
+    }
+
+    #[test]
+    fn prepare_disabled_network_disables_tsi() {
+        drop(krun_spy::take());
+        let dir = scratch_dir();
+        let rootfs = dir.join("root");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        let vsock = dir.join("agent.sock");
+        let cfg = offline_cfg(
+            rootfs.to_str().expect("utf8 rootfs"),
+            vsock.to_str().expect("utf8 vsock"),
+        );
+
+        let prepared = prepare(&cfg).expect("prepare network=None");
+        assert!(prepared.ctx().is_some());
+        assert_eq!(
+            krun_spy::take(),
+            [
+                krun_spy::Call::DisableImplicitVsock,
+                krun_spy::Call::AddVsock { tsi_features: 0 },
+            ]
+        );
+        drop(prepared);
+        drop(std::fs::remove_dir_all(&dir));
+    }
 }

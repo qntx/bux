@@ -68,11 +68,9 @@ pub fn spawn(req: &ExecStart) -> io::Result<PtyHandle> {
     let slave_stderr = dup_fd(&slave, "stderr")?;
 
     let credentials = super::resolve_credentials(req)?;
-    let (program, args) =
-        crate::container::resolve_exec_argv(&req.cmd, &req.args, req.in_container)?;
 
-    let mut cmd = Command::new(&program);
-    cmd.args(&args);
+    let mut cmd = Command::new(&req.cmd);
+    cmd.args(&req.args);
     // cwd/env only — credentials share one pre_exec with setsid below.
     if let Some(ref cwd) = req.cwd {
         cmd.current_dir(cwd);

@@ -1,51 +1,8 @@
-//! Network backend trait and associated types.
-//!
-//! The [`NetworkBackend`] trait defines the interface that all network
-//! implementations must satisfy. Product managed networking uses
-//! gvproxy only; the trait exists for tests and mocks (not for product
-//! multi-backend switching in v1).
+//! Network types used by [`crate::GvproxyBackend`].
 
-use std::fmt;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-
-use crate::error::Result;
-
-// ============================================================================
-// NetworkBackend trait
-// ============================================================================
-
-/// Trait that every pluggable network backend must implement.
-///
-/// Implementations must be `Send + Sync` because the backend may be shared
-/// across the runtime's async tasks and the shim child process.
-pub trait NetworkBackend: Send + Sync + fmt::Debug {
-    /// Returns the connection information the VM engine needs to wire
-    /// the guest's virtio-net device to this backend.
-    ///
-    /// # Errors
-    ///
-    /// Returns a backend-specific error if the endpoint cannot be
-    /// produced (e.g. the underlying gvproxy instance was not created
-    /// successfully).
-    fn endpoint(&self) -> Result<NetworkEndpoint>;
-
-    /// Human-readable backend name (e.g. `"gvisor-tap-vsock"`).
-    fn name(&self) -> &'static str;
-
-    /// Optional live network counters.
-    ///
-    /// Backends that don't support metrics return `Ok(None)`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a backend-specific error if the counters cannot be
-    /// queried from the underlying transport.
-    fn metrics(&self) -> Result<Option<NetworkMetrics>> {
-        Ok(None)
-    }
-}
 
 // ============================================================================
 // Endpoint

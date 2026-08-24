@@ -33,7 +33,6 @@ pub async fn handle(
                 let resp = ControlResp::Pong {
                     version: env!("CARGO_PKG_VERSION").to_owned(),
                     uptime_ms: server::uptime_ms(),
-                    workload_isolation: crate::container::workload_isolation().to_owned(),
                 };
                 bux_proto::send(w, &resp).await?;
                 w.flush().await?;

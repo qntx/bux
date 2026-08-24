@@ -1,38 +1,102 @@
+//! Handle to a single managed VM.
+
+use std::collections::HashMap;
 use std::io;
-use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 use bux_proto::ExecStart;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
+use serde::Serialize;
 use tracing::info;
 
 use super::HealthStatus;
-use super::spawn::{
-    clean_vm_files, inject_guest_boot_env, is_pid_alive, prepare_managed_config,
-    shim_death_message, spawn_shim, wait_for_exit,
+use super::boot::{
+    clean_net_sock, clean_vm_files, inject_guest_boot_env, is_pid_alive, prepare_restart_config,
+    prepare_virtio_net, shim_death_message, spawn_shim, wait_for_exit,
 };
 use crate::Result;
 use crate::client::{Client, ExecHandle, ExecOutput, PongInfo};
 use crate::disk::DiskManager;
-use crate::events::{AuditEvent, AuditEventKind, EventDispatcher};
-use crate::metrics::{BoxMetrics, RuntimeMetrics};
-use crate::net_manager::NetworkManager;
-use crate::ports::{
-    PublishedPort, format_port_pairs, parse_concrete_port_strings, parse_publish_spec,
-    resolve_ports,
-};
+use crate::events::{AuditEvent, AuditEventKind, CopyDirection, EventDispatcher};
+use crate::metrics::{RuntimeMetrics, VmMetrics};
+use crate::options::NetworkSpec;
+use crate::ports::PublishedPort;
+use crate::process::{PHASE_A_LIMITS, apply_workload_defaults};
 use crate::secrets::{LiveSecrets, StartOptions};
+use crate::security::{SecurityOptions, SecurityStatus};
 use crate::snapshot::SnapshotManager;
 use crate::state::{StateDb, Status, VmState};
+use crate::volumes::VolumeManager;
 use crate::watchdog::Keepalive;
-use std::collections::HashMap;
-use std::sync::Mutex;
+
+/// Read-only product view of a managed VM (no persist/engine internals).
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct VmInfo {
+    /// Short hex identifier.
+    pub id: String,
+    /// Optional unique name.
+    pub name: Option<String>,
+    /// Shim process PID.
+    pub pid: i32,
+    /// Image label (OCI ref or path).
+    pub image: Option<String>,
+    /// Lifecycle status.
+    pub status: Status,
+    /// Live snapshot: Dead if the process is gone; Starting otherwise (no ping).
+    pub health: HealthStatus,
+    /// Concrete published TCP ports.
+    pub published_ports: Vec<PublishedPort>,
+    /// Guest network mode.
+    pub network: NetworkSpec,
+    /// Actual isolation posture from last spawn.
+    pub security: SecurityStatus,
+    /// Requested isolation policy.
+    pub security_options: SecurityOptions,
+    /// Phase A isolation note.
+    pub isolation_note: &'static str,
+    /// Last recorded error, if any.
+    pub last_error: Option<String>,
+    /// Creation timestamp.
+    pub created_at: SystemTime,
+    /// Optional first command (OCI ENTRYPOINT+CMD or CLI override).
+    pub workload_cmd: Vec<String>,
+}
+
+impl VmInfo {
+    /// Project stored state into a product view (no guest ping).
+    pub(crate) fn from_stored(state: &VmState) -> Self {
+        let health = if state.status == Status::Stopped || !is_pid_alive(state.pid) {
+            HealthStatus::Dead
+        } else {
+            HealthStatus::Starting
+        };
+        let network = state.config.network.clone();
+        Self {
+            id: state.id.clone(),
+            name: state.name.clone(),
+            pid: state.pid,
+            image: state.image.clone(),
+            status: state.status,
+            health,
+            published_ports: state.config.published_ports.clone(),
+            network,
+            security: state.config.security_status.clone(),
+            security_options: state.config.security,
+            isolation_note: PHASE_A_LIMITS,
+            last_error: state.config.last_error.clone(),
+            created_at: state.created_at,
+            workload_cmd: state.config.workload_cmd.clone(),
+        }
+    }
+}
 
 /// Handle to a single managed VM.
 #[derive(Debug)]
-pub struct VmHandle {
+pub struct Vm {
     /// Cached state snapshot.
     state: VmState,
     /// Shared database reference for status updates.
@@ -43,28 +107,29 @@ pub struct VmHandle {
     client: Client,
     /// Watchdog keepalive — dropping this signals the shim to shut down.
     /// `None` when reconnecting to a VM spawned in a previous session.
+    #[allow(dead_code, reason = "held for RAII; drop signals shim shutdown")]
     keepalive: Option<Keepalive>,
     /// Runtime-level metrics (shared with Runtime).
     runtime_metrics: Arc<RuntimeMetrics>,
-    /// Per-box metrics for this VM.
-    box_metrics: BoxMetrics,
+    /// Per-VM metrics.
+    metrics: VmMetrics,
     /// Event dispatcher (shared with Runtime).
     events: Arc<EventDispatcher>,
     /// Snapshot manager (shared with Runtime).
     snapshots: SnapshotManager,
-    /// Network manager (shared with Runtime).
-    net: Arc<NetworkManager>,
     /// Memory-only secrets map (shared with Runtime).
     secrets: Arc<Mutex<HashMap<String, LiveSecrets>>>,
+    /// Named volumes (shared with Runtime); used by abort cleanup.
+    volumes: VolumeManager,
     /// When this VM was spawned (for uptime tracking).
     spawned_at: std::time::Instant,
 }
 
-impl VmHandle {
+impl Vm {
     /// Creates a new handle from a state snapshot.
     #[allow(
         clippy::too_many_arguments,
-        reason = "handle wires shared Runtime resources; split later if needed"
+        reason = "handle wires shared Runtime resources"
     )]
     pub(super) fn new(
         state: VmState,
@@ -74,8 +139,8 @@ impl VmHandle {
         runtime_metrics: Arc<RuntimeMetrics>,
         events: Arc<EventDispatcher>,
         snapshots: SnapshotManager,
-        net: Arc<NetworkManager>,
         secrets: Arc<Mutex<HashMap<String, LiveSecrets>>>,
+        volumes: VolumeManager,
     ) -> Self {
         let client = Client::new(&state.socket);
         Self {
@@ -85,23 +150,51 @@ impl VmHandle {
             client,
             keepalive,
             runtime_metrics,
-            box_metrics: BoxMetrics::new(),
+            metrics: VmMetrics::new(),
             events,
             snapshots,
-            net,
             secrets,
+            volumes,
             spawned_at: std::time::Instant::now(),
         }
     }
 
-    /// Returns the current state snapshot.
-    pub const fn state(&self) -> &VmState {
+    /// Product view of this VM (no persist JSON, no guest ping).
+    #[must_use]
+    pub fn info(&self) -> VmInfo {
+        VmInfo::from_stored(&self.state)
+    }
+
+    /// Stored row (crate-internal).
+    pub(crate) const fn stored(&self) -> &VmState {
         &self.state
+    }
+
+    /// Shim stderr log path (`{id}.stderr` next to the vsock socket).
+    #[must_use]
+    pub fn log_path(&self) -> PathBuf {
+        self.state.socket.with_extension("stderr")
+    }
+
+    /// Tear down a VM that never became ready (create failure).
+    pub(super) fn abort_unready(&mut self) {
+        let uptime_ms = u64::try_from(self.spawned_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.runtime_metrics.on_vm_failed(uptime_ms);
+        signal::kill(Pid::from_raw(self.state.pid), Signal::SIGKILL).ok();
+        self.secrets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.state.id);
+        clean_vm_files(&self.state.socket);
+        drop(self.volumes.unlink_vm(&self.state.id));
+        drop(self.disk.remove_vm_disk(&self.state.id));
+        drop(self.db.delete(&self.state.id));
+        self.state.status = Status::Stopped;
     }
 
     /// Published TCP ports (concrete host ports after ephemeral resolution).
     ///
-    /// Empty when using TSI-only networking or when no ports were requested.
+    /// Empty when networking is disabled or no ports were requested.
     #[must_use]
     pub fn published_ports(&self) -> &[PublishedPort] {
         &self.state.config.published_ports
@@ -110,7 +203,7 @@ impl VmHandle {
     /// Egress allow-list (empty = unrestricted).
     #[must_use]
     pub fn allow_net(&self) -> &[String] {
-        &self.state.config.allow_net
+        self.state.config.network.allow_net()
     }
 
     /// Workload env defaults for Phase A exec (`KEY=VALUE`).
@@ -131,25 +224,31 @@ impl VmHandle {
         self.state.config.workload_user.as_deref()
     }
 
-    /// Phase A security limitation note (until Phase B container isolation).
+    /// Optional first command (OCI ENTRYPOINT+CMD or CLI override).
+    #[must_use]
+    pub fn workload_cmd(&self) -> &[String] {
+        &self.state.config.workload_cmd
+    }
+
+    /// Phase A isolation note (workload shares the guest with the agent).
     #[must_use]
     #[allow(
         clippy::unused_self,
-        reason = "instance accessor for VmInfo-shaped API"
+        reason = "instance accessor for inspect-shaped API"
     )]
     pub const fn phase_a_limits(&self) -> &'static str {
-        crate::process::PHASE_A_LIMITS
+        PHASE_A_LIMITS
     }
 
     /// Actual host-side isolation posture from the last spawn (K22).
     #[must_use]
-    pub const fn security_status(&self) -> &crate::security::SecurityStatus {
+    pub const fn security_status(&self) -> &SecurityStatus {
         &self.state.config.security_status
     }
 
     /// Requested security policy for this VM.
     #[must_use]
-    pub const fn security_options(&self) -> &crate::security::SecurityOptions {
+    pub const fn security_options(&self) -> &SecurityOptions {
         &self.state.config.security
     }
 
@@ -162,7 +261,7 @@ impl VmHandle {
     /// Persist activity timestamp for idle auto-stop / auto-delete.
     fn touch_activity_local(&self) -> Result<()> {
         let mut cfg = self.state.config.clone();
-        cfg.last_activity_at = Some(std::time::SystemTime::now());
+        cfg.last_activity_at = Some(SystemTime::now());
         cfg.last_error = None;
         self.db.update_config(&self.state.id, &cfg)
     }
@@ -170,7 +269,7 @@ impl VmHandle {
     /// Apply stored workload defaults to an exec request (caller overrides win).
     #[must_use]
     pub fn with_workload_defaults(&self, req: ExecStart) -> ExecStart {
-        crate::process::apply_workload_defaults(
+        apply_workload_defaults(
             req,
             &self.state.config.workload_env,
             self.state.config.workload_workdir.as_deref(),
@@ -178,14 +277,9 @@ impl VmHandle {
         )
     }
 
-    /// Returns a reference to the stateless client.
-    pub const fn client(&self) -> &Client {
-        &self.client
-    }
-
-    /// Returns per-box metrics for this VM.
-    pub const fn box_metrics(&self) -> &BoxMetrics {
-        &self.box_metrics
+    /// Per-VM metrics.
+    pub const fn metrics(&self) -> &VmMetrics {
+        &self.metrics
     }
 
     /// Creates a point-in-time snapshot of this VM's disk.
@@ -216,7 +310,7 @@ impl VmHandle {
 
         self.events
             .emit(AuditEvent::now(AuditEventKind::SnapshotCreated {
-                box_id: self.state.id.clone(),
+                vm_id: self.state.id.clone(),
                 snapshot_id: info.id.clone(),
             }));
 
@@ -243,10 +337,6 @@ impl VmHandle {
 
     /// Exports this VM's disk as a standalone QCOW2 image.
     ///
-    /// Flattens the QCOW2 overlay chain (overlay + backing base) into a
-    /// single self-contained file at `dest`. The source VM is unaffected.
-    /// If the VM is running, consider creating a snapshot first.
-    ///
     /// # Errors
     ///
     /// Returns an error if the disk flattening fails.
@@ -255,23 +345,6 @@ impl VmHandle {
         self.disk.flatten_vm_disk(vm_id, dest)?;
         info!(vm_id = %vm_id, dest = %dest.display(), "VM disk exported");
         Ok(())
-    }
-
-    /// Starts a background health check task for this VM.
-    ///
-    /// The task periodically pings the guest agent and updates the VM's
-    /// health state in the database. Dropping the returned handle cancels
-    /// the background task.
-    pub fn enable_health_check(
-        &self,
-        config: crate::health::HealthCheckConfig,
-    ) -> crate::health::HealthCheckHandle {
-        crate::health::start(
-            self.state.id.clone(),
-            self.client.clone(),
-            Arc::clone(&self.db),
-            config,
-        )
     }
 
     /// Probes the guest agent and returns the current health status.
@@ -297,12 +370,6 @@ impl VmHandle {
 
     /// Starts a command on a dedicated exec connection.
     ///
-    /// Applies Phase A workload defaults (env / workdir / user) when the request
-    /// omits them. Emits an [`ExecStarted`](AuditEventKind::ExecStarted) audit event.
-    /// The caller is responsible for collecting output and calling
-    /// [`exec_output`](Self::exec_output) if they want
-    /// [`ExecCompleted`](AuditEventKind::ExecCompleted) to be emitted.
-    ///
     /// # Errors
     ///
     /// Returns an error if the connection or command start fails.
@@ -313,7 +380,7 @@ impl VmHandle {
         drop(self.touch_activity_local());
         self.events
             .emit(AuditEvent::now(AuditEventKind::ExecStarted {
-                box_id: self.state.id.clone(),
+                vm_id: self.state.id.clone(),
                 command: cmd,
                 exec_id: handle.exec_id().to_owned(),
             }));
@@ -321,11 +388,6 @@ impl VmHandle {
     }
 
     /// Executes a command and collects all output.
-    ///
-    /// Applies Phase A workload defaults when omitted. Emits both
-    /// [`ExecStarted`](AuditEventKind::ExecStarted) and
-    /// [`ExecCompleted`](AuditEventKind::ExecCompleted) audit events,
-    /// and updates [`BoxMetrics::exec_count`](crate::BoxMetrics).
     ///
     /// # Errors
     ///
@@ -337,25 +399,22 @@ impl VmHandle {
         drop(self.touch_activity_local());
         self.events
             .emit(AuditEvent::now(AuditEventKind::ExecStarted {
-                box_id: self.state.id.clone(),
+                vm_id: self.state.id.clone(),
                 command: cmd,
                 exec_id: output.exec_id.clone(),
             }));
         self.events
             .emit(AuditEvent::now(AuditEventKind::ExecCompleted {
-                box_id: self.state.id.clone(),
+                vm_id: self.state.id.clone(),
                 exec_id: output.exec_id.clone(),
                 exit_code: output.code,
                 duration_ms: output.duration_ms,
             }));
-        self.box_metrics.on_exec_completed(output.duration_ms);
+        self.metrics.on_exec_completed(output.duration_ms);
         Ok(output)
     }
 
     /// Restarts a stopped VM (uses memory-held secrets if still present).
-    ///
-    /// If `secrets_required` and secrets were lost (Runtime restart), returns
-    /// [`crate::Error::SecretsRequired`] — use [`Self::start_with`] instead.
     ///
     /// # Errors
     ///
@@ -374,6 +433,10 @@ impl VmHandle {
     ///
     /// Returns an error if the VM is not stopped, secrets cannot be resolved,
     /// or the spawn fails.
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "restart: secrets, net, shim, ready; split would hide fail-closed order"
+    )]
     pub async fn start_with(&mut self, opts: StartOptions) -> Result<()> {
         if self.state.status != Status::Stopped {
             return Err(crate::Error::InvalidState(format!(
@@ -382,9 +445,8 @@ impl VmHandle {
             )));
         }
 
-        prepare_managed_config(&mut self.state.config)?;
+        prepare_restart_config(&mut self.state.config)?;
 
-        // Resolve secrets: explicit opts → memory → error if required.
         let live = if opts.secrets.is_empty() {
             let held = {
                 let guard = self
@@ -401,7 +463,7 @@ impl VmHandle {
                 None => None,
             }
         } else {
-            if !self.state.config.virtio_net {
+            if !self.state.config.network.is_enabled() {
                 return Err(crate::Error::SecretsNeedVirtioNet);
             }
             let live = LiveSecrets::mint(opts.secrets)?;
@@ -416,72 +478,68 @@ impl VmHandle {
         let mitm_ca = live.as_ref().map(|l| l.ca_cert_pem.clone());
         inject_guest_boot_env(&mut self.state.config, &self.state.id, mitm_ca)?;
 
-        let network = if self.state.config.virtio_net {
-            let mut specs = Vec::with_capacity(self.state.config.ports.len());
-            for s in &self.state.config.ports {
-                specs.push(parse_publish_spec(s)?);
-            }
-            let (pairs, published) = resolve_ports(&specs)?;
-            self.state.config.ports = format_port_pairs(&pairs);
-            self.state.config.published_ports = published;
-            let net = self.net.start(
-                &self.state.id,
-                pairs,
-                self.state.config.allow_net.clone(),
-                live.as_ref(),
-            )?;
-            Some(net.shim_network)
-        } else {
-            let _ = parse_concrete_port_strings(&self.state.config.ports)?;
-            self.state.config.published_ports.clear();
-            None
-        };
+        let socks_dir = self
+            .state
+            .socket
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let (network, gvproxy) = prepare_virtio_net(
+            &self.state.id,
+            &socks_dir,
+            &mut self.state.config,
+            live.as_ref(),
+        )?;
 
         let config_path = self
             .state
             .socket
             .with_file_name(format!("{}.json", self.state.id));
-        let socks_dir = self.state.socket.parent().unwrap_or_else(|| Path::new("."));
-        let shim = match spawn_shim(
+        let shim = spawn_shim(
             &self.state.config,
             &config_path,
-            socks_dir,
+            &socks_dir,
             &self.state.id,
-            true,
             network,
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                self.net.stop(&self.state.id);
-                return Err(e);
-            }
-        };
+            gvproxy,
+        )?;
 
+        self.state.config.security_status = shim.security.clone();
+        if let Err(e) = self
+            .db
+            .update_pid_status(&self.state.id, shim.pid, Status::Running)
+            .and_then(|()| self.db.update_config(&self.state.id, &self.state.config))
+        {
+            self.revert_failed_start(shim.pid);
+            return Err(e);
+        }
         self.state.pid = shim.pid;
         self.state.status = Status::Running;
-        self.state.config.security_status = shim.security.clone();
-        self.db.update_status(&self.state.id, Status::Running)?;
-        self.db.update_config(&self.state.id, &self.state.config)?;
         self.client = Client::new(&self.state.socket);
         self.keepalive = shim.keepalive;
 
         info!(
             vm_id = %self.state.id,
             pid = shim.pid,
-            virtio_net = self.state.config.virtio_net,
+            network_enabled = self.state.config.network.is_enabled(),
             secrets = self.state.config.secrets_required,
             "VM restarted"
         );
         self.spawned_at = std::time::Instant::now();
-        self.events
-            .emit(AuditEvent::now(AuditEventKind::BoxStarted {
-                id: self.state.id.clone(),
-            }));
+        self.events.emit(AuditEvent::now(AuditEventKind::VmStarted {
+            id: self.state.id.clone(),
+        }));
         let ready_timeout = opts
             .ready_timeout
             .unwrap_or_else(|| Duration::from_secs(30));
-        if !ready_timeout.is_zero() {
-            drop(self.wait_ready(ready_timeout).await);
+        if !ready_timeout.is_zero()
+            && let Err(e) = self.wait_ready(ready_timeout).await
+        {
+            self.runtime_metrics.record_failed();
+            if let Err(kill_err) = self.kill() {
+                tracing::warn!(error = %kill_err, "failed to stop VM after ready failure");
+            }
+            return Err(e);
         }
         Ok(())
     }
@@ -605,9 +663,6 @@ impl VmHandle {
 
     /// Waits for the guest agent to become reachable.
     ///
-    /// Races handshake probes against shim process death detection.
-    /// On failure, reads the shim's exit file for structured diagnostics.
-    ///
     /// # Errors
     ///
     /// Returns an error if the agent does not become ready within `timeout`
@@ -616,7 +671,7 @@ impl VmHandle {
         clippy::excessive_nesting,
         reason = "inherent in async select! + timeout pattern"
     )]
-    pub async fn wait_ready(&self, timeout: Duration) -> io::Result<()> {
+    pub async fn wait_ready(&self, timeout: Duration) -> Result<()> {
         let start = std::time::Instant::now();
         let pid = self.state.pid;
         let exit_file = self.state.socket.with_extension("exit");
@@ -633,8 +688,9 @@ impl VmHandle {
         let process_monitor = async {
             loop {
                 if !is_pid_alive(pid) {
-                    let msg = shim_death_message(pid, &exit_file);
-                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, msg));
+                    return Err(crate::Error::GuestUnavailable(shim_death_message(
+                        pid, &exit_file,
+                    )));
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
@@ -647,12 +703,11 @@ impl VmHandle {
             }
         })
         .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "guest agent did not become ready"))?;
+        .map_err(|_| crate::Error::GuestUnavailable("guest agent did not become ready".into()))?;
 
-        // Record boot duration on success.
         if result.is_ok() {
             let boot_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-            self.box_metrics.set_boot_duration_ms(boot_ms);
+            self.metrics.set_boot_duration_ms(boot_ms);
         }
         result
     }
@@ -672,7 +727,9 @@ impl VmHandle {
     ///
     /// Returns an error if the file cannot be written.
     pub async fn write_file(&self, path: &str, data: &[u8], mode: u32) -> Result<()> {
-        Ok(self.client.write_file(path, data, mode).await?)
+        self.client.write_file(path, data, mode).await?;
+        self.emit_file_copied(CopyDirection::In, path);
+        Ok(())
     }
 
     /// Copies a tar archive into the guest, unpacking at `dest`.
@@ -681,7 +738,9 @@ impl VmHandle {
     ///
     /// Returns an error if the copy operation fails.
     pub async fn copy_in(&self, dest: &str, tar_data: &[u8]) -> Result<()> {
-        Ok(self.client.copy_in(dest, tar_data).await?)
+        self.client.copy_in(dest, tar_data).await?;
+        self.emit_file_copied(CopyDirection::In, dest);
+        Ok(())
     }
 
     /// Streams a tar archive from `reader` into the guest, unpacking at `dest`.
@@ -694,7 +753,9 @@ impl VmHandle {
         dest: &str,
         reader: &mut (impl tokio::io::AsyncRead + Unpin + Send),
     ) -> Result<()> {
-        Ok(self.client.copy_in_from_reader(dest, reader).await?)
+        self.client.copy_in_from_reader(dest, reader).await?;
+        self.emit_file_copied(CopyDirection::In, dest);
+        Ok(())
     }
 
     /// Copies a path from the guest as a tar archive.
@@ -703,7 +764,9 @@ impl VmHandle {
     ///
     /// Returns an error if the copy operation fails.
     pub async fn copy_out(&self, path: &str) -> Result<Vec<u8>> {
-        Ok(self.client.copy_out(path).await?)
+        let data = self.client.copy_out(path).await?;
+        self.emit_file_copied(CopyDirection::Out, path);
+        Ok(data)
     }
 
     /// Streams a path from the guest as a tar archive directly to `writer`.
@@ -717,10 +780,22 @@ impl VmHandle {
         follow_symlinks: bool,
         writer: &mut (impl tokio::io::AsyncWrite + Unpin + Send),
     ) -> Result<u64> {
-        Ok(self
+        let n = self
             .client
             .copy_out_to_writer(path, follow_symlinks, writer)
-            .await?)
+            .await?;
+        self.emit_file_copied(CopyDirection::Out, path);
+        Ok(n)
+    }
+
+    /// Emits [`AuditEventKind::FileCopied`] after a successful copy.
+    fn emit_file_copied(&self, direction: CopyDirection, path: &str) {
+        self.events
+            .emit(AuditEvent::now(AuditEventKind::FileCopied {
+                vm_id: self.state.id.clone(),
+                direction,
+                path: path.to_owned(),
+            }));
     }
 
     /// Performs a version handshake with the guest agent.
@@ -732,19 +807,29 @@ impl VmHandle {
         Ok(self.client.handshake().await?)
     }
 
+    /// Kill a shim that started but was not committed as Running.
+    ///
+    /// Leaves the handle Stopped so `start_with` can be retried. Best-effort
+    /// `update_status(Stopped)` covers a pid row that already landed.
+    fn revert_failed_start(&mut self, pid: i32) {
+        signal::kill(Pid::from_raw(pid), Signal::SIGKILL).ok();
+        clean_net_sock(&self.state.socket);
+        self.state.status = Status::Stopped;
+        drop(self.db.update_status(&self.state.id, Status::Stopped));
+    }
+
     /// Updates status to Stopped and persists. If `auto_remove` is set,
     /// deletes the VM record, socket, and disk image.
     fn mark_stopped(&mut self) -> Result<()> {
         self.state.status = Status::Stopped;
-        self.net.stop(&self.state.id);
+        clean_net_sock(&self.state.socket);
 
         let uptime_ms = u64::try_from(self.spawned_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-        self.runtime_metrics.on_box_stopped(uptime_ms);
-        self.events
-            .emit(AuditEvent::now(AuditEventKind::BoxStopped {
-                id: self.state.id.clone(),
-                exit_code: None,
-            }));
+        self.runtime_metrics.on_vm_stopped(uptime_ms);
+        self.events.emit(AuditEvent::now(AuditEventKind::VmStopped {
+            id: self.state.id.clone(),
+            exit_code: None,
+        }));
 
         if self.state.config.auto_remove {
             clean_vm_files(&self.state.socket);

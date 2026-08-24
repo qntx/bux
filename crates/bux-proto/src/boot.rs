@@ -2,7 +2,10 @@
 //!
 //! Runtime serialises [`GuestBootConfig`] into
 //! `BUX_GUEST_CONFIG=<json>` and passes it through libkrun `set_exec` env.
-//! The guest agent parses it before configuring network / MITM trust.
+//! The guest agent parses it before configuring network, MITM trust, and
+//! virtio-fs volume mounts.
+
+use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +23,66 @@ pub enum GuestNetworkMode {
     Disabled,
 }
 
+/// virtio-fs share the guest agent must mount before vsock listen.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GuestVolume {
+    /// libkrun virtio-fs tag from `krun_add_virtiofs`.
+    pub tag: String,
+    /// Absolute guest mount point (no `..`; not filesystem root).
+    pub guest_path: String,
+    /// Read-only preference recorded by the host.
+    ///
+    /// Best-effort metadata: libkrun does not pass a RO flag today, so the
+    /// kernel mount is RW even when this is `true`. Not a guest mount option.
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+impl GuestVolume {
+    /// Reject empty `tag`, non-absolute `guest_path`, `..`, or filesystem root.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message if the tag is empty or the path is not a safe mount point.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.tag.is_empty() {
+            return Err("virtiofs tag must not be empty".into());
+        }
+        validate_guest_mount_path(&self.guest_path)
+    }
+}
+
+/// Absolute POSIX guest mount point with a normal component and no `..`.
+///
+/// # Errors
+///
+/// Returns a message if the path is empty, relative, contains `..`, or is only
+/// root / `.` (`/` or `/./`).
+pub fn validate_guest_mount_path(guest_path: &str) -> Result<(), String> {
+    if guest_path.is_empty() || !guest_path.starts_with('/') {
+        return Err(format!("guest_path must be absolute: {guest_path:?}"));
+    }
+    let mut saw_name = false;
+    for c in Path::new(guest_path).components() {
+        match c {
+            Component::ParentDir => {
+                return Err(format!("guest_path must not contain '..': {guest_path:?}"));
+            }
+            Component::Normal(_) => saw_name = true,
+            Component::RootDir | Component::CurDir => {}
+            Component::Prefix(_) => {
+                return Err(format!("guest_path must be absolute: {guest_path:?}"));
+            }
+        }
+    }
+    if !saw_name {
+        return Err(format!(
+            "guest_path must not be filesystem root: {guest_path:?}"
+        ));
+    }
+    Ok(())
+}
+
 /// Public boot material for the guest agent (no secret values).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GuestBootConfig {
@@ -31,16 +94,11 @@ pub struct GuestBootConfig {
     /// VM id for logs / diagnostics.
     #[serde(default)]
     pub vm_id: String,
-    /// Attempt to start the primary OCI container (Phase B) at agent boot.
+    /// virtio-fs volumes to mount at PID 1 (tag → `guest_path`).
     ///
-    /// Default `true`. Failures fall back to Phase A without aborting the agent.
-    #[serde(default = "default_true")]
-    pub primary_container: bool,
-}
-
-/// Serde default for `primary_container`.
-const fn default_true() -> bool {
-    true
+    /// `GuestVolume::read_only` is metadata only; see that field.
+    #[serde(default)]
+    pub volumes: Vec<GuestVolume>,
 }
 
 impl GuestBootConfig {
@@ -51,7 +109,7 @@ impl GuestBootConfig {
             network,
             mitm_ca_pem: None,
             vm_id: vm_id.into(),
-            primary_container: true,
+            volumes: Vec::new(),
         }
     }
 
@@ -91,5 +149,96 @@ mod tests {
         let json = assignment.strip_prefix("BUX_GUEST_CONFIG=").unwrap();
         let de: GuestBootConfig = serde_json::from_str(json).unwrap();
         assert_eq!(de, cfg);
+        assert!(de.volumes.is_empty());
+    }
+
+    #[test]
+    fn missing_volumes_defaults_empty() {
+        let cfg: GuestBootConfig =
+            serde_json::from_str(r#"{"network":"enabled","vm_id":"x"}"#).unwrap();
+        assert!(cfg.volumes.is_empty());
+        assert_eq!(cfg.network, GuestNetworkMode::Enabled);
+        assert_eq!(cfg.vm_id, "x");
+        assert!(cfg.mitm_ca_pem.is_none());
+    }
+
+    #[test]
+    fn volumes_json_roundtrip() {
+        let mut cfg = GuestBootConfig::new("vm1", GuestNetworkMode::Disabled);
+        cfg.volumes.push(GuestVolume {
+            tag: "vol0".into(),
+            guest_path: "/data".into(),
+            read_only: true,
+        });
+        let json = serde_json::to_string(&cfg).unwrap();
+        let de: GuestBootConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(de, cfg);
+        let vol = de.volumes.first().expect("one volume");
+        assert_eq!(vol.tag, "vol0");
+        assert_eq!(vol.guest_path, "/data");
+        assert!(vol.read_only);
+    }
+
+    fn vol(path: &str) -> GuestVolume {
+        GuestVolume {
+            tag: "vol0".into(),
+            guest_path: path.into(),
+            read_only: false,
+        }
+    }
+
+    #[test]
+    fn guest_path_rejects_relative() {
+        for path in ["data", "tmp/foo", "../etc", "", "foo/../bar"] {
+            let err = vol(path).validate().unwrap_err();
+            assert!(
+                err.contains("absolute"),
+                "expected absolute rejection for {path:?}, got {err}"
+            );
+            assert!(validate_guest_mount_path(path).is_err());
+        }
+    }
+
+    #[test]
+    fn guest_path_rejects_parent_dir() {
+        for path in ["/app/../etc", "/..", "/data/foo/../../etc", "/tmp/../"] {
+            let err = vol(path).validate().unwrap_err();
+            assert!(
+                err.contains(".."),
+                "expected parent-dir rejection for {path:?}, got {err}"
+            );
+            assert!(validate_guest_mount_path(path).is_err());
+        }
+    }
+
+    #[test]
+    fn guest_path_accepts_absolute_without_parent() {
+        for path in ["/data", "/var/cache", "/mnt/vol-1", "/data/."] {
+            vol(path).validate().unwrap();
+            validate_guest_mount_path(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn guest_path_rejects_filesystem_root() {
+        for path in ["/", "/./", "/././"] {
+            let err = vol(path).validate().unwrap_err();
+            assert!(
+                err.contains("root"),
+                "expected root rejection for {path:?}, got {err}"
+            );
+            assert!(validate_guest_mount_path(path).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_empty_tag() {
+        let v = GuestVolume {
+            tag: String::new(),
+            guest_path: "/data".into(),
+            read_only: false,
+        };
+        let err = v.validate().unwrap_err();
+        assert!(err.contains("tag"), "{err}");
     }
 }

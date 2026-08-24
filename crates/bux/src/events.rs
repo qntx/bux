@@ -15,35 +15,33 @@ use std::time::SystemTime;
 #[non_exhaustive]
 pub enum AuditEventKind {
     /// A new VM was created.
-    BoxCreated {
+    VmCreated {
         /// VM identifier.
         id: String,
         /// OCI image reference, if any.
         image: Option<String>,
-        /// Tenant the VM belongs to.
-        tenant: String,
     },
     /// A VM was started (or restarted).
-    BoxStarted {
+    VmStarted {
         /// VM identifier.
         id: String,
     },
     /// A VM was stopped.
-    BoxStopped {
+    VmStopped {
         /// VM identifier.
         id: String,
         /// Exit code, if available.
         exit_code: Option<i32>,
     },
     /// A VM was removed.
-    BoxRemoved {
+    VmRemoved {
         /// VM identifier.
         id: String,
     },
     /// A command execution was started inside a VM.
     ExecStarted {
         /// VM identifier.
-        box_id: String,
+        vm_id: String,
         /// Command that was executed.
         command: String,
         /// Unique execution identifier.
@@ -52,7 +50,7 @@ pub enum AuditEventKind {
     /// A command execution completed inside a VM.
     ExecCompleted {
         /// VM identifier.
-        box_id: String,
+        vm_id: String,
         /// Unique execution identifier.
         exec_id: String,
         /// Exit code of the command.
@@ -63,14 +61,14 @@ pub enum AuditEventKind {
     /// A snapshot was created.
     SnapshotCreated {
         /// VM identifier.
-        box_id: String,
+        vm_id: String,
         /// Snapshot identifier.
         snapshot_id: String,
     },
     /// A file was copied into or out of a VM.
     FileCopied {
         /// VM identifier.
-        box_id: String,
+        vm_id: String,
         /// Direction of the copy.
         direction: CopyDirection,
         /// Path involved in the copy.
@@ -209,6 +207,7 @@ impl RingBufferListener {
     }
 
     /// Total number of events ever recorded (may exceed capacity).
+    #[must_use]
     pub fn total_events(&self) -> u64 {
         self.inner.lock().map_or(0, |g| g.total)
     }
@@ -216,6 +215,7 @@ impl RingBufferListener {
     /// Returns the most recent events, up to `limit`.
     ///
     /// Events are returned in chronological order (oldest first).
+    #[must_use]
     pub fn recent(&self, limit: usize) -> Vec<AuditEvent> {
         let Ok(guard) = self.inner.lock() else {
             return Vec::new();
@@ -275,10 +275,9 @@ mod tests {
     use super::*;
 
     fn make_event(id: &str) -> AuditEvent {
-        AuditEvent::now(AuditEventKind::BoxCreated {
+        AuditEvent::now(AuditEventKind::VmCreated {
             id: id.to_owned(),
             image: None,
-            tenant: "default".to_owned(),
         })
     }
 
@@ -305,12 +304,29 @@ mod tests {
         assert_eq!(events.len(), 2);
 
         // Should have vm2 and vm3 (vm1 was evicted).
-        if let AuditEventKind::BoxCreated { ref id, .. } = events[0].kind {
+        if let AuditEventKind::VmCreated { ref id, .. } = events[0].kind {
             assert_eq!(id, "vm2");
         }
-        if let AuditEventKind::BoxCreated { ref id, .. } = events[1].kind {
+        if let AuditEventKind::VmCreated { ref id, .. } = events[1].kind {
             assert_eq!(id, "vm3");
         }
+    }
+
+    #[test]
+    fn file_copied_variant_round_trip() {
+        let event = AuditEvent::now(AuditEventKind::FileCopied {
+            vm_id: "vm1".into(),
+            direction: CopyDirection::In,
+            path: "/tmp/x".into(),
+        });
+        assert!(matches!(
+            event.kind,
+            AuditEventKind::FileCopied {
+                ref vm_id,
+                direction: CopyDirection::In,
+                ref path,
+            } if vm_id == "vm1" && path == "/tmp/x"
+        ));
     }
 
     #[test]

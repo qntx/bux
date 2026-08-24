@@ -7,45 +7,49 @@
 //!
 //! This module is only available on Unix (Linux / macOS).
 
-/// Per-VM runtime handles and async event processing.
-mod handle;
+/// Managed boot path: options → running VM.
+mod boot;
 /// Crash recovery and graceful shutdown.
 mod recover;
-/// Shim process spawning and lifecycle utilities.
-mod spawn;
+/// Per-VM handle.
+mod vm;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
 use std::{fs, io};
 
-use bux_proto::AGENT_PORT;
-pub use handle::VmHandle;
 use nix::fcntl::{Flock, FlockArg};
-use spawn::{
-    clean_vm_files, inject_guest_boot_env, is_pid_alive, prepare_managed_config, spawn_shim,
-};
 use tracing::info;
 
 use crate::Result;
 use crate::disk::DiskManager;
 use crate::events::{AuditEvent, AuditEventKind, EventDispatcher};
 use crate::metrics::RuntimeMetrics;
-use crate::net_manager::NetworkManager;
 use crate::options::VmOptions;
-use crate::pipeline;
-use crate::ports::{
-    format_port_pairs, parse_concrete_port_strings, parse_publish_spec, resolve_ports,
-};
 use crate::secrets::LiveSecrets;
 use crate::snapshot::SnapshotManager;
-use crate::state::{self, StateDb, Status, VmState, VsockPort};
-use crate::vm::{Vm, VmBuilder};
+use crate::state::{StateDb, Status, VmState};
 use crate::volumes::VolumeManager;
+use boot::{clean_vm_files, is_pid_alive};
 
-/// VM health status returned by [`VmHandle::health`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub use vm::{Vm, VmInfo};
+
+/// Cached OCI image metadata (product view).
+#[derive(Debug, Clone, serde::Serialize)]
+#[non_exhaustive]
+pub struct ImageInfo {
+    /// Image reference string.
+    pub reference: String,
+    /// Manifest digest.
+    pub digest: String,
+    /// Total compressed layer size in bytes.
+    pub size: u64,
+}
+
+/// VM health status returned by [`Vm::health`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum HealthStatus {
     /// VM process is alive but guest agent has not responded yet.
@@ -56,31 +60,6 @@ pub enum HealthStatus {
     Unhealthy,
     /// VM process has exited.
     Dead,
-}
-
-/// Options for [`Runtime::run_image`].
-///
-/// Prefer [`VmOptions`] + [`Runtime::create`] for new code.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct RunOptions {
-    /// Remove VM state automatically when it stops (default: `false`).
-    ///
-    /// When `false`, the QCOW2 overlay disk is preserved after stop,
-    /// allowing the VM to be restarted with [`VmHandle::start`].
-    pub auto_remove: bool,
-    /// Maximum time to wait for the guest agent to become reachable
-    /// (default: 30 s). Set to `Duration::ZERO` to skip the readiness check.
-    pub ready_timeout: Duration,
-}
-
-impl Default for RunOptions {
-    fn default() -> Self {
-        Self {
-            auto_remove: false,
-            ready_timeout: Duration::from_secs(30),
-        }
-    }
 }
 
 /// Returns the platform-default data directory for bux.
@@ -115,8 +94,6 @@ pub struct Runtime {
     _lock: Flock<fs::File>,
     /// Snapshot manager.
     snapshots: SnapshotManager,
-    /// Per-VM gvproxy backends (`virtio_net` VMs).
-    net: Arc<NetworkManager>,
     /// Memory-only secrets per VM (never `SQLite`).
     secrets: Arc<Mutex<HashMap<String, LiveSecrets>>>,
     /// Named volumes under `{data_dir}/volumes/`.
@@ -162,7 +139,6 @@ impl Runtime {
         let disk = DiskManager::open(base)?;
         let oci = bux_oci::Oci::open_at(base)?;
         let snapshots = SnapshotManager::new(Arc::clone(&db), base)?;
-        let net = Arc::new(NetworkManager::new(socks_dir.clone()));
         let secrets = Arc::new(Mutex::new(HashMap::new()));
         let volumes = VolumeManager::open(base, Arc::clone(&db))?;
 
@@ -173,7 +149,6 @@ impl Runtime {
             oci,
             _lock: lock,
             snapshots,
-            net,
             secrets,
             volumes,
             metrics: Arc::new(RuntimeMetrics::new()),
@@ -186,23 +161,126 @@ impl Runtime {
     }
 
     /// Returns a reference to the disk image manager.
-    pub const fn disk(&self) -> &DiskManager {
+    pub(crate) const fn disk(&self) -> &DiskManager {
         &self.disk
     }
 
     /// Returns a reference to the OCI image manager.
-    pub const fn oci(&self) -> &bux_oci::Oci {
+    pub(crate) const fn oci(&self) -> &bux_oci::Oci {
         &self.oci
     }
 
-    /// Returns a reference to the snapshot manager.
-    pub const fn snapshots(&self) -> &SnapshotManager {
-        &self.snapshots
+    /// Pull/ensure an OCI image into this runtime's store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the registry pull or local extract fails.
+    pub async fn pull(
+        &self,
+        reference: &str,
+        on_progress: impl Fn(&str) + Send + Sync,
+    ) -> Result<ImageInfo> {
+        let pulled = self.oci.pull(reference, on_progress).await?;
+        let size = self
+            .oci
+            .images()?
+            .into_iter()
+            .find(|m| m.digest == pulled.digest)
+            .map_or(0, |m| m.size);
+        Ok(ImageInfo {
+            reference: pulled.reference,
+            digest: pulled.digest,
+            size,
+        })
     }
 
-    /// Returns the network manager (gvproxy backends).
-    pub fn network(&self) -> &NetworkManager {
-        &self.net
+    /// List cached OCI images.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the image index cannot be read.
+    pub fn images(&self) -> Result<Vec<ImageInfo>> {
+        Ok(self
+            .oci
+            .images()?
+            .into_iter()
+            .map(|m| ImageInfo {
+                reference: m.reference,
+                digest: m.digest,
+                size: m.size,
+            })
+            .collect())
+    }
+
+    /// Remove a cached OCI image reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the image cannot be removed.
+    pub fn remove_image(&self, reference: &str) -> Result<()> {
+        self.oci.remove(reference)?;
+        Ok(())
+    }
+
+    /// List base disk digests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the bases directory cannot be read.
+    pub fn list_bases(&self) -> io::Result<Vec<String>> {
+        self.disk.list_bases()
+    }
+
+    /// Absolute path of a base disk by digest.
+    #[must_use]
+    pub fn base_path(&self, digest: &str) -> PathBuf {
+        self.disk.base_path(digest)
+    }
+
+    /// Create a base ext4 image from a rootfs directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if image creation fails.
+    pub fn create_base(&self, rootfs: &Path, digest: &str) -> Result<PathBuf> {
+        self.disk.create_base(rootfs, digest)
+    }
+
+    /// Remove a base disk by digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be removed.
+    pub fn remove_base(&self, digest: &str) -> io::Result<()> {
+        self.disk.remove_base(digest)
+    }
+
+    /// Delete the runtime data directory after taking the exclusive lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::Busy`] if another Runtime holds the lock.
+    pub fn reset(data_dir: impl AsRef<Path>) -> Result<()> {
+        let base = data_dir.as_ref();
+        if !base.exists() {
+            return Ok(());
+        }
+        fs::create_dir_all(base)?;
+        let lock_file = fs::File::create(base.join("bux.lock"))?;
+        let _lock = Flock::lock(lock_file, FlockArg::LockExclusiveNonblock).map_err(|_| {
+            crate::Error::Busy(format!("another bux runtime is using {}", base.display()))
+        })?;
+        fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    /// Delete a snapshot by ID (any VM).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot is missing or deletion fails.
+    pub fn delete_snapshot(&self, snapshot_id: &str) -> Result<()> {
+        self.snapshots.delete(snapshot_id)
     }
 
     /// Probe host isolation capabilities (KVM/HVF, bwrap, landlock, …).
@@ -265,47 +343,41 @@ impl Runtime {
         Ok(removed)
     }
 
-    /// Creates a new VM by cloning an existing VM's disk state.
+    /// Disk-clone a VM: flatten its QCOW2 overlay into a new base, then boot.
     ///
-    /// Flattens the source VM's QCOW2 overlay into a new standalone base
-    /// image, then creates a fresh overlay on top. The new VM has all the
-    /// same installed packages and files as the source, but is independent.
+    /// Copied from the source: overlay contents, `vcpus`, `ram_mib`, `network`,
+    /// and `auto_remove`.
     ///
-    /// The source VM can be running or stopped.
+    /// Not copied: ports, volumes, secrets, security, command, env, workdir,
+    /// user, detach, auto-stop/delete, ready timeout, or name (unless `name`
+    /// is passed).
+    ///
     /// # Errors
     ///
-    /// Returns an error if the source VM is not found, disk flattening fails,
-    /// or the spawn fails.
-    pub fn clone_box(
-        &self,
-        source_id: &str,
-        name: Option<String>,
-        configure: impl FnOnce(VmBuilder) -> VmBuilder,
-        opts: &RunOptions,
-    ) -> Result<VmHandle> {
+    /// Returns an error if the source is missing, flatten fails, or create fails.
+    pub async fn clone(&self, source_id: &str, name: Option<String>) -> Result<Vm> {
         let source = self.get(source_id)?;
-        let source_state = source.state();
+        let source_state = source.stored();
 
-        // Flatten source overlay → new base disk.
-        let clone_id = state::gen_id();
+        let clone_id = crate::state::gen_id();
         let clone_base = self.disk.bases_dir().join(format!("clone-{clone_id}.raw"));
         self.disk.flatten_vm_disk(&source_state.id, &clone_base)?;
 
-        // Build the new VM using the cloned base.
-        let mut builder = Vm::builder().base_disk(clone_base.to_string_lossy());
-        builder = builder
+        let mut opts = VmOptions::from_image(crate::options::ImageRef::BaseDisk(clone_base))
             .vcpus(source_state.config.vcpus)
-            .ram_mib(source_state.config.ram_mib);
-        builder = configure(builder);
+            .ram_mib(source_state.config.ram_mib)
+            .auto_remove(source_state.config.auto_remove);
+        if let Some(n) = name {
+            opts = opts.name(n);
+        }
+        opts = opts.network(source_state.config.network.clone());
 
-        let handle = self.spawn(&builder, source_state.image.clone(), name, opts.auto_remove)?;
-
+        let handle = self.create(opts).await?;
         info!(
             source_id = %source_state.id,
-            clone_id = %handle.state().id,
+            clone_id = %handle.stored().id,
             "VM cloned"
         );
-
         Ok(handle)
     }
 
@@ -316,8 +388,8 @@ impl Runtime {
     /// # Errors
     ///
     /// Returns an error if image resolution, disk, network, or spawn fails.
-    pub async fn create(&self, opts: VmOptions) -> Result<VmHandle> {
-        pipeline::create(self, opts, |_| {}).await
+    pub async fn create(&self, opts: VmOptions) -> Result<Vm> {
+        boot::create(self, opts, |_| {}).await
     }
 
     /// Like [`create`](Self::create) with a progress callback.
@@ -329,8 +401,8 @@ impl Runtime {
         &self,
         opts: VmOptions,
         on_progress: impl Fn(&str) + Send + Sync,
-    ) -> Result<VmHandle> {
-        pipeline::create(self, opts, on_progress).await
+    ) -> Result<Vm> {
+        boot::create(self, opts, on_progress).await
     }
 
     /// Alias for [`create`](Self::create) (ready wait is already part of create).
@@ -338,207 +410,8 @@ impl Runtime {
     /// # Errors
     ///
     /// Same as [`create`](Self::create).
-    pub async fn run(&self, opts: VmOptions) -> Result<VmHandle> {
+    pub async fn run(&self, opts: VmOptions) -> Result<Vm> {
         self.create(opts).await
-    }
-
-    /// OCI image + builder configure (prefer [`create`](Self::create)).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if pull, disk, or spawn fails.
-    pub async fn run_image(
-        &self,
-        image: &str,
-        configure: impl FnOnce(VmBuilder) -> VmBuilder + Send,
-        name: Option<String>,
-        opts: &RunOptions,
-        on_progress: impl Fn(&str) + Send + Sync,
-    ) -> Result<VmHandle> {
-        pipeline::create_from_oci(
-            self,
-            image,
-            configure,
-            name,
-            opts.auto_remove,
-            opts.ready_timeout,
-            on_progress,
-        )
-        .await
-    }
-
-    /// Spawns a VM in a child process via `bux-shim` and returns a handle.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the shim binary is not found, config serialization
-    /// fails, or the child process cannot be created.
-    pub fn spawn(
-        &self,
-        builder: &VmBuilder,
-        image: Option<String>,
-        name: Option<String>,
-        auto_remove: bool,
-    ) -> Result<VmHandle> {
-        self.spawn_impl(builder, image, name, auto_remove, true)
-    }
-
-    #[allow(
-        missing_docs,
-        reason = "mirrors spawn() but skips parent-watch; pending docs"
-    )]
-    /// # Errors
-    ///
-    /// Returns an error if the shim binary is not found or spawn fails.
-    pub fn spawn_detached(
-        &self,
-        builder: &VmBuilder,
-        image: Option<String>,
-        name: Option<String>,
-        auto_remove: bool,
-    ) -> Result<VmHandle> {
-        self.spawn_impl(builder, image, name, auto_remove, false)
-    }
-
-    #[allow(
-        clippy::missing_docs_in_private_items,
-        reason = "private implementation detail"
-    )]
-    fn spawn_impl(
-        &self,
-        builder: &VmBuilder,
-        image: Option<String>,
-        name: Option<String>,
-        auto_remove: bool,
-        watch_parent: bool,
-    ) -> Result<VmHandle> {
-        if let Some(ref n) = name
-            && self.db.get_by_name(n)?.is_some()
-        {
-            return Err(crate::Error::Ambiguous(format!(
-                "a VM named '{n}' already exists"
-            )));
-        }
-
-        let id = state::gen_id();
-        let socket = self.socks_dir.join(format!("{id}.sock"));
-        let socket_str = socket.to_string_lossy().into_owned();
-
-        // Secrets live on the builder only (not in VmConfig JSON values).
-        let staged_secrets = builder.secrets.clone();
-        let mut config = builder.to_config();
-        prepare_managed_config(&mut config)?;
-        config.auto_remove = auto_remove;
-        config.vsock_ports.push(VsockPort {
-            port: AGENT_PORT,
-            path: socket_str,
-            listen: true,
-        });
-
-        if let Some(ref base) = config.base_disk {
-            let overlay = self
-                .disk
-                .create_overlay(Path::new(base), config.disk_format, &id)?;
-            config.root_disk = Some(overlay.to_string_lossy().into_owned());
-            config.disk_format = crate::disk::DiskFormat::Qcow2;
-            config.base_disk = None;
-        }
-
-        let live_secrets = if staged_secrets.is_empty() {
-            config.secrets_required = false;
-            None
-        } else {
-            if !config.virtio_net {
-                return Err(crate::Error::SecretsNeedVirtioNet);
-            }
-            config.secrets_required = true;
-            Some(LiveSecrets::mint(staged_secrets)?)
-        };
-
-        let mitm_ca = live_secrets.as_ref().map(|l| l.ca_cert_pem.clone());
-        inject_guest_boot_env(&mut config, &id, mitm_ca)?;
-
-        let network = if config.virtio_net {
-            let mut specs = Vec::with_capacity(config.ports.len());
-            for s in &config.ports {
-                specs.push(parse_publish_spec(s)?);
-            }
-            let (pairs, published) = resolve_ports(&specs)?;
-            config.ports = format_port_pairs(&pairs);
-            config.published_ports = published;
-            let net =
-                self.net
-                    .start(&id, pairs, config.allow_net.clone(), live_secrets.as_ref())?;
-            Some(net.shim_network)
-        } else {
-            let _ = parse_concrete_port_strings(&config.ports)?;
-            config.published_ports.clear();
-            None
-        };
-
-        if let Some(live) = live_secrets {
-            self.secrets
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(id.clone(), live);
-        }
-
-        let config_path = self.socks_dir.join(format!("{id}.json"));
-        let shim = match spawn_shim(
-            &config,
-            &config_path,
-            &self.socks_dir,
-            &id,
-            watch_parent,
-            network,
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                self.net.stop(&id);
-                return Err(e);
-            }
-        };
-
-        config.security_status = shim.security.clone();
-
-        let vm_state = VmState {
-            id: id.clone(),
-            name,
-            pid: shim.pid,
-            image,
-            socket,
-            status: Status::Running,
-            config,
-            created_at: SystemTime::now(),
-        };
-        self.db.insert(&vm_state)?;
-
-        info!(
-            vm_id = %id,
-            pid = shim.pid,
-            virtio_net = vm_state.config.virtio_net,
-            "VM spawned"
-        );
-
-        self.metrics.on_box_created();
-        self.events
-            .emit(AuditEvent::now(AuditEventKind::BoxCreated {
-                id,
-                image: vm_state.image.clone(),
-                tenant: "default".to_owned(),
-            }));
-
-        Ok(VmHandle::new(
-            vm_state,
-            Arc::clone(&self.db),
-            self.disk.clone(),
-            shim.keepalive,
-            Arc::clone(&self.metrics),
-            Arc::clone(&self.events),
-            self.snapshots.clone(),
-            Arc::clone(&self.net),
-            Arc::clone(&self.secrets),
-        ))
     }
 
     /// Lists all known VMs, reconciling liveness and auto-removing stopped VMs.
@@ -546,15 +419,12 @@ impl Runtime {
     /// # Errors
     ///
     /// Returns an error if the database query fails.
-    pub fn list(&self) -> Result<Vec<VmState>> {
+    pub fn list(&self) -> Result<Vec<VmInfo>> {
         let vms = self.db.list()?;
         let mut keep = Vec::with_capacity(vms.len());
 
         for mut vm in vms {
-            if vm.status.is_active() && !is_pid_alive(vm.pid) {
-                vm.status = Status::Stopped;
-                drop(self.db.update_status(&vm.id, Status::Stopped));
-            }
+            self.reconcile_dead_pid(&mut vm);
 
             if vm.status == Status::Stopped && vm.config.auto_remove {
                 drop(fs::remove_file(&vm.socket));
@@ -563,7 +433,7 @@ impl Runtime {
                 continue;
             }
 
-            keep.push(vm);
+            keep.push(VmInfo::from_stored(&vm));
         }
         Ok(keep)
     }
@@ -573,19 +443,16 @@ impl Runtime {
     /// # Errors
     ///
     /// Returns an error if the VM is not found or the database query fails.
-    pub fn get(&self, id_or_name: &str) -> Result<VmHandle> {
+    pub fn get(&self, id_or_name: &str) -> Result<Vm> {
         let mut state = if let Some(s) = self.db.get_by_name(id_or_name)? {
             s
         } else {
             self.db.get_by_id_prefix(id_or_name)?
         };
 
-        if state.status.is_active() && !is_pid_alive(state.pid) {
-            state.status = Status::Stopped;
-            drop(self.db.update_status(&state.id, Status::Stopped));
-        }
+        self.reconcile_dead_pid(&mut state);
 
-        Ok(VmHandle::new(
+        Ok(Vm::new(
             state,
             Arc::clone(&self.db),
             self.disk.clone(),
@@ -593,8 +460,8 @@ impl Runtime {
             Arc::clone(&self.metrics),
             Arc::clone(&self.events),
             self.snapshots.clone(),
-            Arc::clone(&self.net),
             Arc::clone(&self.secrets),
+            self.volumes.clone(),
         ))
     }
 
@@ -607,13 +474,13 @@ impl Runtime {
     pub fn rename(&self, id_or_name: &str, new_name: &str) -> Result<()> {
         let handle = self.get(id_or_name)?;
         if let Some(existing) = self.db.get_by_name(new_name)?
-            && existing.id != handle.state().id
+            && existing.id != handle.stored().id
         {
             return Err(crate::Error::Ambiguous(format!(
                 "a VM named '{new_name}' already exists"
             )));
         }
-        self.db.update_name(&handle.state().id, Some(new_name))?;
+        self.db.update_name(&handle.stored().id, Some(new_name))?;
         Ok(())
     }
 
@@ -625,7 +492,7 @@ impl Runtime {
     /// or the database deletion fails.
     pub fn remove(&self, id_or_name: &str) -> Result<()> {
         let handle = self.get(id_or_name)?;
-        let state = handle.state();
+        let state = handle.stored();
 
         if !state.status.can_remove() {
             return Err(crate::Error::InvalidState(format!(
@@ -635,7 +502,6 @@ impl Runtime {
         }
 
         clean_vm_files(&state.socket);
-        self.net.stop(&state.id);
         self.secrets
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -644,16 +510,173 @@ impl Runtime {
         drop(self.disk.remove_vm_disk(&state.id));
         self.db.delete(&state.id)?;
         info!(vm_id = %state.id, "VM removed");
-        self.events
-            .emit(AuditEvent::now(AuditEventKind::BoxRemoved {
-                id: state.id.clone(),
-            }));
+        self.events.emit(AuditEvent::now(AuditEventKind::VmRemoved {
+            id: state.id.clone(),
+        }));
         Ok(())
+    }
+
+    /// Mark a stored active row Stopped when the shim PID is gone.
+    fn reconcile_dead_pid(&self, vm: &mut VmState) {
+        if vm.status.is_active() && !is_pid_alive(vm.pid) {
+            vm.status = Status::Stopped;
+            drop(self.db.update_status(&vm.id, Status::Stopped));
+            boot::clean_net_sock(&vm.socket);
+        }
     }
 }
 
 impl Drop for Runtime {
     fn drop(&mut self) {
         self.shutdown_sync();
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::missing_docs_in_private_items,
+    reason = "tests"
+)]
+mod tests {
+    use super::*;
+    use crate::state::VmConfig;
+    use std::time::SystemTime;
+
+    fn insert_running(rt: &Runtime, id: &str, pid: i32) {
+        insert_running_cfg(rt, id, pid, VmConfig::default());
+    }
+
+    fn insert_running_cfg(rt: &Runtime, id: &str, pid: i32, config: VmConfig) {
+        rt.db
+            .insert(&VmState {
+                id: id.to_owned(),
+                name: None,
+                pid,
+                image: None,
+                socket: rt.socks_dir.join(format!("{id}.sock")),
+                status: Status::Running,
+                config,
+                created_at: SystemTime::now(),
+            })
+            .unwrap();
+    }
+
+    fn spawn_sleep() -> std::process::Child {
+        std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap()
+    }
+
+    fn child_pid(child: &std::process::Child) -> i32 {
+        i32::try_from(child.id()).unwrap()
+    }
+
+    #[test]
+    fn list_preserves_live_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let mut child = spawn_sleep();
+        let pid = child_pid(&child);
+        insert_running(&rt, "aabbccddeeff", pid);
+        let list = rt.list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].pid, pid);
+        assert_eq!(list[0].status, Status::Running);
+        drop(rt);
+        drop(child.kill());
+        drop(child.wait());
+    }
+
+    #[test]
+    fn list_marks_dead_pid_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead = child_pid(&child);
+        drop(child.wait());
+        insert_running(&rt, "deadpid000001", dead);
+        let list = rt.list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].status, Status::Stopped);
+        assert_eq!(list[0].pid, dead);
+    }
+
+    #[test]
+    fn update_pid_then_list_sees_new_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let mut dead_child = std::process::Command::new("true").spawn().unwrap();
+        let dead = child_pid(&dead_child);
+        drop(dead_child.wait());
+        insert_running(&rt, "aabbccddeeff", dead);
+        let mut live_child = spawn_sleep();
+        let live = child_pid(&live_child);
+        rt.db
+            .update_pid_status("aabbccddeeff", live, Status::Running)
+            .unwrap();
+        let list = rt.list().unwrap();
+        assert_eq!(list[0].pid, live);
+        assert_eq!(list[0].status, Status::Running);
+        drop(rt);
+        drop(live_child.kill());
+        drop(live_child.wait());
+    }
+
+    #[test]
+    fn drop_skips_detached_live_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = spawn_sleep();
+        let pid = child_pid(&child);
+        {
+            let rt = Runtime::open(dir.path()).unwrap();
+            insert_running_cfg(
+                &rt,
+                "detachdead0001",
+                pid,
+                VmConfig {
+                    detach: true,
+                    ..VmConfig::default()
+                },
+            );
+            drop(rt);
+        }
+        assert!(
+            is_pid_alive(pid),
+            "Runtime Drop must not SIGTERM detach=true"
+        );
+        drop(child.kill());
+        drop(child.wait());
+    }
+
+    #[test]
+    fn recover_live_secrets_shim_is_vsock_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = spawn_sleep();
+        let pid = child_pid(&child);
+        let rt = Runtime::open(dir.path()).unwrap();
+        insert_running_cfg(
+            &rt,
+            "secretlive0001",
+            pid,
+            VmConfig {
+                detach: true,
+                secrets_required: true,
+                ..VmConfig::default()
+            },
+        );
+        rt.recover();
+        assert!(
+            is_pid_alive(pid),
+            "live secrets + live shim must not be SIGTERM'd"
+        );
+        let row = rt.db.get_by_id_prefix("secretlive0001").unwrap();
+        assert_eq!(row.status, Status::Running);
+        drop(rt);
+        assert!(is_pid_alive(pid));
+        drop(child.kill());
+        drop(child.wait());
     }
 }

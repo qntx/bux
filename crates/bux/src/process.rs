@@ -1,25 +1,19 @@
 //! Phase A workload process defaults (env / workdir / user) for managed exec.
 //!
 //! Workload identity is stored on [`crate::state::VmConfig`] and applied when
-//! the caller omits overrides on [`bux_proto::ExecStart`]. Full container
-//! isolation is Phase B (1.0).
+//! the caller omits overrides on [`bux_proto::ExecStart`].
 
 use bux_oci::ImageConfig;
 use bux_proto::ExecStart;
 
 /// Human-readable Phase A security limits (surfaced on VM info / inspect).
-pub const PHASE_A_LIMITS: &str = "Phase A: workload processes share the guest rootfs and kernel \
+pub(crate) const PHASE_A_LIMITS: &str = "Phase A: workload processes share the guest rootfs and kernel \
 namespaces with the agent; concurrent execs are not mutually isolated; compromise of a workload \
 is compromise of the agent filesystem. Hardware boundary vs host still holds.";
 
-/// Human-readable Phase B note (primary OCI container + nsenter exec).
-pub const PHASE_B_LIMITS: &str = "Phase B: workloads exec into the primary OCI container namespaces \
-(via nsenter); agent remains outside as supervisor. Caps/user-ns/seccomp-in-guest still limited \
-versus full tenant containers; hardware boundary vs host still holds.";
-
 /// Merge environment lists as `KEY=VALUE`. Later entries override earlier keys.
 #[must_use]
-pub fn merge_env(base: &[String], overrides: &[String]) -> Vec<String> {
+pub(crate) fn merge_env(base: &[String], overrides: &[String]) -> Vec<String> {
     let mut map = std::collections::HashMap::<String, String>::new();
     let mut order = Vec::<String>::new();
     for entry in base.iter().chain(overrides.iter()) {
@@ -38,7 +32,7 @@ pub fn merge_env(base: &[String], overrides: &[String]) -> Vec<String> {
 
 /// Parse purely numeric `uid` or `uid:gid`. Returns `None` for name-based specs.
 #[must_use]
-pub fn parse_numeric_user(spec: &str) -> Option<(u32, u32)> {
+pub(crate) fn parse_numeric_user(spec: &str) -> Option<(u32, u32)> {
     let spec = spec.trim();
     if spec.is_empty() {
         return None;
@@ -53,10 +47,11 @@ pub fn parse_numeric_user(spec: &str) -> Option<(u32, u32)> {
 }
 
 /// Fold OCI image process config into workload fields (product opts win).
-pub fn merge_image_config(
+pub(crate) fn merge_image_config(
     workload_env: &mut Vec<String>,
     workload_workdir: &mut Option<String>,
     workload_user: &mut Option<String>,
+    workload_cmd: &mut Option<Vec<String>>,
     img: &ImageConfig,
 ) {
     if let Some(ref e) = img.env
@@ -74,11 +69,17 @@ pub fn merge_image_config(
     if workload_user.is_none() {
         *workload_user = img.user.clone().filter(|u| !u.is_empty());
     }
+    if workload_cmd.as_ref().is_none_or(Vec::is_empty) {
+        let cmd = img.command();
+        if !cmd.is_empty() {
+            *workload_cmd = Some(cmd);
+        }
+    }
 }
 
 /// Apply stored workload defaults to an exec request when the caller omitted them.
 #[must_use]
-pub fn apply_workload_defaults(
+pub(crate) fn apply_workload_defaults(
     mut req: ExecStart,
     workload_env: &[String],
     workload_workdir: Option<&str>,
@@ -182,7 +183,8 @@ mod tests {
         let mut env = vec!["EXTRA=1".into()];
         let mut wd = None;
         let mut user = None;
-        merge_image_config(&mut env, &mut wd, &mut user, &img);
+        let mut cmd = None;
+        merge_image_config(&mut env, &mut wd, &mut user, &mut cmd, &img);
         assert!(env.iter().any(|e| e == "PATH=/usr/bin"));
         assert!(env.iter().any(|e| e == "EXTRA=1"));
         assert_eq!(wd.as_deref(), Some("/app"));

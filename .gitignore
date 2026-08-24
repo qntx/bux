@@ -23,7 +23,6 @@ target
 
 # Added by cargo
 
-docs
 3rdparty
 .claude
 .bux-tmp

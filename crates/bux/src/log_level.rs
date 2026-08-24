@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[repr(u32)]
-pub enum LogLevel {
+pub(crate) enum LogLevel {
     /// Logging disabled.
     Off = 0,
     /// Errors only.
@@ -39,7 +39,7 @@ impl std::fmt::Display for LogLevel {
 
 /// Error returned when parsing an invalid [`LogLevel`] string.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParseLogLevelError(pub String);
+pub(crate) struct ParseLogLevelError(pub String);
 
 impl std::fmt::Display for ParseLogLevelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

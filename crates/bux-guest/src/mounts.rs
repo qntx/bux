@@ -1,9 +1,13 @@
-//! Essential tmpfs mounts and filesystem freeze/thaw operations.
+//! Essential tmpfs mounts, virtio-fs volumes, and filesystem freeze/thaw.
 
+use std::ffi::CString;
 use std::fs;
+use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
+
+use bux_proto::GuestVolume;
 
 /// Tmpfs mount specification.
 struct TmpfsMount {
@@ -102,6 +106,67 @@ pub fn mount_essential_tmpfs() {
     }
 }
 
+/// Mount each boot volume as `virtiofs`. Failure is fatal (agent does not listen).
+///
+/// `GuestVolume::read_only` is not passed to `mount(2)`: libkrun virtio-fs is
+/// RW, and a guest `MS_RDONLY` would fake a guarantee the host share does not
+/// provide.
+///
+/// # Errors
+///
+/// Invalid `guest_path`, directory creation failure, or `mount(2)` failure.
+pub fn mount_virtiofs_volumes(volumes: &[GuestVolume]) -> io::Result<()> {
+    for vol in volumes {
+        mount_virtiofs_volume(vol)?;
+    }
+    Ok(())
+}
+
+fn mount_virtiofs_volume(vol: &GuestVolume) -> io::Result<()> {
+    vol.validate().map_err(io::Error::other)?;
+    fs::create_dir_all(&vol.guest_path).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("virtiofs tag {} mkdir {}: {e}", vol.tag, vol.guest_path),
+        )
+    })?;
+
+    let source = CString::new(vol.tag.as_str()).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("virtiofs tag {}: {e}", vol.tag),
+        )
+    })?;
+    let target = CString::new(vol.guest_path.as_str()).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("virtiofs path {}: {e}", vol.guest_path),
+        )
+    })?;
+    let fstype = CString::new("virtiofs").map_err(io::Error::other)?;
+
+    let ret = unsafe {
+        libc::mount(
+            source.as_ptr(),
+            target.as_ptr(),
+            fstype.as_ptr(),
+            0,
+            std::ptr::null(),
+        )
+    };
+    if ret != 0 {
+        let err = io::Error::last_os_error();
+        return Err(io::Error::new(
+            err.kind(),
+            format!(
+                "mount virtiofs tag={} at {}: {err}",
+                vol.tag, vol.guest_path
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Returns `true` if `path` is already mounted as tmpfs.
 fn is_tmpfs(path: &str) -> bool {
     let Ok(mounts) = fs::read_to_string("/proc/mounts") else {
@@ -179,4 +244,52 @@ pub fn thaw_frozen(frozen: &[PathBuf]) -> u32 {
     }
 
     thawed
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "tests")]
+mod tests {
+    use super::*;
+
+    fn vol(path: &str) -> GuestVolume {
+        GuestVolume {
+            tag: "vol0".into(),
+            guest_path: path.into(),
+            read_only: false,
+        }
+    }
+
+    #[test]
+    fn empty_volumes_ok() {
+        mount_virtiofs_volumes(&[]).unwrap();
+    }
+
+    #[test]
+    fn rejects_relative_guest_path() {
+        let err = mount_virtiofs_volume(&vol("data")).unwrap_err();
+        assert!(err.to_string().contains("absolute"), "{err}");
+    }
+
+    #[test]
+    fn rejects_parent_dir_component() {
+        let err = mount_virtiofs_volume(&vol("/var/../etc")).unwrap_err();
+        assert!(err.to_string().contains(".."), "{err}");
+    }
+
+    #[test]
+    fn rejects_filesystem_root() {
+        let err = mount_virtiofs_volume(&vol("/")).unwrap_err();
+        assert!(err.to_string().contains("root"), "{err}");
+    }
+
+    #[test]
+    fn rejects_empty_tag() {
+        let v = GuestVolume {
+            tag: String::new(),
+            guest_path: "/data".into(),
+            read_only: false,
+        };
+        let err = mount_virtiofs_volume(&v).unwrap_err();
+        assert!(err.to_string().contains("tag"), "{err}");
+    }
 }
