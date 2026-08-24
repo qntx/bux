@@ -33,7 +33,7 @@ use crate::watchdog::{self, Keepalive};
 
 /// Tears down overlay / secrets / shim / row if spawn fails after overlay.
 struct SpawnAbort<'a> {
-    /// Runtime that owns net, secrets, disk, and state.
+    /// Runtime that owns secrets, disk, and state.
     rt: &'a Runtime,
     /// VM id allocated for this spawn.
     id: String,
@@ -661,6 +661,10 @@ pub(super) fn spawn_shim(
         .to_json()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     write_shim_json(config_path, &json)?;
+    let mut unlink_json = UnlinkJsonOnErr {
+        path: config_path,
+        keep: false,
+    };
 
     let stderr_path = config_path.with_extension("stderr");
     let stderr_file = fs::File::create(&stderr_path)?;
@@ -708,10 +712,8 @@ pub(super) fn spawn_shim(
         network_host: policy.network_host,
     };
 
-    let result = bux_jail::spawn(&shim, config_path, jail_config, vm_id).map_err(|e| {
-        drop(fs::remove_file(config_path));
-        map_jail_error(e, &shim)
-    })?;
+    let result = bux_jail::spawn(&shim, config_path, jail_config, vm_id)
+        .map_err(|e| map_jail_error(e, &shim))?;
 
     #[allow(
         clippy::cast_possible_wrap,
@@ -720,11 +722,29 @@ pub(super) fn spawn_shim(
     let pid = result.child.id() as i32;
     drop(shim_wd_fd);
 
+    unlink_json.keep = true;
     Ok(ShimSpawnResult {
         pid,
         keepalive,
         security: crate::security::SecurityStatus::from_report(&result.security),
     })
+}
+
+/// Unlink shim JSON unless spawn succeeded (secrets/CA must not linger).
+#[derive(Debug)]
+struct UnlinkJsonOnErr<'a> {
+    /// JSON path written for this spawn.
+    path: &'a Path,
+    /// Set when the shim process was spawned.
+    keep: bool,
+}
+
+impl Drop for UnlinkJsonOnErr<'_> {
+    fn drop(&mut self) {
+        if !self.keep {
+            drop(fs::remove_file(self.path));
+        }
+    }
 }
 
 /// Write shim JSON with mode 0o600.

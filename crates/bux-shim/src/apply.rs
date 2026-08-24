@@ -158,8 +158,7 @@ fn apply_all(ctx: u32, cfg: &ShimConfig) -> Result<()> {
     }
 
     // Virtio-net only. Never `set_port_map`.
-    // `network=None` still auto-enables libkrun TSI (known D2).
-    // PR2: `disable_implicit_vsock` + `add_vsock(0)` on this branch.
+    // `network=None`: no virtio-net is added; libkrun may still enable TSI.
     if let Some(ref net) = cfg.network {
         const FEATURES: u32 = bux_krun::sys::COMPAT_NET_FEATURES;
         let flags = match net.connection {
