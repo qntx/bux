@@ -599,10 +599,8 @@ mod tests {
         db.insert(&test_vm("vm1", None)).unwrap();
 
         db.update_health("vm1", HealthState::Healthy).unwrap();
-        // Verify health is stored (read back via list).
         let vms = db.list().unwrap();
         assert_eq!(vms.len(), 1);
-        // Health is not yet in VmState struct, but the SQL succeeded.
     }
 
     #[test]

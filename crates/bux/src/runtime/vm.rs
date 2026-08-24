@@ -727,7 +727,9 @@ impl Vm {
     ///
     /// Returns an error if the file cannot be written.
     pub async fn write_file(&self, path: &str, data: &[u8], mode: u32) -> Result<()> {
-        Ok(self.client.write_file(path, data, mode).await?)
+        self.client.write_file(path, data, mode).await?;
+        self.emit_file_copied(CopyDirection::In, path);
+        Ok(())
     }
 
     /// Copies a tar archive into the guest, unpacking at `dest`.

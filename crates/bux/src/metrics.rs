@@ -80,7 +80,7 @@ impl RuntimeMetrics {
         self.total_uptime_ms.fetch_add(uptime_ms, Ordering::Relaxed);
     }
 
-    /// Increments the failed-VM counter only (running gauge already adjusted).
+    /// Increments the failed-VM counter. Does not touch the running gauge.
     pub(crate) fn record_failed(&self) {
         self.vms_failed.fetch_add(1, Ordering::Relaxed);
     }

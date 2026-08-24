@@ -369,16 +369,33 @@ fn parse_secret_file(path: &str, allow_net: &[String]) -> Result<Vec<bux::Secret
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::io::Read;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-        let meta =
-            std::fs::metadata(path).with_context(|| format!("cannot stat --secret-file {path}"))?;
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .with_context(|| format!("cannot open --secret-file {path}"))?;
+        let meta = file
+            .metadata()
+            .with_context(|| format!("cannot stat --secret-file {path}"))?;
+        if !meta.is_file() {
+            anyhow::bail!("--secret-file {path} must be a regular file");
+        }
         let mode = meta.permissions().mode() & 0o777;
         if mode != 0o600 {
             anyhow::bail!("--secret-file {path} must have mode 0600 (got {mode:04o})");
         }
-        let content = std::fs::read_to_string(path)
+        let mut buf = Vec::new();
+        #[allow(
+            clippy::verbose_file_reads,
+            reason = "read the same fd that was fstat'd; fs::read would reopen"
+        )]
+        file.read_to_end(&mut buf)
             .with_context(|| format!("cannot read --secret-file {path}"))?;
+        let content = String::from_utf8(buf)
+            .with_context(|| format!("--secret-file {path} is not valid UTF-8"))?;
         let specs: Vec<String> = content
             .lines()
             .map(str::trim)
@@ -447,58 +464,61 @@ mod secret_tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn secret_file_rejects_non_0600() {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
+    struct TempSecretFile {
+        path: std::path::PathBuf,
+    }
 
-        let path = std::env::temp_dir().join(format!(
-            "bux-secret-bad-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        {
+    #[cfg(unix)]
+    impl TempSecretFile {
+        fn create(mode: u32, body: &[u8]) -> Self {
+            use std::io::Write;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+            let path = std::env::temp_dir().join(format!(
+                "bux-secret-{}-{}-{mode:o}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock")
+                    .as_nanos()
+            ));
             let mut f = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .mode(0o644)
+                .mode(mode)
                 .open(&path)
                 .unwrap();
-            f.write_all(b"t=val@h\n").unwrap();
+            f.write_all(body).unwrap();
+            drop(f);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            Self { path }
         }
-        let err = parse_secret_file(path.to_str().unwrap(), &[]).unwrap_err();
-        drop(std::fs::remove_file(&path));
+
+        fn as_str(&self) -> &str {
+            self.path.to_str().unwrap()
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for TempSecretFile {
+        fn drop(&mut self) {
+            drop(std::fs::remove_file(&self.path));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_file_rejects_non_0600() {
+        let file = TempSecretFile::create(0o644, b"t=val@h\n");
+        let err = parse_secret_file(file.as_str(), &[]).unwrap_err();
         assert!(err.to_string().contains("0600"), "{err}");
     }
 
     #[cfg(unix)]
     #[test]
     fn secret_file_reads_0600() {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let path = std::env::temp_dir().join(format!(
-            "bux-secret-ok-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        {
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&path)
-                .unwrap();
-            f.write_all(b"k=v@api.example.com\n").unwrap();
-        }
-        let secrets = parse_secret_file(path.to_str().unwrap(), &[]).unwrap();
-        drop(std::fs::remove_file(&path));
+        let file = TempSecretFile::create(0o600, b"k=v@api.example.com\n");
+        let secrets = parse_secret_file(file.as_str(), &[]).unwrap();
         assert_eq!(secrets.len(), 1);
         assert_eq!(secrets[0].name, "k");
         assert_eq!(secrets[0].value, "v");
