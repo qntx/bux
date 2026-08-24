@@ -20,11 +20,32 @@ Requires a working C toolchain for libkrun / e2fs / qcow2 native deps, and Go fo
 | `BUX_GUEST_DIR` | Build-time directory of a prebuilt Linux guest ELF (`bux-cli` stages a sibling copy) |
 | `PATH` | Locates `bux-shim`, `bwrap` (Linux), `sandbox-exec` (macOS), `go` |
 
-Release packaging ships `bux-guest-*` next to the CLI. Runtime resolution
-(`ManagedGuestBinary::resolve`) is: `BUX_GUEST_PATH`, then a sibling of the
-running executable (`bux-guest-<triple>`, `bux-guest-linux`, `bux-guest`),
-then `$PATH`. There is no download protocol and the ELF is not vendored into
-the crate.
+Release packaging ships `bux`, `bux-shim`, `bux-guest-*`, and
+`libkrun*`/`libkrunfw*` (including soname aliases) in the same directory.
+Binaries locate the dylibs via `@executable_path` (Darwin) or `$ORIGIN`
+(Linux). `cargo build` stages those dylibs into the cargo profile directory
+next to `bux` / `bux-shim`.
+
+Runtime guest resolution (`ManagedGuestBinary::resolve`) is: `BUX_GUEST_PATH`,
+then a sibling of the running executable (`bux-guest-<triple>`,
+`bux-guest-linux`, `bux-guest`), then `$PATH`. There is no download protocol
+and the ELF is not vendored into the crate.
+
+Tarball layout (Darwin; Linux uses `libkrun.so` / `libkrun.so.1` and
+`libkrunfw.so` / `libkrunfw.so.5`):
+
+```
+bux-<ver>-aarch64-apple-darwin/
+  bux
+  bux-shim
+  bux-guest-aarch64-unknown-linux-musl
+  libkrun.dylib
+  libkrun.1.dylib
+  libkrunfw.dylib
+  libkrunfw.5.dylib
+  LICENSE-MIT
+  LICENSE-APACHE
+```
 
 Inspect the live host with:
 

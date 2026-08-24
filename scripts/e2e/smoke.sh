@@ -155,30 +155,6 @@ elif ! command -v bux >/dev/null 2>&1; then
   export PATH="${ROOT}/target/debug:${PATH}"
 fi
 
-# libkrun is linked by bux-cli via bux-shim; rpath often points at OUT_DIR.
-krun_name="libkrun.so"
-krun_copies=(libkrun.so libkrunfw.so libkrun.so.1 libkrunfw.so.5)
-if [[ "$(uname -s)" == "Darwin" ]]; then
-  krun_name="libkrun.dylib"
-  krun_copies=(libkrun.dylib libkrunfw.dylib libkrun.1.dylib libkrunfw.5.dylib)
-fi
-KRUN_LIB="$(find "${ROOT}/target/debug/build" -path "*/out/lib/${krun_name}" 2>/dev/null | head -1 || true)"
-if [[ -n "${KRUN_LIB}" ]]; then
-  KRUN_DIR="$(dirname "${KRUN_LIB}")"
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    export DYLD_LIBRARY_PATH="${KRUN_DIR}${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
-  else
-    export LD_LIBRARY_PATH="${KRUN_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-  fi
-  for f in "${krun_copies[@]}"; do
-    src="${KRUN_DIR}/${f}"
-    dst="${ROOT}/target/debug/${f}"
-    if [[ -f "${src}" && ! -e "${dst}" ]]; then
-      ln -sf "${src}" "${dst}" 2>/dev/null || cp "${src}" "${dst}" 2>/dev/null || true
-    fi
-  done
-fi
-
 echo "==> system info"
 bux system info
 info_json="$(bux system info --format json)"

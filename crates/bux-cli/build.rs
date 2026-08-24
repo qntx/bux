@@ -10,9 +10,6 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=BUX_GUEST_DIR");
-    if let Ok(lib_dir) = env::var("DEP_KRUN_LIB_DIR") {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{lib_dir}");
-    }
     stage_guest_binary();
 }
 

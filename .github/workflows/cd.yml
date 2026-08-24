@@ -135,6 +135,36 @@ jobs:
           fi
           cp "$guest_src" "$staging/"
 
+          krun_src=""
+          for d in target/"$target"/release/build/bux-krun-*/out/lib; do
+            if [ -f "$d/libkrun.dylib" ] || [ -f "$d/libkrun.so" ]; then
+              krun_src="$d"
+              break
+            fi
+          done
+          if [ -z "$krun_src" ]; then
+            echo "missing libkrun in bux-krun out/lib"
+            exit 1
+          fi
+          if [[ "$target" == *apple-darwin* ]]; then
+            krun_files="libkrun.dylib libkrunfw.dylib libkrun.1.dylib libkrunfw.5.dylib"
+            krun_required="libkrun.dylib"
+          else
+            krun_files="libkrun.so libkrunfw.so libkrun.so.1 libkrunfw.so.5"
+            krun_required="libkrun.so"
+          fi
+          for f in $krun_files; do
+            if [ ! -e "$krun_src/$f" ]; then
+              echo "missing $f in $krun_src"
+              exit 1
+            fi
+            cp -a "$krun_src/$f" "$staging/"
+          done
+          if [ ! -e "$staging/$krun_required" ]; then
+            echo "missing $krun_required next to binaries"
+            exit 1
+          fi
+
           tar czf "$staging.tar.gz" -C "$staging" .
 
           # SHA-256 checksum
