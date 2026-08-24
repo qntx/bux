@@ -122,11 +122,11 @@ jobs:
           esac
 
           mkdir "$staging"
-          cp "target/$target/release/$bin" "target/$target/release/bux-shim" \
-             LICENSE-MIT LICENSE-APACHE "$staging/"
+          rel="target/$target/release"
+          cp "$rel/$bin" "$rel/bux-shim" LICENSE-MIT LICENSE-APACHE "$staging/"
           guest_src=""
-          if [ -f "target/$target/release/bux-guest-$guest_target" ]; then
-            guest_src="target/$target/release/bux-guest-$guest_target"
+          if [ -f "$rel/bux-guest-$guest_target" ]; then
+            guest_src="$rel/bux-guest-$guest_target"
           elif [ -f ".guest/bux-guest-$guest_target" ]; then
             guest_src=".guest/bux-guest-$guest_target"
           else
@@ -135,17 +135,6 @@ jobs:
           fi
           cp "$guest_src" "$staging/"
 
-          krun_src=""
-          for d in target/"$target"/release/build/bux-krun-*/out/lib; do
-            if [ -f "$d/libkrun.dylib" ] || [ -f "$d/libkrun.so" ]; then
-              krun_src="$d"
-              break
-            fi
-          done
-          if [ -z "$krun_src" ]; then
-            echo "missing libkrun in bux-krun out/lib"
-            exit 1
-          fi
           if [[ "$target" == *apple-darwin* ]]; then
             krun_files="libkrun.dylib libkrunfw.dylib libkrun.1.dylib libkrunfw.5.dylib"
             krun_required="libkrun.dylib"
@@ -154,11 +143,11 @@ jobs:
             krun_required="libkrun.so"
           fi
           for f in $krun_files; do
-            if [ ! -e "$krun_src/$f" ]; then
-              echo "missing $f in $krun_src"
+            if [ ! -e "$rel/$f" ]; then
+              echo "missing $f next to binaries"
               exit 1
             fi
-            cp -a "$krun_src/$f" "$staging/"
+            cp -a "$rel/$f" "$staging/"
           done
           if [ ! -e "$staging/$krun_required" ]; then
             echo "missing $krun_required next to binaries"

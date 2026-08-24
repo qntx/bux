@@ -187,12 +187,16 @@ fn profile_bin_dir(out_dir: &Path, profile: &str) -> PathBuf {
         )
 }
 
-fn copy_over(src: &Path, dest: &Path) {
-    if dest.symlink_metadata().is_ok() {
-        fs::remove_file(dest).unwrap_or_else(|e| {
-            panic!("bux-krun: failed to replace {}: {e}", dest.display());
+fn remove_existing(path: &Path) {
+    if path.symlink_metadata().is_ok() {
+        fs::remove_file(path).unwrap_or_else(|e| {
+            panic!("bux-krun: failed to replace {}: {e}", path.display());
         });
     }
+}
+
+fn copy_over(src: &Path, dest: &Path) {
+    remove_existing(dest);
     fs::copy(src, dest).unwrap_or_else(|e| {
         panic!(
             "bux-krun: failed to copy {} -> {}: {e}",
@@ -224,6 +228,9 @@ fn stage_libraries_beside_binaries(lib_dir: &Path, target: &str, out_dir: &Path)
         copy_over(&src, &dest.join(unversioned));
     }
 
+    for (_, alias) in &aliases {
+        remove_existing(&dest.join(alias));
+    }
     create_versioned_symlinks(&dest, target);
 
     let required = lib_filename(target);
