@@ -1,10 +1,10 @@
 //! Embedded micro-VM sandbox for running AI agents.
 //!
-//! `bux` wraps [`libkrun`] into a safe Rust API for creating, running,
-//! and managing lightweight virtual machines powered by KVM (Linux) or
-//! Hypervisor.framework (macOS).
+//! `bux` wraps [`libkrun`] into a managed [`Runtime`]: create isolated
+//! machines from OCI images, exec through the guest agent, and control
+//! egress at the host gvproxy boundary.
 //!
-//! # Quick start — managed VM via Runtime
+//! # Quick start
 //!
 //! ```no_run
 //! # #[cfg(unix)]
@@ -23,125 +23,60 @@
 //! # }
 //! ```
 //!
-//! # Quick start — low-level VM (takes over the process)
-//!
-//! ```no_run
-//! # #[cfg(unix)]
-//! # fn demo() {
-//! use bux::Vm;
-//!
-//! let vm = Vm::builder()
-//!     .vcpus(2)
-//!     .ram_mib(512)
-//!     .root("/path/to/rootfs")
-//!     .exec("/bin/bash", &["--login"])
-//!     .build()
-//!     .expect("invalid VM config");
-//!
-//! vm.start().expect("failed to start VM");
-//! # }
-//! ```
-//!
 //! [`libkrun`]: https://github.com/containers/libkrun
 
 #[cfg(unix)]
 mod client;
 mod disk;
 mod error;
-pub mod events;
+mod events;
 #[cfg(unix)]
 mod guest;
 #[cfg(unix)]
-pub mod health;
-#[cfg(unix)]
-pub mod lifecycle;
+mod lifecycle;
 mod log_level;
-pub mod metrics;
+mod metrics;
 #[cfg(unix)]
-mod net_manager;
+mod options;
+mod ports;
 #[cfg(unix)]
-pub mod options;
-#[cfg(unix)]
-mod pipeline;
-pub mod ports;
-#[cfg(unix)]
-pub mod process;
+mod process;
 #[cfg(unix)]
 mod runtime;
 #[cfg(unix)]
-pub mod secrets;
-pub mod security;
+mod secrets;
+mod security;
 #[cfg(unix)]
-mod shim_convert;
-#[cfg(unix)]
-pub mod snapshot;
+mod snapshot;
 mod state;
 mod util;
 #[cfg(unix)]
-mod vm;
+mod volumes;
 #[cfg(unix)]
-pub mod volumes;
-#[cfg(unix)]
-pub mod watchdog;
+mod watchdog;
 
+pub use bux_proto::ExecStart;
 #[cfg(unix)]
-pub use bux_jail::checks::{HostCapabilities, audit_isolation, check_guest_binary, check_host};
-#[cfg(target_os = "linux")]
-pub use bux_jail::credentials::CredentialConfig;
-#[cfg(unix)]
-pub use bux_jail::{
-    JailConfig, NoopSandbox, ResourceLimits, Sandbox, SandboxCapabilities, SandboxKind,
-};
-#[cfg(unix)]
-pub use bux_krun::{Feature, KernelFormat, LogStyle, SyncMode};
-pub use bux_proto::{ExecStart, GUEST_BOOT_CONFIG_ENV, GuestBootConfig, GuestNetworkMode};
-#[cfg(target_os = "linux")]
-pub use bux_seccomp::Error as SeccompError;
-#[cfg(unix)]
-pub use bux_shim::{ExitInfo, PANIC_EXIT_CODE, SIGNAL_EXIT_BASE};
-#[cfg(unix)]
-pub use bux_shim::{ShimConfig, ShimDiskFormat, ShimNetConn, ShimNetwork};
-#[cfg(unix)]
-pub use client::{Client, ExecHandle, ExecOutput, PongInfo};
-pub use disk::DiskFormat;
-#[cfg(unix)]
-pub use disk::{Disk, DiskManager, QcowHeader};
+pub use client::{ExecHandle, ExecOutput, PongInfo};
 pub use error::{Error, Result};
 pub use events::{
     AuditEvent, AuditEventKind, CopyDirection, EventDispatcher, EventListener, RingBufferListener,
 };
 #[cfg(unix)]
-pub use health::{HealthCheckConfig, HealthCheckHandle};
+pub use lifecycle::SweepReport;
+pub use metrics::{RuntimeMetrics, VmMetrics};
 #[cfg(unix)]
-pub use lifecycle::{RecoverAction, SECRETS_RESUPPLY_ERROR, SweepReport, recover_action};
-pub use log_level::{LogLevel, ParseLogLevelError};
-pub use metrics::{BoxMetrics, RuntimeMetrics};
+pub use options::{ImageRef, NetworkSpec, VmOptions};
+pub use ports::{PortSpec, PublishedPort, parse_publish_spec};
 #[cfg(unix)]
-pub use options::{ImageRef, VmOptions};
-pub use ports::{BIND_ADDR, PortSpec, PublishedPort, parse_publish_spec, resolve_ports};
+pub use runtime::{HealthStatus, ImageInfo, Runtime, Vm, VmInfo, default_data_dir};
 #[cfg(unix)]
-pub use process::{
-    PHASE_A_LIMITS, PHASE_B_LIMITS, apply_workload_defaults, merge_env, parse_numeric_user,
-};
-#[cfg(unix)]
-pub use runtime::{HealthStatus, RunOptions, Runtime, VmHandle, default_data_dir};
-#[cfg(unix)]
-pub use secrets::{SECRET_PLACEHOLDER_PREFIX, Secret, StartOptions, default_placeholder};
+pub use secrets::{Secret, StartOptions};
 pub use security::{HostInfo, LayerStatus, SecurityOptions, SecurityStatus};
 #[cfg(unix)]
-pub use snapshot::{SnapshotInfo, SnapshotManager};
-#[cfg(unix)]
-pub use state::{BaseDiskRow, PRODUCT_SCHEMA_VERSION, SnapshotRow, StateDb};
-pub use state::{HealthState, Status, VirtioFs, VmConfig, VmState, VsockPort};
-#[cfg(unix)]
-pub use vm::{Vm, VmBuilder};
+pub use snapshot::SnapshotInfo;
+pub use state::Status;
 #[cfg(unix)]
 pub use volumes::{
     VolumeInfo, VolumeManager, VolumeMount, VolumeSource, parse_bind_spec, validate_volume_name,
 };
-
-/// Crash-diagnostics helpers shared with the shim (exit codes).
-#[cfg(unix)]
-pub mod exit_info {
-    pub use bux_shim::{ExitInfo, PANIC_EXIT_CODE, SIGNAL_EXIT_BASE};
-}

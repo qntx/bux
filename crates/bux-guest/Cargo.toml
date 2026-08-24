@@ -13,10 +13,7 @@ bux-proto = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 futures = "0.3"
 libc = { workspace = true }
-# OCI primary container (Phase B). v2 cgroup; no libseccomp for musl static guest builds.
-libcontainer = { version = "0.6", default-features = false, features = ["v2"] }
 nix = { workspace = true }
-oci-spec = "0.10"
 rtnetlink = "0.14"
 serde_json = { workspace = true }
 tar = { workspace = true }

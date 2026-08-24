@@ -75,6 +75,10 @@ fn path_restrictions(jail: &JailConfig, shim: &Path, config_path: &Path) -> Path
         r = r.allow_read_write(p);
     }
 
+    if !jail.network_host {
+        r = r.deny_network();
+    }
+
     r
 }
 
@@ -124,6 +128,8 @@ mod tests {
             stderr_file: None,
             landlock: true,
             allow_degraded_security: false,
+            die_with_parent: true,
+            network_host: false,
         };
         let r = path_restrictions(
             &jail,
@@ -134,6 +140,35 @@ mod tests {
             r.read_write_paths()
                 .iter()
                 .any(|p| p == Path::new("/tmp/bux-socks"))
+        );
+        assert!(r.network_denied(), "offline VMs deny Landlock AccessNet");
+    }
+
+    #[test]
+    fn enabled_network_does_not_deny_landlock_net() {
+        let jail = JailConfig {
+            rootfs: None,
+            root_disk: None,
+            readonly_paths: vec![],
+            socks_dir: PathBuf::from("/tmp/bux-socks"),
+            virtiofs_paths: vec![],
+            watchdog_fd: None,
+            sandbox: None,
+            resource_limits: None,
+            stderr_file: None,
+            landlock: true,
+            allow_degraded_security: false,
+            die_with_parent: true,
+            network_host: true,
+        };
+        let r = path_restrictions(
+            &jail,
+            Path::new("/usr/bin/true"),
+            Path::new("/tmp/cfg.json"),
+        );
+        assert!(
+            !r.network_denied(),
+            "virtio-net VMs must bind host ports and egress"
         );
     }
 }

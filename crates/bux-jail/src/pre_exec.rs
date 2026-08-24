@@ -2,7 +2,7 @@
 //!
 //! Applied after `fork()` but before `exec()`:
 //! 1. **Landlock** (Linux, optional) — apply ruleset then close its fd.
-//! 2. **Die with parent** — `PR_SET_PDEATHSIG(SIGKILL)` (Linux).
+//! 2. **Die with parent** — `PR_SET_PDEATHSIG(SIGKILL)` (Linux), when requested.
 //! 3. **FD cleanup** — close inherited FDs ≥ 3 except preserved ones.
 
 #![allow(
@@ -24,11 +24,11 @@ pub(crate) struct PreserveFds {
 
 /// Install pre-exec hooks on the command.
 #[cfg(not(unix))]
-pub fn apply(_cmd: &mut Command, _preserve: PreserveFds) {}
+pub fn apply(_cmd: &mut Command, _preserve: PreserveFds, _die_with_parent: bool) {}
 
 /// Install pre-exec hooks on the command.
 #[cfg(unix)]
-pub(crate) fn apply(cmd: &mut Command, preserve: PreserveFds) {
+pub(crate) fn apply(cmd: &mut Command, preserve: PreserveFds, die_with_parent: bool) {
     use std::os::unix::process::CommandExt;
 
     // SAFETY: all operations inside are async-signal-safe syscalls.
@@ -46,9 +46,13 @@ pub(crate) fn apply(cmd: &mut Command, preserve: PreserveFds) {
             #[cfg(not(target_os = "linux"))]
             let _ = preserve.landlock;
 
-            // 2. Die when parent exits — prevents orphaned VM processes.
+            // 2. Die when parent exits — omitted for detached VMs.
             #[cfg(target_os = "linux")]
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            if die_with_parent {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = die_with_parent;
 
             // 3. Close inherited FDs except watchdog (landlock already closed).
             close_inherited_fds(preserve.watchdog);

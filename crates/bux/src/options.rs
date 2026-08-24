@@ -1,7 +1,6 @@
 //! Product-facing VM creation options ([`VmOptions`] / [`ImageRef`]).
 //!
-//! Managed Runtime entry points take [`VmOptions`] only. Low-level
-//! [`crate::VmBuilder`] remains for process-takeover and tests.
+//! Managed Runtime entry points take [`VmOptions`] only.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -47,6 +46,45 @@ impl ImageRef {
     }
 }
 
+/// Guest networking mode for a managed VM.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum NetworkSpec {
+    /// No virtio-net. Guest is offline. Ports and secrets are invalid.
+    Disabled,
+    /// gvproxy virtio-net. Empty `allow_net` means unrestricted egress.
+    Enabled {
+        /// Hostname / CIDR allow-list. Empty = full egress.
+        #[serde(default)]
+        allow_net: Vec<String>,
+    },
+}
+
+impl Default for NetworkSpec {
+    fn default() -> Self {
+        Self::Enabled {
+            allow_net: Vec::new(),
+        }
+    }
+}
+
+impl NetworkSpec {
+    /// Whether virtio-net / gvproxy is attached.
+    #[must_use]
+    pub const fn is_enabled(&self) -> bool {
+        matches!(self, Self::Enabled { .. })
+    }
+
+    /// Egress allow-list (empty if disabled or unrestricted).
+    #[must_use]
+    pub fn allow_net(&self) -> &[String] {
+        match self {
+            Self::Enabled { allow_net } => allow_net,
+            Self::Disabled => &[],
+        }
+    }
+}
+
 /// Options for creating a managed VM.
 ///
 /// Construct only via [`VmOptions::from_image`] (image is required).
@@ -62,14 +100,16 @@ pub struct VmOptions {
     pub ram_mib: u32,
     /// Publish specs (`host:guest`, ephemeral forms). Resolved at boot.
     pub ports: Vec<String>,
-    /// Egress allow-list; empty = unrestricted.
-    pub allow_net: Vec<String>,
     /// Host-only secrets for MITM (memory only).
     pub secrets: Vec<Secret>,
-    /// Use gvproxy virtio-net (default true).
-    pub virtio_net: bool,
+    /// Guest network (gvproxy or offline).
+    pub network: NetworkSpec,
     /// Volume mounts (bind or named) resolved at create.
     pub volumes: Vec<VolumeMount>,
+    /// Optional first command run by the CLI after the agent is ready.
+    ///
+    /// Not PID 1. Merged from OCI `ENTRYPOINT`+`CMD` when unset.
+    pub command: Option<Vec<String>>,
     /// Workload environment (`KEY=VALUE`) — applied to **exec**, not VM boot.
     ///
     /// Stored on the handle for Phase A; not passed as libkrun boot env.
@@ -82,7 +122,7 @@ pub struct VmOptions {
     pub auto_remove: bool,
     /// Wait for guest agent after create (`Duration::ZERO` = skip).
     pub ready_timeout: Duration,
-    /// Detach: do not watch parent process (survives Runtime drop of keepalive).
+    /// Detach: persist so create/restart skip watchdog, parent-death, and Runtime Drop SIGTERM.
     pub detach: bool,
     /// Isolation policy (Landlock / jailer). Default: fail-closed Landlock on Linux.
     pub security: SecurityOptions,
@@ -102,10 +142,10 @@ impl VmOptions {
             vcpus: 1,
             ram_mib: 512,
             ports: Vec::new(),
-            allow_net: Vec::new(),
             secrets: Vec::new(),
-            virtio_net: true,
+            network: NetworkSpec::default(),
             volumes: Vec::new(),
+            command: None,
             env: Vec::new(),
             workdir: None,
             user: None,
@@ -146,10 +186,19 @@ impl VmOptions {
         self
     }
 
-    /// Set egress allow-list.
+    /// Set egress allow-list (implies [`NetworkSpec::Enabled`]).
     #[must_use]
     pub fn allow_net(mut self, hosts: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.allow_net = hosts.into_iter().map(Into::into).collect();
+        self.network = NetworkSpec::Enabled {
+            allow_net: hosts.into_iter().map(Into::into).collect(),
+        };
+        self
+    }
+
+    /// Set network mode.
+    #[must_use]
+    pub fn network(mut self, spec: NetworkSpec) -> Self {
+        self.network = spec;
         self
     }
 
@@ -160,10 +209,10 @@ impl VmOptions {
         self
     }
 
-    /// Enable/disable virtio-net.
+    /// First command after agent ready (`None` = no auto-exec).
     #[must_use]
-    pub const fn virtio_net(mut self, enable: bool) -> Self {
-        self.virtio_net = enable;
+    pub fn command(mut self, cmd: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.command = Some(cmd.into_iter().map(Into::into).collect());
         self
     }
 
@@ -206,7 +255,7 @@ impl VmOptions {
         self
     }
 
-    /// Detached spawn (no parent watchdog).
+    /// Detached spawn (no watchdog / parent-death; survives Runtime Drop).
     #[must_use]
     pub const fn detach(mut self, yes: bool) -> Self {
         self.detach = yes;
@@ -268,7 +317,7 @@ mod tests {
         assert_eq!(o.image, ImageRef::Oci("python:slim".into()));
         assert_eq!(o.vcpus, 1);
         assert_eq!(o.ram_mib, 512);
-        assert!(o.virtio_net);
+        assert!(o.network.is_enabled());
         assert!(o.ports.is_empty());
         assert!(o.env.is_empty());
         assert!(o.workdir.is_none());
@@ -294,7 +343,7 @@ mod tests {
         assert_eq!(o.vcpus, 2);
         assert_eq!(o.ram_mib, 1024);
         assert_eq!(o.ports, vec!["8080:80"]);
-        assert_eq!(o.allow_net, vec!["example.com"]);
+        assert_eq!(o.network.allow_net(), &["example.com".to_owned()]);
         assert_eq!(o.env, vec!["A=1", "B=2"]);
         assert_eq!(o.workdir.as_deref(), Some("/work"));
         assert_eq!(o.user.as_deref(), Some("1000:1000"));

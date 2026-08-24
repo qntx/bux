@@ -10,18 +10,17 @@ use nix::unistd::Pid;
 use tracing::{info, warn};
 
 use super::Runtime;
-use super::spawn::{clean_vm_files, is_pid_alive};
-use crate::lifecycle::{self, RecoverAction, SECRETS_RESUPPLY_ERROR};
-use crate::ports::{parse_concrete_port_strings, parse_publish_spec, resolve_ports};
-use crate::state::{Status, VmConfig, VmState};
+use super::boot::{clean_net_sock, clean_vm_files, is_pid_alive};
+use crate::lifecycle::{self, RecoverAction};
+use crate::state::{Status, VmState};
 
 impl Runtime {
-    /// Gracefully stops all active VMs.
+    /// Gracefully stops all active non-detached VMs.
     ///
     /// Sends `SIGTERM` to each shim process, waits briefly, then
     /// `SIGKILL` any survivors. Called automatically when the
     /// `Runtime` is dropped, or can be called manually for
-    /// coordinated shutdown.
+    /// coordinated shutdown. Detached rows are left running.
     #[allow(
         clippy::disallowed_methods,
         reason = "sync shutdown cannot use tokio::time::sleep"
@@ -32,25 +31,22 @@ impl Runtime {
         };
 
         for vm in vms {
-            if !vm.status.is_active() || !is_pid_alive(vm.pid) {
+            if !vm.status.is_active() || !is_pid_alive(vm.pid) || vm.config.detach {
                 continue;
             }
 
             info!(vm_id = %vm.id, pid = vm.pid, "stopping VM on shutdown");
             terminate_pid(vm.pid, &vm.id);
             drop(self.db.update_status(&vm.id, Status::Stopped));
-            self.net.stop(&vm.id);
         }
-
-        self.net.stop_all();
     }
 
     /// Recovers stale state from a previous run.
     ///
     /// Phases:
     /// 1. Auto-remove stopped VMs flagged with `auto_remove`.
-    /// 2. For active rows: dead PID → Stopped; live PID + secrets → fail-closed (K28);
-    ///    live + `virtio_net` → reattach gvproxy; else vsock-only.
+    /// 2. For active rows: dead PID → Stopped; live PID → vsock-only
+    ///    (the shim owns gvproxy and secrets; do not SIGTERM).
     /// 3. Clean up orphaned socket files.
     pub(super) fn recover(&self) {
         let vms = match self.db.list() {
@@ -63,7 +59,7 @@ impl Runtime {
 
         let mut cleaned = 0u32;
         for vm in vms {
-            cleaned += self.recover_one(vm);
+            cleaned += self.recover_one(&vm);
         }
 
         let known_ids: HashSet<String> = self
@@ -79,9 +75,9 @@ impl Runtime {
     }
 
     /// Recover a single VM row; returns count of cleaned items (0 or 1+).
-    fn recover_one(&self, mut vm: VmState) -> u32 {
+    fn recover_one(&self, vm: &VmState) -> u32 {
         if vm.status == Status::Stopped && vm.config.auto_remove {
-            self.purge_vm_files(&vm);
+            self.purge_vm_files(vm);
             return 1;
         }
 
@@ -89,21 +85,10 @@ impl Runtime {
             return 0;
         }
 
-        let action = lifecycle::recover_action(
-            is_pid_alive(vm.pid),
-            vm.config.secrets_required,
-            vm.config.virtio_net,
-        );
-
-        match action {
-            RecoverAction::MarkDeadStopped => self.recover_dead(&vm),
-            RecoverAction::FailClosedSecrets => self.recover_secrets_fail_closed(&mut vm),
-            RecoverAction::ReattachNetwork => {
-                self.recover_reattach_net(&vm);
-                0
-            }
+        match lifecycle::recover_action(is_pid_alive(vm.pid)) {
+            RecoverAction::MarkDeadStopped => self.recover_dead(vm),
             RecoverAction::ReattachVsockOnly => {
-                info!(vm_id = %vm.id, "recovery: orphaned VM still alive (TSI/vsock only)");
+                info!(vm_id = %vm.id, "recovery: live shim (vsock reattach; net stays in-process)");
                 0
             }
         }
@@ -113,39 +98,12 @@ impl Runtime {
     fn recover_dead(&self, vm: &VmState) -> u32 {
         warn!(vm_id = %vm.id, pid = vm.pid, "recovery: marking dead VM as stopped");
         drop(self.db.update_status(&vm.id, Status::Stopped));
-        self.net.stop(&vm.id);
+        clean_net_sock(&vm.socket);
         if vm.config.auto_remove {
             self.purge_vm_files(vm);
             1
         } else {
             0
-        }
-    }
-
-    /// K28: stop live VM that needs secrets after Runtime restart.
-    fn recover_secrets_fail_closed(&self, vm: &mut VmState) -> u32 {
-        warn!(
-            vm_id = %vm.id,
-            pid = vm.pid,
-            "recovery: secrets_required — fail-closed stop (K28)"
-        );
-        terminate_pid(vm.pid, &vm.id);
-        vm.config.last_error = Some(SECRETS_RESUPPLY_ERROR.to_owned());
-        drop(self.db.update_status(&vm.id, Status::Stopped));
-        drop(self.db.update_config(&vm.id, &vm.config));
-        self.net.stop(&vm.id);
-        1
-    }
-
-    /// Rebuild host-side gvproxy for a still-running virtio-net VM.
-    fn recover_reattach_net(&self, vm: &VmState) {
-        match reattach_network_ports(self, &vm.id, &vm.config) {
-            Ok(()) => info!(vm_id = %vm.id, "recovery: gvproxy reattached"),
-            Err(e) => warn!(
-                vm_id = %vm.id,
-                error = %e,
-                "recovery: gvproxy reattach failed; leaving VM running without host net backend"
-            ),
         }
     }
 
@@ -188,7 +146,7 @@ impl Runtime {
                 terminate_pid(vm.pid, &vm.id);
             }
             drop(self.db.update_status(&vm.id, Status::Stopped));
-            self.net.stop(&vm.id);
+            clean_net_sock(&vm.socket);
             let mut cfg = vm.config.clone();
             cfg.last_activity_at = Some(now);
             drop(self.db.update_config(&vm.id, &cfg));
@@ -211,25 +169,6 @@ impl Runtime {
             }
         }
     }
-}
-
-/// Rebuild gvproxy for an orphaned virtio-net VM (no secrets).
-fn reattach_network_ports(rt: &Runtime, vm_id: &str, config: &VmConfig) -> crate::Result<()> {
-    let mut specs = Vec::with_capacity(config.ports.len());
-    for s in &config.ports {
-        if let Ok(pair) = parse_concrete_one(s) {
-            specs.push(pair);
-            continue;
-        }
-        let spec = parse_publish_spec(s)?;
-        let (pairs, _) = resolve_ports(std::slice::from_ref(&spec))?;
-        specs.extend(pairs);
-    }
-    if specs.is_empty() && !config.ports.is_empty() {
-        specs = parse_concrete_port_strings(&config.ports)?;
-    }
-    let _ = rt.net.start(vm_id, specs, config.allow_net.clone(), None)?;
-    Ok(())
 }
 
 /// SIGTERM then optional SIGKILL for a shim PID.
@@ -281,23 +220,4 @@ fn sock_entry_is_orphan(name: &std::ffi::OsStr, known_ids: &HashSet<String>) -> 
         }
     }
     false
-}
-
-/// Parse a single concrete `host:guest` pair.
-fn parse_concrete_one(s: &str) -> crate::Result<(u16, u16)> {
-    let (h, g) = s
-        .split_once(':')
-        .ok_or_else(|| crate::Error::InvalidConfig(format!("invalid port pair {s}")))?;
-    let host: u16 = h
-        .parse()
-        .map_err(|_| crate::Error::InvalidConfig(format!("invalid host port in {s}")))?;
-    let guest: u16 = g
-        .parse()
-        .map_err(|_| crate::Error::InvalidConfig(format!("invalid guest port in {s}")))?;
-    if host == 0 {
-        return Err(crate::Error::InvalidConfig(
-            "ephemeral host port not valid for reattach".into(),
-        ));
-    }
-    Ok((host, guest))
 }

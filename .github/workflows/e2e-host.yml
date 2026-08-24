@@ -1,0 +1,25 @@
+name: e2e-host
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      # Manual HVF/KVM gate only (CONTRIBUTING.md). Never FULL=1 on GitHub-hosted runners.
+      - name: Host-only e2e smoke
+        env:
+          BUX_E2E_FULL: "0"
+        run: ./scripts/e2e/smoke.sh

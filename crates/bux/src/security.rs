@@ -108,7 +108,7 @@ const fn map_layer(s: bux_jail::LayerStatus) -> LayerStatus {
     }
 }
 
-/// Host isolation capabilities for `Runtime::host_info` / `bux system info`.
+/// Host isolation and libkrun capabilities for `Runtime::host_info`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[allow(
@@ -128,6 +128,14 @@ pub struct HostInfo {
     pub cgroups: bool,
     /// Landlock LSM (Linux 5.13+).
     pub landlock: bool,
+    /// Hypervisor max vCPUs (`None` if libkrun cannot be probed).
+    pub max_vcpus: Option<u32>,
+    /// Nested virtualization (`None` if the probe fails).
+    pub nested_virt: Option<bool>,
+    /// libkrun build features that are present (e.g. `net`, `blk`, `gpu`).
+    pub krun_features: Vec<String>,
+    /// Isolation gaps from the jailer host audit.
+    pub isolation_warnings: Vec<String>,
 }
 
 impl HostInfo {
@@ -137,6 +145,7 @@ impl HostInfo {
         #[cfg(unix)]
         {
             let caps = bux_jail::checks::check_host();
+            let (max_vcpus, nested_virt, krun_features) = probe_krun();
             Self {
                 virtualization: caps.virtualization,
                 namespaces: caps.namespaces,
@@ -144,6 +153,10 @@ impl HostInfo {
                 mandatory_access_control: caps.mandatory_access_control,
                 cgroups: caps.cgroups,
                 landlock: caps.landlock,
+                max_vcpus,
+                nested_virt,
+                krun_features,
+                isolation_warnings: bux_jail::checks::audit_isolation(&caps),
             }
         }
         #[cfg(not(unix))]
@@ -155,9 +168,41 @@ impl HostInfo {
                 mandatory_access_control: false,
                 cgroups: false,
                 landlock: false,
+                max_vcpus: None,
+                nested_virt: None,
+                krun_features: Vec::new(),
+                isolation_warnings: Vec::new(),
             }
         }
     }
+}
+
+/// libkrun probes (shim is the only crate that links libkrun).
+#[cfg(unix)]
+fn probe_krun() -> (Option<u32>, Option<bool>, Vec<String>) {
+    use bux_shim::host::{self, Feature};
+
+    let max_vcpus = host::max_vcpus().ok();
+    let nested_virt = host::check_nested_virt().ok();
+    let mut krun_features = Vec::new();
+    for (feature, name) in [
+        (Feature::Net, "net"),
+        (Feature::Blk, "blk"),
+        (Feature::Gpu, "gpu"),
+        (Feature::Snd, "snd"),
+        (Feature::Input, "input"),
+        (Feature::Efi, "efi"),
+        (Feature::Tee, "tee"),
+        (Feature::AmdSev, "amd-sev"),
+        (Feature::IntelTdx, "intel-tdx"),
+        (Feature::AwsNitro, "aws-nitro"),
+        (Feature::VirglResourceMap2, "virgl-resource-map2"),
+    ] {
+        if host::has_feature(feature).unwrap_or(false) {
+            krun_features.push(name.to_owned());
+        }
+    }
+    (max_vcpus, nested_virt, krun_features)
 }
 
 #[cfg(test)]

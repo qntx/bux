@@ -362,7 +362,6 @@ mod tests {
             &ControlResp::Pong {
                 version: "0.6.1".into(),
                 uptime_ms: 1234,
-                workload_isolation: "phase_a".into(),
             },
         )
         .await

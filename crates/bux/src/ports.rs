@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 
 /// Host bind address used for all published ports (gvproxy forward key).
-pub const BIND_ADDR: &str = "0.0.0.0";
+pub(crate) const BIND_ADDR: &str = "0.0.0.0";
 
 /// Requested port publish mapping (before ephemeral resolution).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,7 +110,7 @@ pub fn parse_publish_spec(spec: &str) -> Result<PortSpec> {
 }
 
 /// Concrete host→guest port pairs after ephemeral resolution.
-pub type PortPairs = Vec<(u16, u16)>;
+pub(crate) type PortPairs = Vec<(u16, u16)>;
 
 /// Resolve specs to concrete `(host, guest)` pairs and [`PublishedPort`] list.
 ///
@@ -120,7 +120,7 @@ pub type PortPairs = Vec<(u16, u16)>;
 /// # Errors
 ///
 /// Returns config or I/O errors from probe-bind.
-pub fn resolve_ports(specs: &[PortSpec]) -> Result<(PortPairs, Vec<PublishedPort>)> {
+pub(crate) fn resolve_ports(specs: &[PortSpec]) -> Result<(PortPairs, Vec<PublishedPort>)> {
     let mut pairs = Vec::with_capacity(specs.len());
     let mut published = Vec::with_capacity(specs.len());
     for spec in specs {
@@ -149,37 +149,8 @@ fn probe_ephemeral_port() -> Result<u16> {
 
 /// Format concrete pairs as legacy `"host:guest"` strings (TSI / storage).
 #[must_use]
-pub fn format_port_pairs(pairs: &[(u16, u16)]) -> Vec<String> {
+pub(crate) fn format_port_pairs(pairs: &[(u16, u16)]) -> Vec<String> {
     pairs.iter().map(|(h, g)| format!("{h}:{g}")).collect()
-}
-
-/// Parse stored `"host:guest"` list into concrete pairs (no ephemeral).
-///
-/// # Errors
-///
-/// Malformed entries or host port 0.
-pub(crate) fn parse_concrete_port_strings(ports: &[String]) -> Result<Vec<(u16, u16)>> {
-    let mut out = Vec::with_capacity(ports.len());
-    for spec in ports {
-        let Some((host_s, guest_s)) = spec.split_once(':') else {
-            return Err(crate::Error::InvalidConfig(format!(
-                "invalid port mapping {spec:?}; expected host:guest"
-            )));
-        };
-        let host: u16 = host_s
-            .parse()
-            .map_err(|_| crate::Error::InvalidConfig(format!("invalid host port in {spec:?}")))?;
-        let guest: u16 = guest_s
-            .parse()
-            .map_err(|_| crate::Error::InvalidConfig(format!("invalid guest port in {spec:?}")))?;
-        if host == 0 {
-            return Err(crate::Error::InvalidConfig(format!(
-                "unresolved ephemeral port in stored mapping {spec:?}"
-            )));
-        }
-        out.push((host, guest));
-    }
-    Ok(out)
 }
 
 #[cfg(test)]

@@ -38,7 +38,7 @@ pub enum VolumeSource {
 pub struct VolumeMount {
     /// Where data lives on the host (bind or named).
     pub source: VolumeSource,
-    /// Intended guest mount point (recorded for inspect / future auto-mount).
+    /// Guest mount point. The agent mounts this at PID 1 from `GuestBootConfig.volumes`.
     pub guest_path: String,
     /// Prefer read-only exposure (recorded; engine virtiofs is still RW in v1).
     #[serde(default)]
@@ -96,7 +96,7 @@ pub struct ResolvedVolume {
     pub tag: String,
     /// Absolute host directory.
     pub host_path: PathBuf,
-    /// Guest path (product metadata).
+    /// Guest mount point. The agent mounts this at PID 1 from `GuestBootConfig.volumes`.
     pub guest_path: String,
     /// Read-only preference.
     pub read_only: bool,
@@ -109,7 +109,7 @@ pub struct ResolvedVolume {
 impl ResolvedVolume {
     /// Convert to engine [`VirtioFs`].
     #[must_use]
-    pub fn to_virtiofs(&self) -> VirtioFs {
+    pub(crate) fn to_virtiofs(&self) -> VirtioFs {
         VirtioFs {
             tag: self.tag.clone(),
             path: self.host_path.to_string_lossy().into_owned(),
@@ -148,7 +148,7 @@ impl VolumeManager {
     /// # Errors
     ///
     /// Returns an error if the directory cannot be created.
-    pub fn open(data_dir: impl AsRef<Path>, db: Arc<StateDb>) -> Result<Self> {
+    pub(crate) fn open(data_dir: impl AsRef<Path>, db: Arc<StateDb>) -> Result<Self> {
         let root = data_dir.as_ref().join("volumes");
         fs::create_dir_all(&root)?;
         Ok(Self { root, db })
@@ -317,21 +317,7 @@ pub fn validate_volume_name(name: &str) -> Result<()> {
 
 /// Validate guest path (absolute, no `..`).
 fn validate_guest_path(guest: &str) -> Result<()> {
-    if guest.is_empty() {
-        return Err(Error::InvalidConfig("guest_path must not be empty".into()));
-    }
-    if !guest.starts_with('/') {
-        return Err(Error::InvalidConfig(format!(
-            "guest_path must be absolute: {guest:?}"
-        )));
-    }
-    let p = Path::new(guest);
-    if p.components().any(|c| matches!(c, Component::ParentDir)) {
-        return Err(Error::InvalidConfig(format!(
-            "guest_path must not contain '..': {guest:?}"
-        )));
-    }
-    Ok(())
+    bux_proto::validate_guest_mount_path(guest).map_err(Error::InvalidConfig)
 }
 
 /// Validate a bind-mount host path: exists, is dir, no escape, not sensitive.
@@ -467,6 +453,8 @@ mod tests {
     fn reject_parent_dir_in_guest() {
         assert!(validate_guest_path("/app/../etc").is_err());
         assert!(validate_guest_path("relative").is_err());
+        assert!(validate_guest_path("/").is_err());
+        assert!(validate_guest_path("/./").is_err());
         assert!(validate_guest_path("/data").is_ok());
     }
 
@@ -526,7 +514,7 @@ mod tests {
             image: None,
             socket: dir.path().join("vm1.sock"),
             status: crate::state::Status::Running,
-            config: crate::vm::Vm::builder().to_config(),
+            config: crate::state::VmConfig::default(),
             created_at: SystemTime::now(),
         };
         db.insert(&vm_state).unwrap();

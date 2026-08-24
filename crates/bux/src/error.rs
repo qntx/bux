@@ -41,26 +41,21 @@ pub enum Error {
     #[error("{0}")]
     Busy(String),
 
-    /// The guest agent is not yet reachable.
-    #[error("guest agent unavailable")]
-    GuestUnavailable,
+    /// The guest agent is not reachable (timeout or shim death).
+    #[error("guest agent unavailable: {0}")]
+    GuestUnavailable(String),
 
     /// Secrets must be re-supplied via [`crate::StartOptions`] after Runtime restart.
     #[error("secrets required: re-supply with start_with(StartOptions {{ secrets, .. }})")]
     SecretsRequired,
 
     /// Secrets were requested but virtio-net / gvproxy is disabled.
-    #[error("secrets require virtio_net (gvproxy MITM); enable virtio_net or omit secrets")]
+    #[error("secrets require NetworkSpec::Enabled (gvproxy MITM)")]
     SecretsNeedVirtioNet,
 
     /// A requested security layer is unavailable and degraded mode is not allowed (K22).
     #[error("{0}")]
     SecurityUnavailable(String),
-
-    /// A `libkrun` FFI call failed or a string argument contained an
-    /// interior NUL byte. Details are carried by [`bux_krun::Error`].
-    #[error(transparent)]
-    Krun(#[from] bux_krun::Error),
 
     /// An I/O error from runtime, client, or state operations.
     #[error(transparent)]
@@ -95,16 +90,6 @@ pub enum Error {
     #[cfg(unix)]
     #[error(transparent)]
     Shim(#[from] bux_shim::Error),
-
-    /// Network backend (gvproxy) error.
-    #[cfg(unix)]
-    #[error(transparent)]
-    Net(#[from] bux_net::NetError),
-
-    /// Seccomp BPF filter error (Linux-only).
-    #[cfg(target_os = "linux")]
-    #[error(transparent)]
-    Seccomp(#[from] bux_seccomp::Error),
 
     /// OCI image operation error.
     #[cfg(unix)]
@@ -144,7 +129,7 @@ impl Error {
     /// Returns `true` if this is a transient error that may succeed on retry.
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
-        matches!(self, Self::Busy(_) | Self::GuestUnavailable)
+        matches!(self, Self::Busy(_) | Self::GuestUnavailable(_))
     }
 
     /// Returns `true` if this is a fatal error (runtime shut down).
@@ -172,11 +157,15 @@ mod tests {
     #[test]
     fn retryable_errors() {
         assert!(Error::Busy("locked".into()).is_retryable());
-        assert!(Error::GuestUnavailable.is_retryable());
+        assert!(Error::GuestUnavailable("x".into()).is_retryable());
         assert!(Error::SecretsRequired.is_user_error());
 
-        assert!(!Error::GuestUnavailable.is_user_error());
-        assert!(!Error::GuestUnavailable.is_fatal());
+        assert!(!Error::GuestUnavailable("x".into()).is_user_error());
+        assert!(!Error::GuestUnavailable("x".into()).is_fatal());
+        assert_eq!(
+            Error::GuestUnavailable("timed out".into()).to_string(),
+            "guest agent unavailable: timed out"
+        );
     }
 
     #[test]
@@ -188,12 +177,9 @@ mod tests {
 
     #[test]
     fn system_errors_not_categorized() {
-        let krun = Error::Krun(bux_krun::Error::Krun {
-            op: "create_ctx",
-            code: -1,
-        });
-        assert!(!krun.is_user_error());
-        assert!(!krun.is_retryable());
-        assert!(!krun.is_fatal());
+        let io = Error::Io(std::io::Error::other("x"));
+        assert!(!io.is_user_error());
+        assert!(!io.is_retryable());
+        assert!(!io.is_fatal());
     }
 }

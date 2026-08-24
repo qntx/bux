@@ -212,14 +212,21 @@ var (
 	nextID      int64 = 1
 )
 
+func failCreate(errOut **C.char, msg string) C.longlong {
+	if errOut != nil {
+		*errOut = C.CString(msg)
+	}
+	return -1
+}
+
 //export gvproxy_create
-func gvproxy_create(configJSON *C.char) C.longlong {
+func gvproxy_create(configJSON *C.char, errOut **C.char) C.longlong {
 	goJSON := C.GoString(configJSON)
 
 	var config GvproxyConfig
 	if err := json.Unmarshal([]byte(goJSON), &config); err != nil {
 		logrus.WithError(err).Error("Failed to parse gvproxy config")
-		return -1
+		return failCreate(errOut, fmt.Sprintf("failed to parse gvproxy config: %s", err.Error()))
 	}
 
 	instancesMu.Lock()
@@ -231,7 +238,7 @@ func gvproxy_create(configJSON *C.char) C.longlong {
 	socketPath := config.SocketPath
 	if socketPath == "" {
 		logrus.Error("socket_path is required in GvproxyConfig")
-		return -1
+		return failCreate(errOut, "socket_path is required in GvproxyConfig")
 	}
 
 	// Remove stale socket from a previous crash (safe: path is unique per box)
@@ -313,7 +320,7 @@ func gvproxy_create(configJSON *C.char) C.longlong {
 		conn, err = transport.ListenUnixgram(socketURI)
 		if err != nil {
 			logrus.WithFields(logrus.Fields{"error": err, "path": socketPath}).Error("Failed to create Unix datagram socket")
-			return -1
+			return failCreate(errOut, fmt.Sprintf("failed to create Unix datagram socket %s: %s", socketPath, err.Error()))
 		}
 		logrus.WithField("path", socketPath).Info("Created UnixDgram socket for VFKit protocol")
 	} else {
@@ -321,7 +328,7 @@ func gvproxy_create(configJSON *C.char) C.longlong {
 		listener, err = net.Listen("unix", socketPath)
 		if err != nil {
 			logrus.WithFields(logrus.Fields{"error": err, "path": socketPath}).Error("Failed to create Unix stream socket")
-			return -1
+			return failCreate(errOut, fmt.Sprintf("failed to create Unix stream socket %s: %s", socketPath, err.Error()))
 		}
 		logrus.WithField("path", socketPath).Info("Created UnixStream socket for Qemu protocol")
 	}
@@ -344,7 +351,7 @@ func gvproxy_create(configJSON *C.char) C.longlong {
 		if err != nil {
 			logrus.WithError(err).Error("MITM: failed to parse CA from config")
 			cancel()
-			return -1
+			return failCreate(errOut, fmt.Sprintf("MITM: failed to parse CA from config: %s", err.Error()))
 		}
 		instance.ca = ca
 		instance.secretMatcher = NewSecretHostMatcher(config.Secrets)
