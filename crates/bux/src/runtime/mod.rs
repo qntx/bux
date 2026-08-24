@@ -26,10 +26,10 @@ use crate::Result;
 use crate::disk::DiskManager;
 use crate::events::{AuditEvent, AuditEventKind, EventDispatcher};
 use crate::metrics::RuntimeMetrics;
-use crate::options::VmOptions;
+use crate::options::{ImageRef, VmOptions};
 use crate::secrets::LiveSecrets;
 use crate::snapshot::SnapshotManager;
-use crate::state::{StateDb, Status, VmState};
+use crate::state::{StateDb, Status, VmConfig, VmState};
 use crate::volumes::VolumeManager;
 use boot::{clean_vm_files, is_pid_alive};
 
@@ -343,14 +343,15 @@ impl Runtime {
         Ok(removed)
     }
 
-    /// Disk-clone a VM: flatten its QCOW2 overlay into a new base, then boot.
+    /// Disk-clone a VM: flatten its QCOW2 overlay into a new base, then boot a
+    /// detached VM.
     ///
     /// Copied from the source: overlay contents, `vcpus`, `ram_mib`, `network`,
-    /// and `auto_remove`.
+    /// and `auto_remove`. Always `detach: true` so CLI/`Runtime` Drop does not
+    /// SIGTERM the clone (same process model as `bux create`).
     ///
     /// Not copied: ports, volumes, secrets, security, command, env, workdir,
-    /// user, detach, auto-stop/delete, ready timeout, or name (unless `name`
-    /// is passed).
+    /// user, auto-stop/delete, ready timeout, or name (unless `name` is passed).
     ///
     /// # Errors
     ///
@@ -363,15 +364,7 @@ impl Runtime {
         let clone_base = self.disk.bases_dir().join(format!("clone-{clone_id}.raw"));
         self.disk.flatten_vm_disk(&source_state.id, &clone_base)?;
 
-        let mut opts = VmOptions::from_image(crate::options::ImageRef::BaseDisk(clone_base))
-            .vcpus(source_state.config.vcpus)
-            .ram_mib(source_state.config.ram_mib)
-            .auto_remove(source_state.config.auto_remove);
-        if let Some(n) = name {
-            opts = opts.name(n);
-        }
-        opts = opts.network(source_state.config.network.clone());
-
+        let opts = clone_vm_options(&source_state.config, name, clone_base);
         let handle = self.create(opts).await?;
         info!(
             source_id = %source_state.id,
@@ -529,6 +522,21 @@ impl Runtime {
     }
 }
 
+/// Create-options for a disk-clone: copy `vcpus`/`ram_mib`/`network`/`auto_remove`; always detach.
+#[must_use]
+fn clone_vm_options(config: &VmConfig, name: Option<String>, clone_base: PathBuf) -> VmOptions {
+    let mut opts = VmOptions::from_image(ImageRef::BaseDisk(clone_base))
+        .vcpus(config.vcpus)
+        .ram_mib(config.ram_mib)
+        .auto_remove(config.auto_remove)
+        .detach(true) // durable disk-clone; CLI drop must not SIGTERM
+        .network(config.network.clone());
+    if let Some(n) = name {
+        opts = opts.name(n);
+    }
+    opts
+}
+
 impl Drop for Runtime {
     fn drop(&mut self) {
         self.shutdown_sync();
@@ -545,6 +553,7 @@ impl Drop for Runtime {
 mod tests {
     use super::*;
     use crate::events::{AuditEventKind, RingBufferListener};
+    use crate::options::NetworkSpec;
     use crate::secrets::LiveSecrets;
     use crate::state::VmConfig;
     use std::fs;
@@ -681,6 +690,32 @@ mod tests {
         );
         drop(child.kill());
         drop(child.wait());
+    }
+
+    #[test]
+    fn clone_boots_detached() {
+        let source = VmConfig {
+            detach: false,
+            vcpus: 2,
+            ram_mib: 1024,
+            auto_remove: true,
+            network: NetworkSpec::Disabled,
+            ..VmConfig::default()
+        };
+        let opts = clone_vm_options(&source, Some("n".into()), PathBuf::from("/tmp/clone.raw"));
+        assert!(
+            opts.detach,
+            "disk-clone must boot detached even if source is attached"
+        );
+        assert_eq!(opts.vcpus, 2);
+        assert_eq!(opts.ram_mib, 1024);
+        assert!(opts.auto_remove);
+        assert_eq!(opts.name.as_deref(), Some("n"));
+        assert_eq!(opts.network, NetworkSpec::Disabled);
+        assert!(
+            matches!(&opts.image, ImageRef::BaseDisk(p) if p == Path::new("/tmp/clone.raw")),
+            "clone image must be the flattened base"
+        );
     }
 
     #[test]
