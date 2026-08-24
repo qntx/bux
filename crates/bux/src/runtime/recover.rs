@@ -10,7 +10,7 @@ use nix::unistd::Pid;
 use tracing::{info, warn};
 
 use super::Runtime;
-use super::boot::{clean_net_sock, clean_vm_files, is_pid_alive};
+use super::boot::{clean_vm_files, is_pid_alive};
 use crate::lifecycle::{self, RecoverAction};
 use crate::state::{Status, VmState};
 
@@ -98,13 +98,13 @@ impl Runtime {
     fn recover_dead(&self, vm: &VmState) -> u32 {
         warn!(vm_id = %vm.id, pid = vm.pid, "recovery: marking dead VM as stopped");
         drop(self.db.update_status(&vm.id, Status::Stopped));
-        clean_net_sock(&vm.socket);
+        // auto_remove already unlinks via purge_vm_files → clean_vm_files.
         if vm.config.auto_remove {
             self.purge_vm_files(vm);
-            1
         } else {
-            0
+            clean_vm_files(&vm.socket);
         }
+        1
     }
 
     /// Delete sock/disk/db rows for a VM.
@@ -146,7 +146,7 @@ impl Runtime {
                 terminate_pid(vm.pid, &vm.id);
             }
             drop(self.db.update_status(&vm.id, Status::Stopped));
-            clean_net_sock(&vm.socket);
+            clean_vm_files(&vm.socket);
             let mut cfg = vm.config.clone();
             cfg.last_activity_at = Some(now);
             drop(self.db.update_config(&vm.id, &cfg));
