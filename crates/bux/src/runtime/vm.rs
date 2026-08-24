@@ -14,7 +14,7 @@ use tracing::info;
 
 use super::HealthStatus;
 use super::boot::{
-    clean_vm_files, inject_guest_boot_env, is_pid_alive, prepare_managed_config,
+    clean_vm_files, inject_guest_boot_env, is_pid_alive, prepare_restart_config,
     shim_death_message, spawn_shim, wait_for_exit,
 };
 use crate::Result;
@@ -30,6 +30,7 @@ use crate::secrets::{LiveSecrets, StartOptions};
 use crate::security::{SecurityOptions, SecurityStatus};
 use crate::snapshot::SnapshotManager;
 use crate::state::{StateDb, Status, VmState};
+use crate::volumes::VolumeManager;
 use crate::watchdog::Keepalive;
 
 /// Read-only product view of a managed VM (no persist/engine internals).
@@ -121,6 +122,8 @@ pub struct Vm {
     net: Arc<NetworkManager>,
     /// Memory-only secrets map (shared with Runtime).
     secrets: Arc<Mutex<HashMap<String, LiveSecrets>>>,
+    /// Named volumes (shared with Runtime); used by abort cleanup.
+    volumes: VolumeManager,
     /// When this VM was spawned (for uptime tracking).
     spawned_at: std::time::Instant,
 }
@@ -141,6 +144,7 @@ impl Vm {
         snapshots: SnapshotManager,
         net: Arc<NetworkManager>,
         secrets: Arc<Mutex<HashMap<String, LiveSecrets>>>,
+        volumes: VolumeManager,
     ) -> Self {
         let client = Client::new(&state.socket);
         Self {
@@ -155,6 +159,7 @@ impl Vm {
             snapshots,
             net,
             secrets,
+            volumes,
             spawned_at: std::time::Instant::now(),
         }
     }
@@ -185,6 +190,7 @@ impl Vm {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.state.id);
         clean_vm_files(&self.state.socket);
+        drop(self.volumes.unlink_vm(&self.state.id));
         drop(self.disk.remove_vm_disk(&self.state.id));
         drop(self.db.delete(&self.state.id));
         self.state.status = Status::Stopped;
@@ -228,7 +234,7 @@ impl Vm {
         &self.state.config.workload_cmd
     }
 
-    /// Phase A security limitation note (until Phase B container isolation).
+    /// Phase A isolation note (workload shares the guest with the agent).
     #[must_use]
     #[allow(
         clippy::unused_self,
@@ -460,7 +466,7 @@ impl Vm {
             )));
         }
 
-        prepare_managed_config(&mut self.state.config)?;
+        prepare_restart_config(&mut self.state.config)?;
 
         let live = if opts.secrets.is_empty() {
             let held = {
@@ -536,8 +542,15 @@ impl Vm {
         self.state.pid = shim.pid;
         self.state.status = Status::Running;
         self.state.config.security_status = shim.security.clone();
-        self.db.update_status(&self.state.id, Status::Running)?;
-        self.db.update_config(&self.state.id, &self.state.config)?;
+        if let Err(e) = self
+            .db
+            .update_pid_status(&self.state.id, shim.pid, Status::Running)
+            .and_then(|()| self.db.update_config(&self.state.id, &self.state.config))
+        {
+            signal::kill(Pid::from_raw(shim.pid), Signal::SIGKILL).ok();
+            self.net.stop(&self.state.id);
+            return Err(e);
+        }
         self.client = Client::new(&self.state.socket);
         self.keepalive = shim.keepalive;
 

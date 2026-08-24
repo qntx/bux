@@ -274,7 +274,6 @@ dependencies = [
  "serde_json",
  "tar",
  "tokio",
- "ureq",
 ]
 
 [[package]]

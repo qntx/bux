@@ -1,8 +1,8 @@
 //! Serializable engine configuration: Runtime → `bux-shim` process.
 //!
-//! This is the **only** wire format the shim binary understands. Product
-//! types (`VmConfig`, future `VmOptions`) convert into [`ShimConfig`] in
-//! the `bux` crate — the shim never depends on `bux`.
+//! This is the **only** wire format the shim binary understands. Runtime
+//! converts product `VmConfig` into [`ShimConfig`] in the `bux` crate —
+//! the shim never depends on `bux`.
 
 use std::path::PathBuf;
 
@@ -48,8 +48,8 @@ const fn default_true() -> bool {
 
 /// Virtio-net attachment to a userspace network proxy (gvproxy).
 ///
-/// When `Some`, the engine calls `add_net_*`. When `None`, the guest is
-/// offline (no virtio-net, no TSI port map).
+/// When `Some`, the engine calls `add_net_*`. When `None`, no virtio-net
+/// is added (libkrun still auto-enables TSI; known D2).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShimNetwork {
     /// Unix socket path of the network backend.

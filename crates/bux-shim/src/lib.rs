@@ -1,8 +1,8 @@
 //! bux micro-VM engine crate: [`ShimConfig`] → libkrun.
 //!
 //! The host `bux` Runtime serialises a [`ShimConfig`] and spawns the
-//! `bux-shim` binary. This library also exposes [`prepare`] / [`boot`]
-//! so host-side builders share the same apply path (no dual logic).
+//! `bux-shim` binary. [`prepare`] / [`boot`] exist for that binary (and
+//! tests), not a host-side VMM.
 
 mod apply;
 mod config;

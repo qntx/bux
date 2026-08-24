@@ -468,6 +468,18 @@ mod tests {
     }
 
     #[test]
+    fn update_pid_status_persists_new_pid() {
+        let db = open_test_db();
+        db.insert(&test_vm("aaa111", None)).unwrap();
+
+        db.update_pid_status("aaa111", 5678, Status::Running)
+            .unwrap();
+        let vm = db.get_by_id_prefix("aaa111").unwrap();
+        assert_eq!(vm.pid, 5678);
+        assert_eq!(vm.status, Status::Running);
+    }
+
+    #[test]
     fn update_name() {
         let db = open_test_db();
         db.insert(&test_vm("aaa111", Some("old"))).unwrap();

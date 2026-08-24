@@ -1,8 +1,7 @@
 //! Phase A workload process defaults (env / workdir / user) for managed exec.
 //!
 //! Workload identity is stored on [`crate::state::VmConfig`] and applied when
-//! the caller omits overrides on [`bux_proto::ExecStart`]. Full container
-//! isolation is Phase B (1.0).
+//! the caller omits overrides on [`bux_proto::ExecStart`].
 
 use bux_oci::ImageConfig;
 use bux_proto::ExecStart;

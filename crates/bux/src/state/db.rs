@@ -186,6 +186,19 @@ impl StateDb {
         Ok(())
     }
 
+    /// Persist shim PID and status together (restart must not leave the old PID).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database update fails.
+    pub(crate) fn update_pid_status(&self, id: &str, pid: i32, status: Status) -> Result<()> {
+        self.lock().execute(
+            "UPDATE vms SET pid = ?1, status = ?2 WHERE id = ?3",
+            params![pid, status_str(status), id],
+        )?;
+        Ok(())
+    }
+
     /// Rewrites the serialized config JSON for a VM (e.g. after restart security status).
     ///
     /// # Errors

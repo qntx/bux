@@ -171,8 +171,9 @@ fn apply_all(ctx: u32, cfg: &ShimConfig) -> Result<()> {
         sys::add_virtiofs(ctx, &share.tag, &share.path)?;
     }
 
-    // Virtio-net only. No TSI `set_port_map` — libkrun must not see a port map
-    // when `network` is None (offline), or it will enable TSI automatically.
+    // Virtio-net only. Never `set_port_map`.
+    // `network=None` still auto-enables libkrun TSI (known D2).
+    // PR2: `disable_implicit_vsock` + `add_vsock(0)` on this branch.
     if let Some(ref net) = cfg.network {
         let path = net.socket_path.to_string_lossy();
         match net.connection {

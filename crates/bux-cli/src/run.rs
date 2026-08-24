@@ -278,32 +278,37 @@ impl RunArgs {
         });
 
         let interactive = self.interactive;
-        let run = async move {
-            if let Some(req) = exec_req {
-                let exec_handle = handle.exec(req).await?;
-                let output = crate::vm::stream_exec_output(exec_handle, interactive).await?;
-                let code = output.code;
-                handle.stop().await?;
-                Ok::<i32, anyhow::Error>(code)
-            } else {
-                handle.wait().await?;
-                Ok(0)
-            }
-        };
-
+        let did_exec = exec_req.is_some();
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
 
-        let exit_code = tokio::select! {
-            result = run => result?,
-            _ = sigterm.recv() => {
-                stop_vm(&id).await?;
-                128 + libc::SIGTERM
+        let outcome = tokio::select! {
+            result = async {
+                if let Some(req) = exec_req {
+                    let exec_handle = handle.exec(req).await?;
+                    let output = crate::vm::stream_exec_output(exec_handle, interactive).await?;
+                    anyhow::Ok(output.code)
+                } else {
+                    handle.wait().await?;
+                    Ok(0)
+                }
+            } => Foreground::Done(result),
+            _ = sigterm.recv() => Foreground::Signal(libc::SIGTERM),
+            _ = sigint.recv() => Foreground::Signal(libc::SIGINT),
+        };
+
+        let exit_code = match outcome {
+            Foreground::Done(result) => {
+                let code = result?;
+                if did_exec {
+                    handle.stop().await?;
+                }
+                code
             }
-            _ = sigint.recv() => {
-                stop_vm(&id).await?;
-                128 + libc::SIGINT
+            Foreground::Signal(sig) => {
+                stop_handle(&mut handle).await;
+                128 + sig
             }
         };
 
@@ -314,15 +319,14 @@ impl RunArgs {
     }
 }
 
-async fn stop_vm(id: &str) -> Result<()> {
-    let rt = crate::vm::open_runtime()?;
-    let mut handle = rt.get(id)?;
-    match handle.stop().await {
-        Err(_) if handle.is_alive() => {
-            let _ = handle.kill();
-            Ok(())
-        }
-        Ok(()) | Err(_) => Ok(()),
+enum Foreground {
+    Done(Result<i32>),
+    Signal(i32),
+}
+
+async fn stop_handle(handle: &mut bux::Vm) {
+    if handle.stop().await.is_err() && handle.is_alive() {
+        drop(handle.kill());
     }
 }
 

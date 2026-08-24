@@ -352,12 +352,12 @@ const CAPTURE_ENV: &[(&str, &str)] = &[
     ),
     ("BUX_SHIM_PATH", "Override path to the bux-shim binary"),
     (
-        "BUX_GUEST_DIR",
-        "Directory containing prebuilt bux-guest Linux binaries",
+        "BUX_GUEST_PATH",
+        "Absolute path to a static Linux bux-guest ELF (Runtime inject)",
     ),
     (
-        "BUX_GUEST_DOWNLOAD",
-        "Set to 1 to fetch guest binary from release artifacts",
+        "BUX_GUEST_DIR",
+        "Directory containing prebuilt bux-guest Linux binaries (CLI build)",
     ),
     (
         "PATH",

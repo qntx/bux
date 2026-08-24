@@ -30,7 +30,7 @@ use crate::net_manager::NetworkManager;
 use crate::options::VmOptions;
 use crate::secrets::LiveSecrets;
 use crate::snapshot::SnapshotManager;
-use crate::state::{StateDb, Status};
+use crate::state::{StateDb, Status, VmState};
 use crate::volumes::VolumeManager;
 use boot::{clean_vm_files, is_pid_alive};
 
@@ -422,10 +422,7 @@ impl Runtime {
         let mut keep = Vec::with_capacity(vms.len());
 
         for mut vm in vms {
-            if vm.status.is_active() && !is_pid_alive(vm.pid) {
-                vm.status = Status::Stopped;
-                drop(self.db.update_status(&vm.id, Status::Stopped));
-            }
+            self.reconcile_dead_pid(&mut vm);
 
             if vm.status == Status::Stopped && vm.config.auto_remove {
                 drop(fs::remove_file(&vm.socket));
@@ -451,10 +448,7 @@ impl Runtime {
             self.db.get_by_id_prefix(id_or_name)?
         };
 
-        if state.status.is_active() && !is_pid_alive(state.pid) {
-            state.status = Status::Stopped;
-            drop(self.db.update_status(&state.id, Status::Stopped));
-        }
+        self.reconcile_dead_pid(&mut state);
 
         Ok(Vm::new(
             state,
@@ -466,6 +460,7 @@ impl Runtime {
             self.snapshots.clone(),
             Arc::clone(&self.net),
             Arc::clone(&self.secrets),
+            self.volumes.clone(),
         ))
     }
 
@@ -520,10 +515,109 @@ impl Runtime {
         }));
         Ok(())
     }
+
+    /// Mark a stored active row Stopped when the shim PID is gone; stop Runtime-owned gvproxy.
+    fn reconcile_dead_pid(&self, vm: &mut VmState) {
+        if vm.status.is_active() && !is_pid_alive(vm.pid) {
+            vm.status = Status::Stopped;
+            drop(self.db.update_status(&vm.id, Status::Stopped));
+            self.net.stop(&vm.id);
+        }
+    }
 }
 
 impl Drop for Runtime {
     fn drop(&mut self) {
         self.shutdown_sync();
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::missing_docs_in_private_items,
+    reason = "tests"
+)]
+mod tests {
+    use super::*;
+    use crate::state::VmConfig;
+    use std::time::SystemTime;
+
+    fn insert_running(rt: &Runtime, id: &str, pid: i32) {
+        rt.db
+            .insert(&VmState {
+                id: id.to_owned(),
+                name: None,
+                pid,
+                image: None,
+                socket: rt.socks_dir.join(format!("{id}.sock")),
+                status: Status::Running,
+                config: VmConfig::default(),
+                created_at: SystemTime::now(),
+            })
+            .unwrap();
+    }
+
+    fn spawn_sleep() -> std::process::Child {
+        std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap()
+    }
+
+    fn child_pid(child: &std::process::Child) -> i32 {
+        i32::try_from(child.id()).unwrap()
+    }
+
+    #[test]
+    fn list_preserves_live_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let mut child = spawn_sleep();
+        let pid = child_pid(&child);
+        insert_running(&rt, "aabbccddeeff", pid);
+        let list = rt.list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].pid, pid);
+        assert_eq!(list[0].status, Status::Running);
+        drop(rt);
+        drop(child.kill());
+        drop(child.wait());
+    }
+
+    #[test]
+    fn list_marks_dead_pid_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead = child_pid(&child);
+        drop(child.wait());
+        insert_running(&rt, "deadpid000001", dead);
+        let list = rt.list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].status, Status::Stopped);
+        assert_eq!(list[0].pid, dead);
+    }
+
+    #[test]
+    fn update_pid_then_list_sees_new_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let mut dead_child = std::process::Command::new("true").spawn().unwrap();
+        let dead = child_pid(&dead_child);
+        drop(dead_child.wait());
+        insert_running(&rt, "aabbccddeeff", dead);
+        let mut live_child = spawn_sleep();
+        let live = child_pid(&live_child);
+        rt.db
+            .update_pid_status("aabbccddeeff", live, Status::Running)
+            .unwrap();
+        let list = rt.list().unwrap();
+        assert_eq!(list[0].pid, live);
+        assert_eq!(list[0].status, Status::Running);
+        drop(rt);
+        drop(live_child.kill());
+        drop(live_child.wait());
     }
 }

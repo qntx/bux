@@ -18,7 +18,6 @@ Requires a working C toolchain for libkrun / e2fs / qcow2 native deps, and Go fo
 | `BUX_SHIM_PATH` | Absolute path to `bux-shim` (else next to CLI or `$PATH`) |
 | `BUX_GUEST_PATH` | Absolute path to a static Linux `bux-guest` ELF (Runtime inject) |
 | `BUX_GUEST_DIR` | Directory with prebuilt `bux-guest` Linux ELF for host arch (CLI build) |
-| `BUX_GUEST_DOWNLOAD` | Set `1` to fetch a release guest binary when none is local (CLI build) |
 | `PATH` | Locates `bux-shim`, `bwrap` (Linux), `sandbox-exec` (macOS), `go` |
 
 Inspect the live host with:

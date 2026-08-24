@@ -27,6 +27,52 @@ use crate::secrets::{LiveSecrets, Secret};
 use crate::state::{self, Status, VirtioFs, VmConfig, VmState, VsockPort};
 use crate::watchdog::{self, Keepalive};
 
+/// Tears down overlay / gvproxy / secrets / shim / row if spawn fails after overlay.
+struct SpawnAbort<'a> {
+    /// Runtime that owns net, secrets, disk, and state.
+    rt: &'a Runtime,
+    /// VM id allocated for this spawn.
+    id: String,
+    /// Vsock socket path (also locates json/stderr/exit files).
+    socket: PathBuf,
+    /// Shim PID once spawned (`None` until jail spawn succeeds).
+    pid: Option<i32>,
+    /// When true, `Drop` runs abort cleanup.
+    armed: bool,
+}
+
+impl SpawnAbort<'_> {
+    /// Skip cleanup after a successful insert.
+    const fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SpawnAbort<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        abort_partial_spawn(self.rt, &self.id, &self.socket, self.pid);
+    }
+}
+
+/// SIGKILL if spawned, then net/secrets/overlay/volumes/row.
+fn abort_partial_spawn(rt: &Runtime, id: &str, socket: &Path, pid: Option<i32>) {
+    if let Some(pid) = pid {
+        signal::kill(Pid::from_raw(pid), signal::Signal::SIGKILL).ok();
+    }
+    rt.net.stop(id);
+    rt.secrets
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(id);
+    clean_vm_files(socket);
+    drop(rt.volumes().unlink_vm(id));
+    drop(rt.disk.remove_vm_disk(id));
+    drop(rt.db.delete(id));
+}
+
 /// Result of spawning a shim subprocess.
 pub(super) struct ShimSpawnResult {
     /// Child PID (as i32 for nix compatibility).
@@ -84,15 +130,18 @@ pub(crate) async fn create(
         opts.auto_remove,
     )?;
 
-    if !resolved_vols.is_empty() {
-        rt.volumes()
-            .link_vm(vm.stored().id.as_str(), &resolved_vols)?;
+    if !resolved_vols.is_empty()
+        && let Err(e) = rt
+            .volumes()
+            .link_vm(vm.stored().id.as_str(), &resolved_vols)
+    {
+        vm.abort_unready();
+        return Err(e);
     }
 
     if !opts.ready_timeout.is_zero() {
         on_progress("waiting for guest agent");
         if let Err(e) = vm.wait_ready(opts.ready_timeout).await {
-            drop(rt.volumes().unlink_vm(&vm.stored().id));
             vm.abort_unready();
             return Err(e);
         }
@@ -145,6 +194,14 @@ pub(crate) fn spawn_config(
         config.base_disk = None;
     }
 
+    let mut abort = SpawnAbort {
+        rt,
+        id: id.clone(),
+        socket: socket.clone(),
+        pid: None,
+        armed: true,
+    };
+
     let live_secrets = if staged_secrets.is_empty() {
         config.secrets_required = false;
         None
@@ -187,20 +244,15 @@ pub(crate) fn spawn_config(
     }
 
     let config_path = rt.socks_dir.join(format!("{id}.json"));
-    let shim = match spawn_shim(
+    let shim = spawn_shim(
         &config,
         &config_path,
         &rt.socks_dir,
         &id,
         watch_parent,
         network,
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            rt.net.stop(&id);
-            return Err(e);
-        }
-    };
+    )?;
+    abort.pid = Some(shim.pid);
 
     config.security_status = shim.security.clone();
 
@@ -215,6 +267,7 @@ pub(crate) fn spawn_config(
         created_at: std::time::SystemTime::now(),
     };
     rt.db.insert(&vm_state)?;
+    abort.disarm();
 
     info!(
         vm_id = %id,
@@ -241,6 +294,7 @@ pub(crate) fn spawn_config(
         rt.snapshots.clone(),
         std::sync::Arc::clone(&rt.net),
         std::sync::Arc::clone(&rt.secrets),
+        rt.volumes.clone(),
     ))
 }
 
@@ -466,22 +520,44 @@ pub(super) fn wait_for_exit(pid: i32) {
     }
 }
 
-/// Resolves the managed guest binary and sets PID 1 to the guest agent.
+/// First boot: inject guest into a host rootfs. Rejects unprepared raw disks.
 pub(super) fn prepare_managed_config(config: &mut VmConfig) -> Result<()> {
-    let guest = ManagedGuestBinary::resolve()?;
-
-    if config.root_disk.is_some() && config.rootfs.is_none() && config.base_disk.is_none() {
+    if is_overlay_only(config) {
         return Err(crate::Error::InvalidConfig(
-            "managed runtime does not yet support direct root_disk boot without a managed guest-rootfs preparation step".to_owned(),
+            "managed runtime does not support direct root_disk boot without a managed guest-rootfs preparation step".to_owned(),
         ));
     }
-    if let Some(rootfs) = config.rootfs.as_deref() {
-        guest.inject_into_rootfs(Path::new(rootfs))?;
-    }
+    apply_guest_pid1(config)
+}
 
+/// Restart: overlay already has the injected guest. Skip host guest resolve.
+pub(super) fn prepare_restart_config(config: &mut VmConfig) -> Result<()> {
+    if is_overlay_only(config) {
+        set_guest_pid1(config);
+        return Ok(());
+    }
+    apply_guest_pid1(config)
+}
+
+/// Persisted overlay: `root_disk` set, no host rootfs / base to inject.
+const fn is_overlay_only(config: &VmConfig) -> bool {
+    config.root_disk.is_some() && config.rootfs.is_none() && config.base_disk.is_none()
+}
+
+/// Point PID 1 at the managed guest; clear leftover boot env.
+fn set_guest_pid1(config: &mut VmConfig) {
     config.exec_path = Some(ManagedGuestBinary::exec_path().to_owned());
     config.exec_args.clear();
     config.env = None;
+}
+
+/// Resolve the host guest ELF and inject into a rootfs directory when present.
+fn apply_guest_pid1(config: &mut VmConfig) -> Result<()> {
+    let guest = ManagedGuestBinary::resolve()?;
+    if let Some(rootfs) = config.rootfs.as_deref() {
+        guest.inject_into_rootfs(Path::new(rootfs))?;
+    }
+    set_guest_pid1(config);
     Ok(())
 }
 
@@ -730,5 +806,34 @@ mod tests {
                 .expect("boot env")
                 .starts_with(&format!("{GUEST_BOOT_CONFIG_ENV}="))
         );
+    }
+
+    #[test]
+    fn first_boot_rejects_bare_root_disk() {
+        let mut cfg = VmConfig {
+            root_disk: Some("/tmp/unprepared.raw".into()),
+            ..VmConfig::default()
+        };
+        assert!(matches!(
+            prepare_managed_config(&mut cfg),
+            Err(crate::Error::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn restart_overlay_sets_guest_exec_without_host_binary() {
+        let mut cfg = VmConfig {
+            root_disk: Some("/tmp/vm.qcow2".into()),
+            disk_format: DiskFormat::Qcow2,
+            exec_path: Some("/bux/bin/bux-guest".into()),
+            ..VmConfig::default()
+        };
+        prepare_restart_config(&mut cfg).unwrap();
+        assert_eq!(
+            cfg.exec_path.as_deref(),
+            Some(ManagedGuestBinary::exec_path())
+        );
+        assert!(cfg.exec_args.is_empty());
+        assert!(cfg.env.is_none());
     }
 }
