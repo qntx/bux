@@ -176,8 +176,7 @@ fn apply_all(ctx: u32, cfg: &ShimConfig) -> Result<()> {
         }
     }
     if cfg.network.is_none() {
-        sys::disable_implicit_vsock(ctx)?;
-        sys::add_vsock(ctx, 0)?;
+        apply_offline_vsock(ctx)?;
     }
 
     if let Some(ref workdir) = cfg.workdir {
@@ -213,6 +212,20 @@ fn apply_all(ctx: u32, cfg: &ShimConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// `disable_implicit_vsock` then `add_vsock(0)`. `0` means no TSI hijack.
+fn apply_offline_vsock(ctx: u32) -> Result<()> {
+    sys::disable_implicit_vsock(ctx)?;
+    sys::add_vsock(ctx, 0)?;
+    #[cfg(test)]
+    OFFLINE_TSI.with(|c| c.set(c.get().saturating_add(1)));
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static OFFLINE_TSI: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -272,7 +285,7 @@ mod tests {
 
     #[test]
     fn disable_implicit_vsock_then_add_vsock_zero() {
-        // BoxLite engine.rs `disable_network`: same FFI order on this libkrun.
+        // Implicit vsock must be disabled before add_vsock; 0 = no TSI.
         let ctx = sys::create_ctx().expect("create_ctx");
         let applied = sys::disable_implicit_vsock(ctx).and_then(|()| sys::add_vsock(ctx, 0));
         drop(sys::free_ctx(ctx));
@@ -281,6 +294,7 @@ mod tests {
 
     #[test]
     fn prepare_disabled_network_disables_tsi() {
+        OFFLINE_TSI.with(|c| c.set(0));
         let dir = scratch_dir();
         let rootfs = dir.join("root");
         std::fs::create_dir_all(&rootfs).unwrap();
@@ -291,11 +305,11 @@ mod tests {
         );
 
         let prepared = prepare(&cfg).expect("prepare network=None");
-        let ctx = prepared.ctx().expect("PreparedVm holds ctx");
-        // libkrun allows one vsock device; prepare already called add_vsock(0).
-        assert!(
-            sys::add_vsock(ctx, 0).is_err(),
-            "prepare must have called add_vsock already"
+        assert!(prepared.ctx().is_some());
+        assert_eq!(
+            OFFLINE_TSI.with(std::cell::Cell::get),
+            1,
+            "prepare(network=None) must call disable_implicit_vsock + add_vsock(0)"
         );
         drop(prepared);
         drop(std::fs::remove_dir_all(&dir));
