@@ -102,4 +102,20 @@ echo "${insp}" | grep -q '"host"'
 echo "${insp}" | grep -q '"guest": 80'
 bux rm -f "${PUB}"
 
+OFF="e2e-offline-$(date +%s)"
+echo "==> offline-no-eth0 ${OFF}"
+bux create --name "${OFF}" --network=disabled "${IMAGE}"
+if bux exec "${OFF}" -- wget -qO- -T 3 http://example.com || \
+   bux exec "${OFF}" -- busybox wget -qO- -T 3 http://example.com; then
+  echo "offline-no-eth0 failed: wget succeeded (TSI leak)"
+  bux rm -f "${OFF}" || true
+  exit 1
+fi
+if bux exec "${OFF}" -- test -e /sys/class/net/eth0; then
+  echo "offline-no-eth0 failed: eth0 present"
+  bux rm -f "${OFF}" || true
+  exit 1
+fi
+bux rm -f "${OFF}"
+
 echo "OK (full e2e)"

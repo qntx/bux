@@ -50,7 +50,7 @@ const fn default_true() -> bool {
 /// Virtio-net attachment to a userspace network proxy (gvproxy).
 ///
 /// When `Some`, the engine calls `add_net_*`. When `None`, no virtio-net
-/// is added; libkrun may still enable TSI.
+/// is added and implicit TSI is replaced with `add_vsock(0)`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShimNetwork {
     /// Unix socket path of the network backend.

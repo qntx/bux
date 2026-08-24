@@ -158,7 +158,7 @@ fn apply_all(ctx: u32, cfg: &ShimConfig) -> Result<()> {
     }
 
     // Virtio-net only. Never `set_port_map`.
-    // `network=None`: no virtio-net is added; libkrun may still enable TSI.
+    // Skipping `add_net_*` would auto-enable TSI (host-stack leak).
     if let Some(ref net) = cfg.network {
         const FEATURES: u32 = bux_krun::sys::COMPAT_NET_FEATURES;
         let flags = match net.connection {
@@ -174,6 +174,10 @@ fn apply_all(ctx: u32, cfg: &ShimConfig) -> Result<()> {
                 sys::add_net_unixgram(ctx, Some(path.as_ref()), -1, &net.mac, FEATURES, flags)?;
             }
         }
+    }
+    if cfg.network.is_none() {
+        sys::disable_implicit_vsock(ctx)?;
+        sys::add_vsock(ctx, 0)?;
     }
 
     if let Some(ref workdir) = cfg.workdir {
@@ -209,4 +213,91 @@ fn apply_all(ctx: u32, cfg: &ShimConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::missing_docs_in_private_items,
+    reason = "unit tests"
+)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::config::{ShimDiskFormat, ShimVsockPort};
+
+    fn offline_cfg(rootfs: &str, vsock: &str) -> ShimConfig {
+        ShimConfig {
+            vm_id: "offline-tsi".into(),
+            vcpus: 1,
+            ram_mib: 128,
+            rootfs: Some(rootfs.into()),
+            root_disk: None,
+            disk_format: ShimDiskFormat::Raw,
+            virtiofs: vec![],
+            vsock_ports: vec![ShimVsockPort {
+                port: 1024,
+                path: vsock.into(),
+                listen: true,
+            }],
+            network: None,
+            gvproxy: None,
+            log_level: None,
+            exec_path: None,
+            exec_args: vec![],
+            env: None,
+            workdir: None,
+            uid: None,
+            gid: None,
+            rlimits: vec![],
+            nested_virt: None,
+            snd_device: None,
+            console_output: None,
+        }
+    }
+
+    fn scratch_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bux-shim-offline-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn disable_implicit_vsock_then_add_vsock_zero() {
+        // BoxLite engine.rs `disable_network`: same FFI order on this libkrun.
+        let ctx = sys::create_ctx().expect("create_ctx");
+        let applied = sys::disable_implicit_vsock(ctx).and_then(|()| sys::add_vsock(ctx, 0));
+        drop(sys::free_ctx(ctx));
+        applied.expect("disable_implicit_vsock + add_vsock(0)");
+    }
+
+    #[test]
+    fn prepare_disabled_network_disables_tsi() {
+        let dir = scratch_dir();
+        let rootfs = dir.join("root");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        let vsock = dir.join("agent.sock");
+        let cfg = offline_cfg(
+            rootfs.to_str().expect("utf8 rootfs"),
+            vsock.to_str().expect("utf8 vsock"),
+        );
+
+        let prepared = prepare(&cfg).expect("prepare network=None");
+        let ctx = prepared.ctx().expect("PreparedVm holds ctx");
+        // libkrun allows one vsock device; prepare already called add_vsock(0).
+        assert!(
+            sys::add_vsock(ctx, 0).is_err(),
+            "prepare must have called add_vsock already"
+        );
+        drop(prepared);
+        drop(std::fs::remove_dir_all(&dir));
+    }
 }

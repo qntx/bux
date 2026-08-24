@@ -8,8 +8,8 @@ The process-takeover binary lives in `bux-shim-bin` (`[[bin]] name = "bux-shim"`
 - libkrun **process takeover** must not run inside the host tokio Runtime.
 - Host `bux` maps product state → `ShimConfig` JSON; shim never depends on `bux`.
 - Virtio-net via `add_net_unixstream` / `add_net_unixgram`. The shim never
-  calls TSI `set_port_map`. When `network` is `None`, no virtio-net is
-  added; libkrun may still enable TSI.
+  calls TSI `set_port_map`. When `network` is `None`, implicit TSI is
+  disabled (`disable_implicit_vsock` + `add_vsock(0)`).
 
 ## Wire format
 
