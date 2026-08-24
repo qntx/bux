@@ -11,3 +11,4 @@ jobs:
     uses: qntx/workflows/.github/workflows/ci-rust.yml@main
     with:
       submodules: true
+      toolchain: "1.97.1"
