@@ -176,7 +176,8 @@ fn apply_all(ctx: u32, cfg: &ShimConfig) -> Result<()> {
         }
     }
     if cfg.network.is_none() {
-        apply_offline_vsock(ctx)?;
+        disable_implicit_vsock(ctx)?;
+        add_vsock(ctx, 0)?;
     }
 
     if let Some(ref workdir) = cfg.workdir {
@@ -214,18 +215,45 @@ fn apply_all(ctx: u32, cfg: &ShimConfig) -> Result<()> {
     Ok(())
 }
 
-/// `disable_implicit_vsock` then `add_vsock(0)`. `0` means no TSI hijack.
-fn apply_offline_vsock(ctx: u32) -> Result<()> {
-    sys::disable_implicit_vsock(ctx)?;
-    sys::add_vsock(ctx, 0)?;
+/// Real libkrun `krun_disable_implicit_vsock`. Tests record through this wrapper.
+fn disable_implicit_vsock(ctx: u32) -> Result<()> {
     #[cfg(test)]
-    OFFLINE_TSI.with(|c| c.set(c.get().saturating_add(1)));
-    Ok(())
+    krun_spy::record(krun_spy::Call::DisableImplicitVsock);
+    Ok(sys::disable_implicit_vsock(ctx)?)
+}
+
+/// Real libkrun `krun_add_vsock`. Tests record through this wrapper. `0` = no TSI.
+fn add_vsock(ctx: u32, tsi_features: u32) -> Result<()> {
+    #[cfg(test)]
+    krun_spy::record(krun_spy::Call::AddVsock { tsi_features });
+    Ok(sys::add_vsock(ctx, tsi_features)?)
 }
 
 #[cfg(test)]
-thread_local! {
-    static OFFLINE_TSI: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+#[allow(
+    clippy::missing_docs_in_private_items,
+    reason = "test spy for TSI-off FFI order"
+)]
+mod krun_spy {
+    use std::cell::RefCell;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Call {
+        DisableImplicitVsock,
+        AddVsock { tsi_features: u32 },
+    }
+
+    thread_local! {
+        static CALLS: RefCell<Vec<Call>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record(call: Call) {
+        CALLS.with(|c| c.borrow_mut().push(call));
+    }
+
+    pub(super) fn take() -> Vec<Call> {
+        CALLS.with(|c| std::mem::take(&mut *c.borrow_mut()))
+    }
 }
 
 #[cfg(test)]
@@ -294,7 +322,7 @@ mod tests {
 
     #[test]
     fn prepare_disabled_network_disables_tsi() {
-        OFFLINE_TSI.with(|c| c.set(0));
+        drop(krun_spy::take());
         let dir = scratch_dir();
         let rootfs = dir.join("root");
         std::fs::create_dir_all(&rootfs).unwrap();
@@ -307,9 +335,11 @@ mod tests {
         let prepared = prepare(&cfg).expect("prepare network=None");
         assert!(prepared.ctx().is_some());
         assert_eq!(
-            OFFLINE_TSI.with(std::cell::Cell::get),
-            1,
-            "prepare(network=None) must call disable_implicit_vsock + add_vsock(0)"
+            krun_spy::take(),
+            [
+                krun_spy::Call::DisableImplicitVsock,
+                krun_spy::Call::AddVsock { tsi_features: 0 },
+            ]
         );
         drop(prepared);
         drop(std::fs::remove_dir_all(&dir));
