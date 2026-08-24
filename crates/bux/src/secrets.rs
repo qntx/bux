@@ -67,10 +67,10 @@ impl Secret {
             .unwrap_or_else(|| default_placeholder(&self.name))
     }
 
-    /// Convert to the gvproxy wire type.
+    /// Convert to shim JSON for the binary to map onto gvproxy.
     #[must_use]
-    pub(crate) fn to_gvproxy(&self) -> bux_net::SecretConfig {
-        bux_net::SecretConfig {
+    pub(crate) fn to_shim_secret(&self) -> bux_shim::ShimSecret {
+        bux_shim::ShimSecret {
             name: self.name.clone(),
             hosts: self.hosts.clone(),
             placeholder: self.placeholder_str(),
@@ -110,25 +110,56 @@ impl fmt::Debug for LiveSecrets {
 }
 
 impl LiveSecrets {
-    /// Mint a CA and package secrets for gvproxy.
+    /// Mint a CA and package secrets for gvproxy JSON.
     ///
     /// # Errors
     ///
     /// Returns CA generation errors.
     pub(crate) fn mint(secrets: Vec<Secret>) -> crate::Result<Self> {
-        let ca = bux_net::generate_mitm_ca().map_err(bux_net::NetError::from)?;
+        let (ca_cert_pem, ca_key_pem) = mint_mitm_ca()?;
         Ok(Self {
             secrets,
-            ca_cert_pem: ca.cert_pem,
-            ca_key_pem: ca.key_pem,
+            ca_cert_pem,
+            ca_key_pem,
         })
     }
 
-    /// Wire configs for `bux-net` / gvproxy.
+    /// Shim JSON secrets for the binary to start gvproxy.
     #[must_use]
-    pub(crate) fn gvproxy_secrets(&self) -> Vec<bux_net::SecretConfig> {
-        self.secrets.iter().map(Secret::to_gvproxy).collect()
+    pub(crate) fn to_shim_secrets(&self) -> Vec<bux_shim::ShimSecret> {
+        self.secrets.iter().map(Secret::to_shim_secret).collect()
     }
+}
+
+/// Ephemeral ECDSA P-256 MITM CA. Lives in `bux` so embedders do not link `libgvproxy.a`.
+fn mint_mitm_ca() -> crate::Result<(String, String)> {
+    use rcgen::{
+        BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair,
+        KeyUsagePurpose,
+    };
+    use time::OffsetDateTime;
+
+    let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
+        .map_err(|e| crate::Error::InvalidConfig(format!("MITM CA key generation failed: {e}")))?;
+
+    let mut params = CertificateParams::default();
+    params.distinguished_name = {
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, "bux MITM CA");
+        dn
+    };
+
+    let now = OffsetDateTime::now_utc();
+    params.not_before = now - time::Duration::minutes(1);
+    params.not_after = now + time::Duration::hours(24);
+    params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+    params.key_usages = vec![KeyUsagePurpose::CrlSign, KeyUsagePurpose::KeyCertSign];
+
+    let cert = params.self_signed(&key_pair).map_err(|e| {
+        crate::Error::InvalidConfig(format!("MITM CA self-signed cert failed: {e}"))
+    })?;
+
+    Ok((cert.pem(), key_pair.serialize_pem()))
 }
 
 /// Options for restarting a VM that may require secret re-supply.

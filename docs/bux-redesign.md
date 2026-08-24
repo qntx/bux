@@ -11,7 +11,7 @@ The CLI is a client of that API. No gRPC, youki, REST, or multi-language SDK.
 Spine:
 
 1. OCI (or rootfs / base disk) → ext4 base with injected static `bux-guest` → QCOW2 overlay.
-2. Runtime starts gvproxy (virtio-net) or stays offline. Never calls `krun_set_port_map`.
+2. The `bux-shim` binary starts gvproxy (virtio-net) or stays offline. Never calls `krun_set_port_map`.
 3. Jail (`bux-jail`) spawns `bux-shim`; shim applies `ShimConfig` and `krun_start_enter`.
 4. Guest agent is PID 1 (Phase A). Workload is `exec`.
 5. Host `Client` uses postcard protocol v9 (one Unix-socket connection per op).
@@ -21,7 +21,7 @@ Spine:
 
 | ID | Defect |
 |----|--------|
-| D1 | gvproxy lives in the Runtime process; `detach` does not survive CLI exit |
+| D1 | ~~gvproxy in Runtime; detach broken~~ — fixed: gvproxy in `bux-shim-bin`; `VmConfig.detach` gates parent-death |
 | D2 | `NetworkSpec::Disabled` does not disable libkrun TSI |
 | D3 | virtio-fs volumes are attached on the host and never mounted in the guest |
 | D4 | `BUX_E2E_FULL=1` is a manual HVF/KVM gate; CI stays host-only (`BUX_E2E_FULL=0`) |

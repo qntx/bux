@@ -153,35 +153,6 @@ pub(crate) fn format_port_pairs(pairs: &[(u16, u16)]) -> Vec<String> {
     pairs.iter().map(|(h, g)| format!("{h}:{g}")).collect()
 }
 
-/// Parse stored `"host:guest"` list into concrete pairs (no ephemeral).
-///
-/// # Errors
-///
-/// Malformed entries or host port 0.
-pub(crate) fn parse_concrete_port_strings(ports: &[String]) -> Result<Vec<(u16, u16)>> {
-    let mut out = Vec::with_capacity(ports.len());
-    for spec in ports {
-        let Some((host_s, guest_s)) = spec.split_once(':') else {
-            return Err(crate::Error::InvalidConfig(format!(
-                "invalid port mapping {spec:?}; expected host:guest"
-            )));
-        };
-        let host: u16 = host_s
-            .parse()
-            .map_err(|_| crate::Error::InvalidConfig(format!("invalid host port in {spec:?}")))?;
-        let guest: u16 = guest_s
-            .parse()
-            .map_err(|_| crate::Error::InvalidConfig(format!("invalid guest port in {spec:?}")))?;
-        if host == 0 {
-            return Err(crate::Error::InvalidConfig(format!(
-                "unresolved ephemeral port in stored mapping {spec:?}"
-            )));
-        }
-        out.push((host, guest));
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "tests")]
 mod tests {

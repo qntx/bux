@@ -128,6 +128,29 @@ fn generate_profile(shim: &Path, config_path: &Path, config: &JailConfig) -> Str
     p.push_str("  (global-name \"com.apple.system.notification_center\")\n");
     p.push_str(")\n");
 
+    if config.network_host {
+        p.push_str("\n(allow network-outbound)\n");
+        p.push_str("(allow network-inbound)\n");
+        p.push_str("(allow system-socket)\n");
+        p.push_str("(allow mach-lookup\n");
+        p.push_str("  (global-name \"com.apple.SystemConfiguration.DNSConfiguration\")\n");
+        p.push_str("  (global-name \"com.apple.SystemConfiguration.configd\")\n");
+        p.push_str("  (global-name \"com.apple.networkd\")\n");
+        p.push_str(")\n");
+        p.push_str("(allow file-read*\n");
+        p.push_str("  (literal \"/etc/resolv.conf\")\n");
+        p.push_str("  (subpath \"/etc/resolv.conf\")\n");
+        p.push_str("  (literal \"/private/etc/resolv.conf\")\n");
+        p.push_str("  (subpath \"/private/etc/resolv.conf\")\n");
+        p.push_str("  (literal \"/etc/hosts\")\n");
+        p.push_str("  (subpath \"/etc/hosts\")\n");
+        p.push_str("  (literal \"/private/etc/hosts\")\n");
+        p.push_str("  (subpath \"/private/etc/hosts\")\n");
+        p.push_str("  (literal \"/etc/nsswitch.conf\")\n");
+        p.push_str("  (subpath \"/etc/nsswitch.conf\")\n");
+        p.push_str(")\n");
+    }
+
     p
 }
 
@@ -178,5 +201,62 @@ fn emit_path_rule(profile: &mut String, path: &str, write: bool) {
         .ok();
     } else {
         writeln!(profile, "(allow file-read* (literal \"{path}\"))").ok();
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "unit tests")]
+mod tests {
+    use super::*;
+    use crate::JailConfig;
+    use std::path::PathBuf;
+
+    fn jail(network_host: bool) -> JailConfig {
+        JailConfig {
+            rootfs: None,
+            root_disk: None,
+            readonly_paths: vec![],
+            socks_dir: PathBuf::from("/tmp/bux-socks"),
+            virtiofs_paths: vec![],
+            watchdog_fd: None,
+            sandbox: None,
+            resource_limits: None,
+            stderr_file: None,
+            landlock: false,
+            allow_degraded_security: false,
+            die_with_parent: true,
+            network_host,
+        }
+    }
+
+    #[test]
+    fn network_host_allows_outbound_and_resolver() {
+        let profile = generate_profile(
+            Path::new("/usr/bin/true"),
+            Path::new("/tmp/cfg.json"),
+            &jail(true),
+        );
+        assert!(profile.contains("(allow network-outbound)"));
+        assert!(profile.contains("(allow network-inbound)"));
+        assert!(profile.contains("(allow system-socket)"));
+        assert!(profile.contains("com.apple.SystemConfiguration.DNSConfiguration"));
+        assert!(profile.contains("com.apple.networkd"));
+        assert!(profile.contains("/etc/resolv.conf"));
+        assert!(profile.contains("/etc/hosts"));
+        assert!(!profile.contains("DARWIN_USER_CACHE_DIR"));
+        assert!(!profile.contains("SecurityServer"));
+        assert!(!profile.contains("ocspd"));
+        assert!(!profile.contains("trustd"));
+    }
+
+    #[test]
+    fn offline_omits_host_network_rules() {
+        let profile = generate_profile(
+            Path::new("/usr/bin/true"),
+            Path::new("/tmp/cfg.json"),
+            &jail(false),
+        );
+        assert!(!profile.contains("(allow network-outbound)"));
+        assert!(!profile.contains("com.apple.networkd"));
     }
 }

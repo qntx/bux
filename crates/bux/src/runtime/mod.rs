@@ -26,7 +26,6 @@ use crate::Result;
 use crate::disk::DiskManager;
 use crate::events::{AuditEvent, AuditEventKind, EventDispatcher};
 use crate::metrics::RuntimeMetrics;
-use crate::net_manager::NetworkManager;
 use crate::options::VmOptions;
 use crate::secrets::LiveSecrets;
 use crate::snapshot::SnapshotManager;
@@ -95,8 +94,6 @@ pub struct Runtime {
     _lock: Flock<fs::File>,
     /// Snapshot manager.
     snapshots: SnapshotManager,
-    /// Per-VM gvproxy backends (`virtio_net` VMs).
-    net: Arc<NetworkManager>,
     /// Memory-only secrets per VM (never `SQLite`).
     secrets: Arc<Mutex<HashMap<String, LiveSecrets>>>,
     /// Named volumes under `{data_dir}/volumes/`.
@@ -142,7 +139,6 @@ impl Runtime {
         let disk = DiskManager::open(base)?;
         let oci = bux_oci::Oci::open_at(base)?;
         let snapshots = SnapshotManager::new(Arc::clone(&db), base)?;
-        let net = Arc::new(NetworkManager::new(socks_dir.clone()));
         let secrets = Arc::new(Mutex::new(HashMap::new()));
         let volumes = VolumeManager::open(base, Arc::clone(&db))?;
 
@@ -153,7 +149,6 @@ impl Runtime {
             oci,
             _lock: lock,
             snapshots,
-            net,
             secrets,
             volumes,
             metrics: Arc::new(RuntimeMetrics::new()),
@@ -458,7 +453,6 @@ impl Runtime {
             Arc::clone(&self.metrics),
             Arc::clone(&self.events),
             self.snapshots.clone(),
-            Arc::clone(&self.net),
             Arc::clone(&self.secrets),
             self.volumes.clone(),
         ))
@@ -501,7 +495,6 @@ impl Runtime {
         }
 
         clean_vm_files(&state.socket);
-        self.net.stop(&state.id);
         self.secrets
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -516,12 +509,12 @@ impl Runtime {
         Ok(())
     }
 
-    /// Mark a stored active row Stopped when the shim PID is gone; stop Runtime-owned gvproxy.
+    /// Mark a stored active row Stopped when the shim PID is gone.
     fn reconcile_dead_pid(&self, vm: &mut VmState) {
         if vm.status.is_active() && !is_pid_alive(vm.pid) {
             vm.status = Status::Stopped;
             drop(self.db.update_status(&vm.id, Status::Stopped));
-            self.net.stop(&vm.id);
+            boot::clean_net_sock(&vm.socket);
         }
     }
 }
@@ -545,6 +538,10 @@ mod tests {
     use std::time::SystemTime;
 
     fn insert_running(rt: &Runtime, id: &str, pid: i32) {
+        insert_running_cfg(rt, id, pid, VmConfig::default());
+    }
+
+    fn insert_running_cfg(rt: &Runtime, id: &str, pid: i32, config: VmConfig) {
         rt.db
             .insert(&VmState {
                 id: id.to_owned(),
@@ -553,7 +550,7 @@ mod tests {
                 image: None,
                 socket: rt.socks_dir.join(format!("{id}.sock")),
                 status: Status::Running,
-                config: VmConfig::default(),
+                config,
                 created_at: SystemTime::now(),
             })
             .unwrap();
@@ -619,5 +616,60 @@ mod tests {
         drop(rt);
         drop(live_child.kill());
         drop(live_child.wait());
+    }
+
+    #[test]
+    fn drop_skips_detached_live_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = spawn_sleep();
+        let pid = child_pid(&child);
+        {
+            let rt = Runtime::open(dir.path()).unwrap();
+            insert_running_cfg(
+                &rt,
+                "detachdead0001",
+                pid,
+                VmConfig {
+                    detach: true,
+                    ..VmConfig::default()
+                },
+            );
+            drop(rt);
+        }
+        assert!(
+            is_pid_alive(pid),
+            "Runtime Drop must not SIGTERM detach=true"
+        );
+        drop(child.kill());
+        drop(child.wait());
+    }
+
+    #[test]
+    fn recover_live_secrets_shim_is_vsock_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = spawn_sleep();
+        let pid = child_pid(&child);
+        let rt = Runtime::open(dir.path()).unwrap();
+        insert_running_cfg(
+            &rt,
+            "secretlive0001",
+            pid,
+            VmConfig {
+                detach: true,
+                secrets_required: true,
+                ..VmConfig::default()
+            },
+        );
+        rt.recover();
+        assert!(
+            is_pid_alive(pid),
+            "live secrets + live shim must not be SIGTERM'd"
+        );
+        let row = rt.db.get_by_id_prefix("secretlive0001").unwrap();
+        assert_eq!(row.status, Status::Running);
+        drop(rt);
+        assert!(is_pid_alive(pid));
+        drop(child.kill());
+        drop(child.wait());
     }
 }

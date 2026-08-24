@@ -1,8 +1,9 @@
 //! bux micro-VM engine crate: [`ShimConfig`] → libkrun.
 //!
 //! The host `bux` Runtime serialises a [`ShimConfig`] and spawns the
-//! `bux-shim` binary. [`prepare`] / [`boot`] exist for that binary (and
-//! tests), not a host-side VMM.
+//! `bux-shim` binary (`bux-shim-bin`). Product path is [`prepare`] /
+//! optional [`install_seccomp`] / [`start`]. This library does not
+//! start gvproxy.
 
 mod apply;
 mod config;
@@ -12,9 +13,10 @@ mod exit_info;
 pub mod host;
 mod watchdog;
 
-pub use apply::{PreparedVm, boot, prepare, start};
+pub use apply::{PreparedVm, install_seccomp, prepare, start};
 pub use config::{
-    ShimConfig, ShimDiskFormat, ShimNetConn, ShimNetwork, ShimVirtioFs, ShimVsockPort,
+    ShimConfig, ShimDiskFormat, ShimGvproxy, ShimNetConn, ShimNetwork, ShimSecret, ShimVirtioFs,
+    ShimVsockPort,
 };
 pub use crash::{install_crash_capture, write_exit_error};
 pub use error::{Error, Result};

@@ -91,11 +91,6 @@ pub enum Error {
     #[error(transparent)]
     Shim(#[from] bux_shim::Error),
 
-    /// Network backend (gvproxy) error.
-    #[cfg(unix)]
-    #[error(transparent)]
-    Net(#[from] bux_net::NetError),
-
     /// OCI image operation error.
     #[cfg(unix)]
     #[error(transparent)]

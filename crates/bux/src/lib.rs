@@ -39,8 +39,6 @@ mod lifecycle;
 mod log_level;
 mod metrics;
 #[cfg(unix)]
-mod net_manager;
-#[cfg(unix)]
 mod options;
 mod ports;
 #[cfg(unix)]

@@ -1,16 +1,20 @@
 //! Managed boot path: [`VmOptions`] → running [`Vm`].
 //!
-//! Image resolve, overlay, gvproxy, jail spawn, and guest-agent ready wait
-//! live here. Engine JSON is produced only at spawn time.
+//! Image resolve, overlay, jail spawn, and guest-agent ready wait live here.
+//! Engine JSON (`ShimNetwork` + `ShimGvproxy`) is produced only at spawn time.
 
+use std::io::Write;
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::{fs, io};
 
 use bux_jail::JailConfig;
 use bux_proto::{AGENT_PORT, GuestBootConfig, GuestNetworkMode};
-use bux_shim::{ShimConfig, ShimDiskFormat, ShimNetwork, ShimVirtioFs, ShimVsockPort};
+use bux_shim::{
+    ShimConfig, ShimDiskFormat, ShimGvproxy, ShimNetConn, ShimNetwork, ShimVirtioFs, ShimVsockPort,
+};
 use nix::sys::signal;
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::Pid;
@@ -27,7 +31,7 @@ use crate::secrets::{LiveSecrets, Secret};
 use crate::state::{self, Status, VirtioFs, VmConfig, VmState, VsockPort};
 use crate::watchdog::{self, Keepalive};
 
-/// Tears down overlay / gvproxy / secrets / shim / row if spawn fails after overlay.
+/// Tears down overlay / secrets / shim / row if spawn fails after overlay.
 struct SpawnAbort<'a> {
     /// Runtime that owns net, secrets, disk, and state.
     rt: &'a Runtime,
@@ -57,12 +61,11 @@ impl Drop for SpawnAbort<'_> {
     }
 }
 
-/// SIGKILL if spawned, then net/secrets/overlay/volumes/row.
+/// SIGKILL if spawned, then secrets/overlay/volumes/row.
 fn abort_partial_spawn(rt: &Runtime, id: &str, socket: &Path, pid: Option<i32>) {
     if let Some(pid) = pid {
         signal::kill(Pid::from_raw(pid), signal::Signal::SIGKILL).ok();
     }
-    rt.net.stop(id);
     rt.secrets
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -126,7 +129,6 @@ pub(crate) async fn create(
         secrets,
         resolved.image_label,
         opts.name.clone(),
-        !opts.detach,
         opts.auto_remove,
     )?;
 
@@ -162,7 +164,6 @@ pub(crate) fn spawn_config(
     staged_secrets: Vec<Secret>,
     image: Option<String>,
     name: Option<String>,
-    watch_parent: bool,
     auto_remove: bool,
 ) -> Result<Vm> {
     if let Some(ref n) = name
@@ -216,25 +217,8 @@ pub(crate) fn spawn_config(
     let mitm_ca = live_secrets.as_ref().map(|l| l.ca_cert_pem.clone());
     inject_guest_boot_env(&mut config, &id, mitm_ca)?;
 
-    let network = if config.network.is_enabled() {
-        let mut specs = Vec::with_capacity(config.ports.len());
-        for s in &config.ports {
-            specs.push(parse_publish_spec(s)?);
-        }
-        let (pairs, published) = resolve_ports(&specs)?;
-        config.ports = format_port_pairs(&pairs);
-        config.published_ports = published;
-        let net = rt.net.start(
-            &id,
-            pairs,
-            config.network.allow_net().to_vec(),
-            live_secrets.as_ref(),
-        )?;
-        Some(net.shim_network)
-    } else {
-        config.published_ports.clear();
-        None
-    };
+    let (network, gvproxy) =
+        prepare_virtio_net(&id, &rt.socks_dir, &mut config, live_secrets.as_ref())?;
 
     if let Some(live) = live_secrets {
         rt.secrets
@@ -244,14 +228,7 @@ pub(crate) fn spawn_config(
     }
 
     let config_path = rt.socks_dir.join(format!("{id}.json"));
-    let shim = spawn_shim(
-        &config,
-        &config_path,
-        &rt.socks_dir,
-        &id,
-        watch_parent,
-        network,
-    )?;
+    let shim = spawn_shim(&config, &config_path, &rt.socks_dir, &id, network, gvproxy)?;
     abort.pid = Some(shim.pid);
 
     config.security_status = shim.security.clone();
@@ -292,7 +269,6 @@ pub(crate) fn spawn_config(
         std::sync::Arc::clone(&rt.metrics),
         std::sync::Arc::clone(&rt.events),
         rt.snapshots.clone(),
-        std::sync::Arc::clone(&rt.net),
         std::sync::Arc::clone(&rt.secrets),
         rt.volumes.clone(),
     ))
@@ -422,6 +398,7 @@ fn config_from_options(
         auto_stop_secs: opts.auto_stop_secs,
         auto_delete_secs: opts.auto_delete_secs,
         last_activity_at: Some(std::time::SystemTime::now()),
+        detach: opts.detach,
         ..VmConfig::default()
     }
 }
@@ -429,7 +406,12 @@ fn config_from_options(
 /// Map persisted [`VmConfig`] into engine [`ShimConfig`].
 ///
 /// Port publish is gvproxy-only; this mapping never sets a TSI port map.
-fn to_shim_config(vm_id: &str, config: &VmConfig, network: Option<ShimNetwork>) -> ShimConfig {
+fn to_shim_config(
+    vm_id: &str,
+    config: &VmConfig,
+    network: Option<ShimNetwork>,
+    gvproxy: Option<ShimGvproxy>,
+) -> ShimConfig {
     ShimConfig {
         vm_id: vm_id.to_owned(),
         vcpus: config.vcpus,
@@ -458,6 +440,7 @@ fn to_shim_config(vm_id: &str, config: &VmConfig, network: Option<ShimNetwork>) 
             })
             .collect(),
         network,
+        gvproxy,
         log_level: config.log_level.map(|l| l as u32),
         exec_path: config.exec_path.clone(),
         exec_args: config.exec_args.clone(),
@@ -498,6 +481,12 @@ pub(super) fn clean_vm_files(socket: &Path) {
     for ext in ["exit", "json", "stderr"] {
         drop(fs::remove_file(socket.with_extension(ext)));
     }
+    clean_net_sock(socket);
+}
+
+/// `{id}.sock` → `{id}.net.sock`.
+pub(super) fn clean_net_sock(socket: &Path) {
+    drop(fs::remove_file(socket.with_extension("net.sock")));
 }
 
 /// Checks if a process is alive via `kill(pid, 0)`.
@@ -581,27 +570,102 @@ pub(super) fn inject_guest_boot_env(
     Ok(())
 }
 
-/// Writes config JSON, creates watchdog pipe, and spawns `bux-shim` inside a sandbox.
+/// Watchdog, PDEATHSIG, and bwrap `--die-with-parent` follow persisted detach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent spawn flags, not a state machine"
+)]
+pub(super) struct SpawnPolicy {
+    /// Parent keepalive pipe.
+    pub watch_parent: bool,
+    /// `PR_SET_PDEATHSIG` and bwrap `--die-with-parent`.
+    pub die_with_parent: bool,
+    /// Seatbelt host net / Landlock `AccessNet`.
+    pub network_host: bool,
+}
+
+/// Isolation flags for every spawn (`create` and `start_with`).
+#[must_use]
+pub(super) const fn spawn_policy(config: &VmConfig) -> SpawnPolicy {
+    SpawnPolicy {
+        watch_parent: !config.detach,
+        die_with_parent: !config.detach,
+        network_host: config.network.is_enabled(),
+    }
+}
+
+/// Build virtio-net JSON for the shim binary. Both `Some` or both `None`.
+pub(super) fn prepare_virtio_net(
+    id: &str,
+    socks_dir: &Path,
+    config: &mut VmConfig,
+    live: Option<&LiveSecrets>,
+) -> Result<(Option<ShimNetwork>, Option<ShimGvproxy>)> {
+    if !config.network.is_enabled() {
+        config.published_ports.clear();
+        return Ok((None, None));
+    }
+
+    let mut specs = Vec::with_capacity(config.ports.len());
+    for s in &config.ports {
+        specs.push(parse_publish_spec(s)?);
+    }
+    let (pairs, published) = resolve_ports(&specs)?;
+    config.ports = format_port_pairs(&pairs);
+    config.published_ports = published;
+
+    let socket_path = socks_dir.join(format!("{id}.net.sock"));
+    if socket_path.exists() {
+        fs::remove_file(&socket_path)?;
+    }
+
+    let network = ShimNetwork {
+        socket_path,
+        connection: if cfg!(target_os = "macos") {
+            ShimNetConn::UnixDgram
+        } else {
+            ShimNetConn::UnixStream
+        },
+        mac: bux_proto::net::GUEST_MAC,
+    };
+    let gvproxy = ShimGvproxy {
+        port_mappings: pairs,
+        allow_net: config.network.allow_net().to_vec(),
+        secrets: live.map(LiveSecrets::to_shim_secrets).unwrap_or_default(),
+        ca_cert_pem: live.map(|l| l.ca_cert_pem.clone()).unwrap_or_default(),
+        ca_key_pem: live.map(|l| l.ca_key_pem.clone()).unwrap_or_default(),
+    };
+    Ok((Some(network), Some(gvproxy)))
+}
+
+/// Writes config JSON (mode 0o600), creates watchdog pipe, and spawns `bux-shim`.
 ///
-/// `network`: when `Some`, shim attaches virtio-net (gvproxy); when `None`, offline.
+/// `network` / `gvproxy` are both `Some` (virtio-net) or both `None` (offline).
 pub(super) fn spawn_shim(
     config: &VmConfig,
     config_path: &Path,
     socks_dir: &Path,
     vm_id: &str,
-    watch_parent: bool,
     network: Option<ShimNetwork>,
+    gvproxy: Option<ShimGvproxy>,
 ) -> Result<ShimSpawnResult> {
-    let shim_cfg = to_shim_config(vm_id, config, network);
+    if network.is_some() != gvproxy.is_some() {
+        return Err(crate::Error::InvalidConfig(
+            "gvproxy and network must both be set or both absent".into(),
+        ));
+    }
+    let policy = spawn_policy(config);
+    let shim_cfg = to_shim_config(vm_id, config, network, gvproxy);
     let json = shim_cfg
         .to_json()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    fs::write(config_path, &json)?;
+    write_shim_json(config_path, &json)?;
 
     let stderr_path = config_path.with_extension("stderr");
     let stderr_file = fs::File::create(&stderr_path)?;
 
-    let (shim_wd_fd, keepalive) = if watch_parent {
+    let (shim_wd_fd, keepalive) = if policy.watch_parent {
         let (fd, keepalive) = watchdog::create()?;
         (Some(fd), Some(keepalive))
     } else {
@@ -640,6 +704,8 @@ pub(super) fn spawn_shim(
         stderr_file: Some(stderr_file),
         landlock: sec.landlock,
         allow_degraded_security: sec.allow_degraded,
+        die_with_parent: policy.die_with_parent,
+        network_host: policy.network_host,
     };
 
     let result = bux_jail::spawn(&shim, config_path, jail_config, vm_id).map_err(|e| {
@@ -659,6 +725,19 @@ pub(super) fn spawn_shim(
         keepalive,
         security: crate::security::SecurityStatus::from_report(&result.security),
     })
+}
+
+/// Write shim JSON with mode 0o600.
+fn write_shim_json(path: &Path, json: &[u8]) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(json)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(())
 }
 
 /// Map jail errors to product errors (preserve K22 fail-closed).
@@ -784,12 +863,72 @@ mod tests {
     #[test]
     fn to_shim_config_offline_has_no_network() {
         let cfg = VmConfig::default();
-        let shim = to_shim_config("vm1", &cfg, None);
+        let shim = to_shim_config("vm1", &cfg, None, None);
         assert!(shim.network.is_none());
+        assert!(shim.gvproxy.is_none());
         assert!(shim.uid.is_none());
         assert!(shim.gid.is_none());
         assert!(shim.rlimits.is_empty());
         assert!(shim.workdir.is_none());
+    }
+
+    #[test]
+    fn detach_from_options_disables_parent_death() {
+        let opts = VmOptions::from_image("alpine").detach(true);
+        let cfg = config_from_options(&opts, None, None, vec![]);
+        assert!(cfg.detach);
+        let policy = spawn_policy(&cfg);
+        assert!(!policy.watch_parent);
+        assert!(!policy.die_with_parent);
+        assert!(policy.network_host);
+    }
+
+    #[test]
+    fn start_with_of_detached_row_does_not_rearm_parent_death() {
+        let cfg = VmConfig {
+            detach: true,
+            network: NetworkSpec::Disabled,
+            ..VmConfig::default()
+        };
+        let policy = spawn_policy(&cfg);
+        assert!(!policy.watch_parent);
+        assert!(!policy.die_with_parent);
+        assert!(!policy.network_host);
+    }
+
+    #[test]
+    fn prepare_virtio_net_both_none_when_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = VmConfig {
+            network: NetworkSpec::Disabled,
+            ..VmConfig::default()
+        };
+        let (net, gvp) = prepare_virtio_net("abc", dir.path(), &mut cfg, None).unwrap();
+        assert!(net.is_none());
+        assert!(gvp.is_none());
+    }
+
+    #[test]
+    fn prepare_virtio_net_both_some_when_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = VmConfig {
+            network: NetworkSpec::Enabled {
+                allow_net: vec!["example.com".into()],
+            },
+            ports: vec!["18080:80".into()],
+            ..VmConfig::default()
+        };
+        let (net, gvp) = prepare_virtio_net("abc", dir.path(), &mut cfg, None).unwrap();
+        let net = net.expect("network");
+        let gvp = gvp.expect("gvproxy");
+        assert_eq!(net.socket_path, dir.path().join("abc.net.sock"));
+        assert_eq!(net.mac, bux_proto::net::GUEST_MAC);
+        assert_eq!(gvp.port_mappings, vec![(18080, 80)]);
+        assert_eq!(gvp.allow_net, vec!["example.com".to_owned()]);
+        #[cfg(target_os = "macos")]
+        assert_eq!(net.connection, ShimNetConn::UnixDgram);
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(net.connection, ShimNetConn::UnixStream);
     }
 
     #[test]

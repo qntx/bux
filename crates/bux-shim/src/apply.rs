@@ -1,7 +1,7 @@
 //! Apply [`ShimConfig`] to a libkrun context and start the VM.
 //!
-//! Single code path used by the `bux-shim` binary and by host-side
-//! builders that prepare a context without process takeover.
+//! Product callers are [`prepare`] / optional [`install_seccomp`] / [`start`].
+//! This module never constructs gvproxy.
 
 use bux_krun::ctx as sys;
 
@@ -91,24 +91,10 @@ pub fn start(ctx: u32) -> Result<()> {
     Ok(sys::start_enter(ctx)?)
 }
 
-/// `prepare`, install default seccomp, then `start`. Never returns on success.
-///
-/// Seccomp is installed after libkrun `prepare()` (context fully configured)
-/// and before `krun_start_enter` process takeover.
-///
-/// # Errors
-///
-/// Propagates prepare, seccomp, or start errors. Seccomp install failure
-/// is fail-closed on Linux `x86_64`/`aarch64`.
-pub fn boot(cfg: &ShimConfig) -> Result<()> {
-    let prepared = prepare(cfg)?;
-    install_seccomp()?;
-    prepared.start()
-}
-
 /// Install the default seccomp BPF filter (Linux `x86_64`/`aarch64`).
 ///
-/// Other platforms: no-op.
+/// Other platforms: no-op. The `bux-shim` binary skips this when gvproxy
+/// is in-process.
 ///
 /// # Errors
 ///
@@ -118,7 +104,7 @@ pub fn boot(cfg: &ShimConfig) -> Result<()> {
     clippy::unnecessary_wraps,
     reason = "Result/errors only arise on Linux x86_64/aarch64; other platforms no-op"
 )]
-fn install_seccomp() -> Result<()> {
+pub fn install_seccomp() -> Result<()> {
     #[cfg(all(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
@@ -175,13 +161,18 @@ fn apply_all(ctx: u32, cfg: &ShimConfig) -> Result<()> {
     // `network=None` still auto-enables libkrun TSI (known D2).
     // PR2: `disable_implicit_vsock` + `add_vsock(0)` on this branch.
     if let Some(ref net) = cfg.network {
+        const FEATURES: u32 = bux_krun::sys::COMPAT_NET_FEATURES;
+        let flags = match net.connection {
+            ShimNetConn::UnixDgram => bux_krun::sys::NET_FLAG_VFKIT,
+            ShimNetConn::UnixStream => 0,
+        };
         let path = net.socket_path.to_string_lossy();
         match net.connection {
             ShimNetConn::UnixStream => {
-                sys::add_net_unixstream(ctx, Some(path.as_ref()), -1, &net.mac, 0, 0)?;
+                sys::add_net_unixstream(ctx, Some(path.as_ref()), -1, &net.mac, FEATURES, flags)?;
             }
             ShimNetConn::UnixDgram => {
-                sys::add_net_unixgram(ctx, Some(path.as_ref()), -1, &net.mac, 0, 0)?;
+                sys::add_net_unixgram(ctx, Some(path.as_ref()), -1, &net.mac, FEATURES, flags)?;
             }
         }
     }

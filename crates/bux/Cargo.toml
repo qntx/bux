@@ -21,8 +21,9 @@ tracing.workspace = true
 bux-cgroup.workspace = true
 bux-e2fs.workspace = true
 bux-jail.workspace = true
-bux-net.workspace = true
 bux-oci.workspace = true
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+time = "0.3"
 bux-qcow2.workspace = true
 bux-shim.workspace = true
 dirs.workspace = true

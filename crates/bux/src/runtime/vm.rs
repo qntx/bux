@@ -14,17 +14,16 @@ use tracing::info;
 
 use super::HealthStatus;
 use super::boot::{
-    clean_vm_files, inject_guest_boot_env, is_pid_alive, prepare_restart_config,
-    shim_death_message, spawn_shim, wait_for_exit,
+    clean_net_sock, clean_vm_files, inject_guest_boot_env, is_pid_alive, prepare_restart_config,
+    prepare_virtio_net, shim_death_message, spawn_shim, wait_for_exit,
 };
 use crate::Result;
 use crate::client::{Client, ExecHandle, ExecOutput, PongInfo};
 use crate::disk::DiskManager;
 use crate::events::{AuditEvent, AuditEventKind, EventDispatcher};
 use crate::metrics::{RuntimeMetrics, VmMetrics};
-use crate::net_manager::NetworkManager;
 use crate::options::NetworkSpec;
-use crate::ports::{PublishedPort, format_port_pairs, parse_publish_spec, resolve_ports};
+use crate::ports::PublishedPort;
 use crate::process::{PHASE_A_LIMITS, apply_workload_defaults};
 use crate::secrets::{LiveSecrets, StartOptions};
 use crate::security::{SecurityOptions, SecurityStatus};
@@ -118,8 +117,6 @@ pub struct Vm {
     events: Arc<EventDispatcher>,
     /// Snapshot manager (shared with Runtime).
     snapshots: SnapshotManager,
-    /// Network manager (shared with Runtime).
-    net: Arc<NetworkManager>,
     /// Memory-only secrets map (shared with Runtime).
     secrets: Arc<Mutex<HashMap<String, LiveSecrets>>>,
     /// Named volumes (shared with Runtime); used by abort cleanup.
@@ -142,7 +139,6 @@ impl Vm {
         runtime_metrics: Arc<RuntimeMetrics>,
         events: Arc<EventDispatcher>,
         snapshots: SnapshotManager,
-        net: Arc<NetworkManager>,
         secrets: Arc<Mutex<HashMap<String, LiveSecrets>>>,
         volumes: VolumeManager,
     ) -> Self {
@@ -157,7 +153,6 @@ impl Vm {
             metrics: VmMetrics::new(),
             events,
             snapshots,
-            net,
             secrets,
             volumes,
             spawned_at: std::time::Instant::now(),
@@ -184,7 +179,6 @@ impl Vm {
     /// Tear down a VM that never became ready (create failure).
     pub(super) fn abort_unready(&mut self) {
         signal::kill(Pid::from_raw(self.state.pid), Signal::SIGKILL).ok();
-        self.net.stop(&self.state.id);
         self.secrets
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -499,45 +493,31 @@ impl Vm {
         let mitm_ca = live.as_ref().map(|l| l.ca_cert_pem.clone());
         inject_guest_boot_env(&mut self.state.config, &self.state.id, mitm_ca)?;
 
-        let network = if self.state.config.network.is_enabled() {
-            let mut specs = Vec::with_capacity(self.state.config.ports.len());
-            for s in &self.state.config.ports {
-                specs.push(parse_publish_spec(s)?);
-            }
-            let (pairs, published) = resolve_ports(&specs)?;
-            self.state.config.ports = format_port_pairs(&pairs);
-            self.state.config.published_ports = published;
-            let net = self.net.start(
-                &self.state.id,
-                pairs,
-                self.state.config.network.allow_net().to_vec(),
-                live.as_ref(),
-            )?;
-            Some(net.shim_network)
-        } else {
-            self.state.config.published_ports.clear();
-            None
-        };
+        let socks_dir = self
+            .state
+            .socket
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let (network, gvproxy) = prepare_virtio_net(
+            &self.state.id,
+            &socks_dir,
+            &mut self.state.config,
+            live.as_ref(),
+        )?;
 
         let config_path = self
             .state
             .socket
             .with_file_name(format!("{}.json", self.state.id));
-        let socks_dir = self.state.socket.parent().unwrap_or_else(|| Path::new("."));
-        let shim = match spawn_shim(
+        let shim = spawn_shim(
             &self.state.config,
             &config_path,
-            socks_dir,
+            &socks_dir,
             &self.state.id,
-            true,
             network,
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                self.net.stop(&self.state.id);
-                return Err(e);
-            }
-        };
+            gvproxy,
+        )?;
 
         self.state.config.security_status = shim.security.clone();
         if let Err(e) = self
@@ -827,7 +807,7 @@ impl Vm {
     /// `update_status(Stopped)` covers a pid row that already landed.
     fn revert_failed_start(&mut self, pid: i32) {
         signal::kill(Pid::from_raw(pid), Signal::SIGKILL).ok();
-        self.net.stop(&self.state.id);
+        clean_net_sock(&self.state.socket);
         self.state.status = Status::Stopped;
         drop(self.db.update_status(&self.state.id, Status::Stopped));
     }
@@ -836,7 +816,7 @@ impl Vm {
     /// deletes the VM record, socket, and disk image.
     fn mark_stopped(&mut self) -> Result<()> {
         self.state.status = Status::Stopped;
-        self.net.stop(&self.state.id);
+        clean_net_sock(&self.state.socket);
 
         let uptime_ms = u64::try_from(self.spawned_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.runtime_metrics.on_vm_stopped(uptime_ms);

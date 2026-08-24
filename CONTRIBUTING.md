@@ -3,7 +3,7 @@
 ## Build
 
 ```bash
-cargo build -p bux -p bux-cli -p bux-shim
+cargo build -p bux-cli -p bux-shim-bin
 # Linux guest agent (static musl recommended for rootfs injection):
 cargo build -p bux-guest --target aarch64-unknown-linux-musl   # or x86_64-...
 ```
@@ -31,7 +31,7 @@ bux system info --format json
 
 - Product entry: `Runtime` + `Vm` + `VmOptions` (`crates/bux`).
 - Engine boundary: product `VmConfig` → `ShimConfig` → `bux-shim` → libkrun.
-- Managed network: gvproxy virtio-net owned by Runtime (known D1); no TSI `set_port_map`.
+- Managed network: gvproxy virtio-net in the `bux-shim` process (`bux-shim-bin`); no TSI `set_port_map`.
 - Guest agent: postcard protocol v9; Phase A process identity only.
 - Schema: SQLite `user_version` 4 — **no migrations**; wipe `BUX_HOME` on mismatch.
 

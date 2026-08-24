@@ -122,7 +122,7 @@ pub struct VmOptions {
     pub auto_remove: bool,
     /// Wait for guest agent after create (`Duration::ZERO` = skip).
     pub ready_timeout: Duration,
-    /// Detach: do not watch parent process (survives Runtime drop of keepalive).
+    /// Detach: persist so create/restart skip watchdog, parent-death, and Runtime Drop SIGTERM.
     pub detach: bool,
     /// Isolation policy (Landlock / jailer). Default: fail-closed Landlock on Linux.
     pub security: SecurityOptions,
@@ -255,7 +255,7 @@ impl VmOptions {
         self
     }
 
-    /// Detached spawn (no parent watchdog).
+    /// Detached spawn (no watchdog / parent-death; survives Runtime Drop).
     #[must_use]
     pub const fn detach(mut self, yes: bool) -> Self {
         self.detach = yes;

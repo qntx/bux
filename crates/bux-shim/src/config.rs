@@ -4,6 +4,7 @@
 //! converts product `VmConfig` into [`ShimConfig`] in the `bux` crate —
 //! the shim never depends on `bux`.
 
+use std::fmt;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -71,6 +72,69 @@ pub enum ShimNetConn {
     UnixDgram,
 }
 
+/// Data for the `bux-shim` binary to start gvproxy. Ignored by [`crate::prepare`].
+///
+/// Types live here so the `bux-shim` library does not depend on `bux-gvproxy`.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShimGvproxy {
+    /// Concrete `(host, guest)` TCP publish pairs.
+    #[serde(default)]
+    pub port_mappings: Vec<(u16, u16)>,
+    /// Egress allow-list. Empty = unrestricted.
+    #[serde(default)]
+    pub allow_net: Vec<String>,
+    /// MITM secrets. Empty = no MITM.
+    #[serde(default)]
+    pub secrets: Vec<ShimSecret>,
+    /// PEM-encoded MITM CA certificate. Empty when secrets unused.
+    #[serde(default)]
+    pub ca_cert_pem: String,
+    /// PEM-encoded MITM CA private key. Empty when secrets unused.
+    #[serde(default)]
+    pub ca_key_pem: String,
+}
+
+impl fmt::Debug for ShimGvproxy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ShimGvproxy")
+            .field("port_mappings", &self.port_mappings)
+            .field("allow_net", &self.allow_net)
+            .field("secrets", &self.secrets)
+            .field(
+                "ca_cert_pem",
+                &format!("<{} bytes>", self.ca_cert_pem.len()),
+            )
+            .field("ca_key_pem", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Secret placeholder substitution for gvproxy MITM (host-side only).
+///
+/// Mapped to `bux_gvproxy::SecretConfig` in the `bux-shim` binary crate.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShimSecret {
+    /// Logical secret name.
+    pub name: String,
+    /// Hostnames (SNI / Host) this secret applies to.
+    pub hosts: Vec<String>,
+    /// Placeholder string that appears in guest traffic.
+    pub placeholder: String,
+    /// Real secret value — never logged.
+    pub value: String,
+}
+
+impl fmt::Debug for ShimSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ShimSecret")
+            .field("name", &self.name)
+            .field("hosts", &self.hosts)
+            .field("placeholder", &self.placeholder)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// Complete configuration applied by the shim to libkrun.
 ///
 /// Written as JSON by Runtime; consumed only by `bux-shim`.
@@ -106,6 +170,10 @@ pub struct ShimConfig {
     /// Optional virtio-net (gvproxy). `None` = offline (no NIC).
     #[serde(default)]
     pub network: Option<ShimNetwork>,
+
+    /// Optional gvproxy start data for the binary. Must be `Some` iff [`Self::network`] is `Some`.
+    #[serde(default)]
+    pub gvproxy: Option<ShimGvproxy>,
 
     /// libkrun log level as raw u32 (matches krun enum).
     #[serde(default)]
@@ -198,6 +266,7 @@ mod tests {
                 listen: true,
             }],
             network: None,
+            gvproxy: None,
             log_level: Some(3),
             exec_path: Some("/bux/bin/bux-guest".into()),
             exec_args: vec![],
@@ -234,6 +303,18 @@ mod tests {
                 connection: ShimNetConn::UnixStream,
                 mac: [0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee],
             }),
+            gvproxy: Some(ShimGvproxy {
+                port_mappings: vec![(8080, 80)],
+                allow_net: vec!["example.com".into()],
+                secrets: vec![ShimSecret {
+                    name: "TOKEN".into(),
+                    hosts: vec!["api.example.com".into()],
+                    placeholder: "<BUX_SECRET:TOKEN>".into(),
+                    value: "must-not-appear".into(),
+                }],
+                ca_cert_pem: "CERT".into(),
+                ca_key_pem: "KEY".into(),
+            }),
             log_level: None,
             exec_path: None,
             exec_args: vec![],
@@ -250,5 +331,23 @@ mod tests {
         let net = de.network.unwrap();
         assert_eq!(net.connection, ShimNetConn::UnixStream);
         assert_eq!(net.mac[5], 0xee);
+        let gvp = de.gvproxy.unwrap();
+        assert_eq!(gvp.port_mappings, vec![(8080, 80)]);
+        assert_eq!(
+            gvp.secrets.first().map(|s| s.value.as_str()),
+            Some("must-not-appear")
+        );
+        let dbg = format!("{gvp:?}");
+        assert!(dbg.contains("REDACTED"), "{dbg}");
+        assert!(!dbg.contains("must-not-appear"), "{dbg}");
+        assert!(!dbg.contains("KEY"), "{dbg}");
+    }
+
+    #[test]
+    fn gvproxy_absent_in_json_is_none() {
+        let json = br#"{"vcpus":1,"ram_mib":256,"rootfs":"/r"}"#;
+        let cfg = ShimConfig::from_json(json).unwrap();
+        assert!(cfg.gvproxy.is_none());
+        assert!(cfg.network.is_none());
     }
 }

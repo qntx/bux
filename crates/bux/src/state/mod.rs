@@ -247,6 +247,10 @@ pub(crate) struct VmConfig {
     /// Last fatal/recoverable error message (e.g. secrets re-supply required).
     #[serde(default)]
     pub last_error: Option<String>,
+
+    /// Detached VM: no watchdog, no parent-death, Runtime Drop does not SIGTERM.
+    #[serde(default)]
+    pub detach: bool,
 }
 
 impl Default for VmConfig {
@@ -279,6 +283,7 @@ impl Default for VmConfig {
             auto_delete_secs: None,
             last_activity_at: None,
             last_error: None,
+            detach: false,
         }
     }
 }

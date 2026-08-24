@@ -227,19 +227,20 @@ dependencies = [
  "bux-cgroup",
  "bux-e2fs",
  "bux-jail",
- "bux-net",
  "bux-oci",
  "bux-proto",
  "bux-qcow2",
  "bux-shim",
  "dirs",
  "nix 0.31.2",
+ "rcgen",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
+ "time",
  "tokio",
  "tracing",
 ]
@@ -409,6 +410,14 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "bux-shim-bin"
+version = "0.1.0"
+dependencies = [
+ "bux-gvproxy",
+ "bux-shim",
 ]
 
 [[package]]

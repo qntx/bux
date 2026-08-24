@@ -1,7 +1,7 @@
 # bux-shim
 
-Owns the **engine boundary**: serializable [`ShimConfig`] applied to libkrun,
-plus the `bux-shim` binary that takes over the process via `krun_start_enter`.
+Owns the **engine boundary**: serializable [`ShimConfig`] applied to libkrun.
+The process-takeover binary lives in `bux-shim-bin` (`[[bin]] name = "bux-shim"`).
 
 ## Why a separate crate
 
@@ -26,8 +26,8 @@ Optional env: `BUX_WATCHDOG_FD=<fd>` (read end of parent keepalive pipe).
 | Item | Role |
 |------|------|
 | `ShimConfig` | serde JSON config for the engine |
-| `prepare` | create libkrun ctx + apply config |
+| `prepare` | create libkrun ctx + apply config (never starts gvproxy) |
+| `install_seccomp` | default VMM seccomp (binary skips this when gvproxy is in-process) |
 | `start` | `krun_start_enter` (never returns on success) |
-| `boot` | `prepare` + seccomp + `start` |
 | `host` | host-side libkrun probes |
 | `ExitInfo` | crash diagnostics JSON |

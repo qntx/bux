@@ -108,6 +108,10 @@ impl Sandbox for NoopSandbox {
 /// Constructed by the Runtime (or tests). Not `non_exhaustive` so
 /// in-workspace callers can fill all fields explicitly without a builder.
 #[derive(Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "isolation flags are independent booleans, not a state machine"
+)]
 pub struct JailConfig {
     /// Path to the rootfs directory (if using directory-based root).
     pub rootfs: Option<PathBuf>,
@@ -137,6 +141,14 @@ pub struct JailConfig {
     pub landlock: bool,
     /// If true, missing Landlock (when requested) degrades instead of failing.
     pub allow_degraded_security: bool,
+    /// Kill the child when the parent dies (`PR_SET_PDEATHSIG` and bwrap `--die-with-parent`).
+    ///
+    /// Default true. False when the VM is detached.
+    pub die_with_parent: bool,
+    /// Allow host networking inside the jail (gvproxy bind, DNS, resolver files).
+    ///
+    /// True when the VM uses virtio-net.
+    pub network_host: bool,
 }
 
 /// Result of spawning a shim process inside a sandbox.
@@ -179,6 +191,7 @@ pub fn spawn(
 
     let watchdog_fd = config.watchdog_fd;
     let resource_limits = config.resource_limits;
+    let die_with_parent = config.die_with_parent;
     if let Some(file) = config.stderr_file {
         cmd.stderr(Stdio::from(file));
     }
@@ -193,6 +206,7 @@ pub fn spawn(
             watchdog: watchdog_fd,
             landlock: landlock_fd,
         },
+        die_with_parent,
     );
     let child = cmd.spawn()?;
 

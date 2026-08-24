@@ -13,36 +13,21 @@ use std::time::{Duration, SystemTime};
 pub(crate) enum RecoverAction {
     /// PID is dead — mark stopped (optionally auto-remove).
     MarkDeadStopped,
-    /// PID alive but secrets cannot be rehydrated — SIGTERM and mark stopped (K28).
-    FailClosedSecrets,
-    /// PID alive, virtio-net, no secrets — rebuild gvproxy on the net socket.
-    ReattachNetwork,
-    /// PID alive, network disabled — leave process; vsock reattach only.
+    /// PID alive — leave the shim (it owns gvproxy and secrets); vsock reattach only.
     ReattachVsockOnly,
 }
 
 /// Decide recovery action for an active-status VM row (unit-testable).
+///
+/// A live shim owns networking and MITM secrets. Do not SIGTERM it.
 #[must_use]
-pub(crate) const fn recover_action(
-    pid_alive: bool,
-    secrets_required: bool,
-    network_enabled: bool,
-) -> RecoverAction {
-    if !pid_alive {
-        return RecoverAction::MarkDeadStopped;
+pub(crate) const fn recover_action(pid_alive: bool) -> RecoverAction {
+    if pid_alive {
+        RecoverAction::ReattachVsockOnly
+    } else {
+        RecoverAction::MarkDeadStopped
     }
-    if secrets_required {
-        return RecoverAction::FailClosedSecrets;
-    }
-    if network_enabled {
-        return RecoverAction::ReattachNetwork;
-    }
-    RecoverAction::ReattachVsockOnly
 }
-
-/// Human-readable message stored in `last_error` after secrets fail-closed recovery.
-pub(crate) const SECRETS_RESUPPLY_ERROR: &str =
-    "secrets re-supply required: call start_with(StartOptions { secrets, .. })";
 
 /// Whether idle duration has exceeded the policy threshold.
 #[must_use]
@@ -82,39 +67,12 @@ mod tests {
 
     #[test]
     fn recover_dead() {
-        assert_eq!(
-            recover_action(false, true, true),
-            RecoverAction::MarkDeadStopped
-        );
+        assert_eq!(recover_action(false), RecoverAction::MarkDeadStopped);
     }
 
     #[test]
-    fn recover_secrets_fail_closed() {
-        assert_eq!(
-            recover_action(true, true, true),
-            RecoverAction::FailClosedSecrets
-        );
-        // Secrets required always wins over reattach.
-        assert_eq!(
-            recover_action(true, true, false),
-            RecoverAction::FailClosedSecrets
-        );
-    }
-
-    #[test]
-    fn recover_reattach_net() {
-        assert_eq!(
-            recover_action(true, false, true),
-            RecoverAction::ReattachNetwork
-        );
-    }
-
-    #[test]
-    fn recover_vsock_only() {
-        assert_eq!(
-            recover_action(true, false, false),
-            RecoverAction::ReattachVsockOnly
-        );
+    fn recover_live_shim_including_secrets_is_vsock_only() {
+        assert_eq!(recover_action(true), RecoverAction::ReattachVsockOnly);
     }
 
     #[test]

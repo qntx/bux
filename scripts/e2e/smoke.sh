@@ -16,7 +16,7 @@ echo "==> BUX_HOME=${BUX_HOME}"
 
 if ! command -v bux >/dev/null 2>&1; then
   echo "building bux-cli..."
-  cargo build -q -p bux-cli -p bux-shim --manifest-path "${ROOT}/Cargo.toml"
+  cargo build -q -p bux-cli -p bux-shim-bin --manifest-path "${ROOT}/Cargo.toml"
   export PATH="${ROOT}/target/debug:${PATH}"
 fi
 
