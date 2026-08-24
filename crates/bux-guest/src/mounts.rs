@@ -82,10 +82,10 @@ pub fn mount_essential_tmpfs() {
 
         let _ = fs::create_dir_all(path);
 
-        let Ok(target) = std::ffi::CString::new(m.path) else {
+        let Ok(target) = CString::new(m.path) else {
             continue;
         };
-        let Ok(fstype) = std::ffi::CString::new("tmpfs") else {
+        let Ok(fstype) = CString::new("tmpfs") else {
             continue;
         };
 
@@ -122,6 +122,7 @@ pub fn mount_virtiofs_volumes(volumes: &[GuestVolume]) -> io::Result<()> {
     Ok(())
 }
 
+/// Mount one virtio-fs tag at `vol.guest_path`.
 fn mount_virtiofs_volume(vol: &GuestVolume) -> io::Result<()> {
     vol.validate().map_err(io::Error::other)?;
     fs::create_dir_all(&vol.guest_path).map_err(|e| {
@@ -216,7 +217,7 @@ pub fn freeze_filesystems() -> Vec<PathBuf> {
         if ret == 0 {
             frozen.push(PathBuf::from(mount_point));
         } else {
-            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
             // EBUSY = already frozen → count as success.
             if errno == libc::EBUSY {
                 frozen.push(PathBuf::from(mount_point));
