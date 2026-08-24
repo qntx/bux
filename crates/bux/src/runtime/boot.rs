@@ -11,7 +11,7 @@ use std::time::Duration;
 use std::{fs, io};
 
 use bux_jail::JailConfig;
-use bux_proto::{AGENT_PORT, GuestBootConfig, GuestNetworkMode};
+use bux_proto::{AGENT_PORT, GuestBootConfig, GuestNetworkMode, GuestVolume};
 use bux_shim::{
     ShimConfig, ShimDiskFormat, ShimGvproxy, ShimNetConn, ShimNetwork, ShimVirtioFs, ShimVsockPort,
 };
@@ -550,7 +550,7 @@ fn apply_guest_pid1(config: &mut VmConfig) -> Result<()> {
     Ok(())
 }
 
-/// Inject `BUX_GUEST_CONFIG` for the guest agent (network mode + optional MITM CA).
+/// Inject `BUX_GUEST_CONFIG` (network, optional MITM CA, virtio-fs mount table).
 pub(super) fn inject_guest_boot_env(
     config: &mut VmConfig,
     vm_id: &str,
@@ -563,6 +563,15 @@ pub(super) fn inject_guest_boot_env(
     };
     let mut boot = GuestBootConfig::new(vm_id, mode);
     boot.mitm_ca_pem = mitm_ca_pem;
+    boot.volumes = config
+        .virtiofs
+        .iter()
+        .map(|v| GuestVolume {
+            tag: v.tag.clone(),
+            guest_path: v.guest_path.clone(),
+            read_only: v.read_only,
+        })
+        .collect();
     let entry = boot
         .to_env_assignment()
         .map_err(crate::Error::InvalidConfig)?;
@@ -960,11 +969,37 @@ mod tests {
         inject_guest_boot_env(&mut cfg, "abc", None).unwrap();
         let env = cfg.env.expect("boot env");
         assert_eq!(env.len(), 1);
-        assert!(
-            env.first()
-                .expect("boot env")
-                .starts_with(&format!("{GUEST_BOOT_CONFIG_ENV}="))
-        );
+        let assignment = env.first().expect("boot env");
+        assert!(assignment.starts_with(&format!("{GUEST_BOOT_CONFIG_ENV}=")));
+        let json = assignment
+            .strip_prefix(&format!("{GUEST_BOOT_CONFIG_ENV}="))
+            .expect("boot env prefix");
+        let boot: GuestBootConfig = serde_json::from_str(json).unwrap();
+        assert!(boot.volumes.is_empty());
+    }
+
+    #[test]
+    fn guest_boot_env_includes_virtiofs_volumes() {
+        let mut cfg = VmConfig {
+            virtiofs: vec![VirtioFs {
+                tag: "vol0".into(),
+                path: "/host/data".into(),
+                guest_path: "/data".into(),
+                read_only: true,
+            }],
+            ..VmConfig::default()
+        };
+        inject_guest_boot_env(&mut cfg, "abc", None).unwrap();
+        let assignment = cfg.env.expect("boot env").into_iter().next().expect("env");
+        let json = assignment
+            .strip_prefix(&format!("{GUEST_BOOT_CONFIG_ENV}="))
+            .expect("boot env prefix");
+        let boot: GuestBootConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(boot.volumes.len(), 1);
+        let vol = boot.volumes.first().expect("one volume");
+        assert_eq!(vol.tag, "vol0");
+        assert_eq!(vol.guest_path, "/data");
+        assert!(vol.read_only);
     }
 
     #[test]

@@ -24,7 +24,7 @@ pub fn uptime_ms() -> u64 {
     BOOT_T0.get().map_or(0, |t| t.elapsed().as_millis() as u64)
 }
 
-/// Entry point: mounts tmpfs, configures network from boot config, binds vsock.
+/// Entry point: tmpfs, net, MITM CA, virtio-fs volumes, then vsock listen.
 pub async fn run() -> io::Result<()> {
     BOOT_T0.set(Instant::now()).ok();
     eprintln!("[bux-guest] T+0ms: starting");
@@ -69,6 +69,15 @@ pub async fn run() -> io::Result<()> {
     if let Some(ref pem) = boot.mitm_ca_pem {
         ca_trust::install_mitm_ca(pem)?;
         eprintln!("[bux-guest] T+{}ms: MITM CA installed", uptime_ms());
+    }
+
+    mounts::mount_virtiofs_volumes(&boot.volumes)?;
+    if !boot.volumes.is_empty() {
+        eprintln!(
+            "[bux-guest] T+{}ms: virtiofs volumes mounted ({})",
+            uptime_ms(),
+            boot.volumes.len()
+        );
     }
 
     let addr = tokio_vsock::VsockAddr::new(libc::VMADDR_CID_ANY, AGENT_PORT);

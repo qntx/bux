@@ -317,21 +317,7 @@ pub fn validate_volume_name(name: &str) -> Result<()> {
 
 /// Validate guest path (absolute, no `..`).
 fn validate_guest_path(guest: &str) -> Result<()> {
-    if guest.is_empty() {
-        return Err(Error::InvalidConfig("guest_path must not be empty".into()));
-    }
-    if !guest.starts_with('/') {
-        return Err(Error::InvalidConfig(format!(
-            "guest_path must be absolute: {guest:?}"
-        )));
-    }
-    let p = Path::new(guest);
-    if p.components().any(|c| matches!(c, Component::ParentDir)) {
-        return Err(Error::InvalidConfig(format!(
-            "guest_path must not contain '..': {guest:?}"
-        )));
-    }
-    Ok(())
+    bux_proto::validate_guest_mount_path(guest).map_err(Error::InvalidConfig)
 }
 
 /// Validate a bind-mount host path: exists, is dir, no escape, not sensitive.
