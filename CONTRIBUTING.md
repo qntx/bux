@@ -74,7 +74,8 @@ not use zig cc. Linux FULL may `cargo build -p bux-guest --target
 $ARCH-unknown-linux-musl` only when `musl-gcc` and that rustc target are already
 present; the ELF must still pass validation (64-bit LE, host guest arch
 x86_64/aarch64, no `PT_INTERP`). Missing or dynamic ELF exits before `bux
-create`.
+create`. FULL needs python3 for the guest ELF validator and Go for
+`bux-shim-bin`; Darwin FULL still needs `BUX_GUEST_PATH`.
 
 Pin `$BUX_E2E_IMAGE` if alpine wget/httpd is missing. There is no in-repo
 custom e2e image.
