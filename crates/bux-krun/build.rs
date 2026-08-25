@@ -72,6 +72,7 @@ fn main() {
     }
 
     let lib_dir = obtain_libraries(&target, &out_dir);
+    stage_libraries_beside_binaries(&lib_dir, &target, &out_dir);
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=dylib=krun");
     println!("cargo:LIB_DIR={}", lib_dir.display());
@@ -170,6 +171,83 @@ fn lib_filename(target: &str) -> &'static str {
     }
 }
 
+/// `OUT_DIR` ancestor named `$PROFILE` is the cargo bin dir (native or `--target`).
+fn profile_bin_dir(out_dir: &Path, profile: &str) -> PathBuf {
+    out_dir
+        .ancestors()
+        .find(|path| path.file_name().is_some_and(|name| name == profile))
+        .map_or_else(
+            || {
+                panic!(
+                    "bux-krun: cannot resolve profile bin dir from OUT_DIR={} PROFILE={profile}",
+                    out_dir.display()
+                )
+            },
+            Path::to_path_buf,
+        )
+}
+
+fn remove_existing(path: &Path) {
+    if path.symlink_metadata().is_ok() {
+        fs::remove_file(path).unwrap_or_else(|e| {
+            panic!("bux-krun: failed to replace {}: {e}", path.display());
+        });
+    }
+}
+
+fn copy_over(src: &Path, dest: &Path) {
+    remove_existing(dest);
+    fs::copy(src, dest).unwrap_or_else(|e| {
+        panic!(
+            "bux-krun: failed to copy {} -> {}: {e}",
+            src.display(),
+            dest.display()
+        );
+    });
+}
+
+/// Rpath is `@executable_path` / `$ORIGIN`; binaries load these siblings.
+fn stage_libraries_beside_binaries(lib_dir: &Path, target: &str, out_dir: &Path) {
+    let profile = env::var("PROFILE").expect("PROFILE not set");
+    let dest = profile_bin_dir(out_dir, &profile);
+    fs::create_dir_all(&dest).unwrap_or_else(|e| {
+        panic!(
+            "bux-krun: failed to create profile dir {}: {e}",
+            dest.display()
+        )
+    });
+
+    let aliases = soname_aliases(target);
+    for (unversioned, _) in &aliases {
+        let src = lib_dir.join(unversioned);
+        assert!(
+            src.exists(),
+            "bux-krun: {unversioned} not found in {}",
+            lib_dir.display()
+        );
+        copy_over(&src, &dest.join(unversioned));
+    }
+
+    for (_, alias) in &aliases {
+        remove_existing(&dest.join(alias));
+    }
+    create_versioned_symlinks(&dest, target);
+
+    let required = lib_filename(target);
+    assert!(
+        dest.join(required).exists(),
+        "bux-krun: {required} missing next to binaries at {}",
+        dest.display()
+    );
+    for (_, alias) in &aliases {
+        assert!(
+            dest.join(alias).exists(),
+            "bux-krun: {alias} missing next to binaries at {}",
+            dest.display()
+        );
+    }
+}
+
 fn download_libs(version: &str, target: &str, dest: &Path) {
     let url = format!(
         "https://github.com/{GITHUB_REPO}/releases/download/krun-v{version}/bux-deps-{target}.tar.gz"
@@ -200,14 +278,10 @@ fn major_version(version: &str) -> &str {
     version.split('.').next().expect("empty version string")
 }
 
-/// Create versioned symlinks (e.g. `libkrunfw.so.5 -> libkrunfw.so`) so that
-/// `dlopen("libkrunfw.so.5")` succeeds at runtime.
-fn create_versioned_symlinks(dir: &Path, target: &str) {
-    // Derive major version from pinned version strings for soname symlinks.
+fn soname_aliases(target: &str) -> [(&'static str, String); 2] {
     let krun_major = major_version(LIBKRUN_VERSION);
     let krunfw_major = major_version(LIBKRUNFW_VERSION);
-
-    let pairs = if target.contains("apple") {
+    if target.contains("apple") {
         [
             ("libkrun.dylib", format!("libkrun.{krun_major}.dylib")),
             ("libkrunfw.dylib", format!("libkrunfw.{krunfw_major}.dylib")),
@@ -217,9 +291,13 @@ fn create_versioned_symlinks(dir: &Path, target: &str) {
             ("libkrun.so", format!("libkrun.so.{krun_major}")),
             ("libkrunfw.so", format!("libkrunfw.so.{krunfw_major}")),
         ]
-    };
+    }
+}
 
-    for (src, link) in &pairs {
+/// Create versioned symlinks (e.g. `libkrunfw.so.5 -> libkrunfw.so`) so that
+/// `dlopen("libkrunfw.so.5")` succeeds at runtime.
+fn create_versioned_symlinks(dir: &Path, target: &str) {
+    for (src, link) in &soname_aliases(target) {
         let src_path = dir.join(src);
         let link_path = dir.join(link);
         if !src_path.exists() || link_path.exists() {
