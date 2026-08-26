@@ -33,6 +33,8 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::process::Command;
 
 /// Pinned native library versions — keep in sync with `.github/workflows/deps-build.yml`.
 const LIBKRUN_VERSION: &str = "1.17.4";
@@ -72,10 +74,11 @@ fn main() {
     }
 
     let lib_dir = obtain_libraries(&target, &out_dir);
-    stage_libraries_beside_binaries(&lib_dir, &target, &out_dir);
-    println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    let link_lib = prepare_link_lib(&lib_dir, &target, &out_dir);
+    stage_libraries_beside_binaries(&link_lib, &target, &out_dir);
+    println!("cargo:rustc-link-search=native={}", link_lib.display());
     println!("cargo:rustc-link-lib=dylib=krun");
-    println!("cargo:LIB_DIR={}", lib_dir.display());
+    println!("cargo:LIB_DIR={}", link_lib.display());
 }
 
 /// Download `libkrun.h` from the pinned fork into `$OUT_DIR`.
@@ -206,7 +209,85 @@ fn copy_over(src: &Path, dest: &Path) {
     });
 }
 
-/// Rpath is `@executable_path` / `$ORIGIN`; binaries load these siblings.
+fn prepare_link_lib(lib_dir: &Path, target: &str, out_dir: &Path) -> PathBuf {
+    if target.contains("apple") {
+        rewrite_darwin_dylibs(lib_dir, out_dir)
+    } else {
+        lib_dir.to_path_buf()
+    }
+}
+
+/// Copies into `$OUT_DIR/link-lib` and sets `LC_ID_DYLIB` to `@loader_path/…`
+/// so dependents record that load path. `LC_RPATH @loader_path` on libkrun is
+/// required for `dlopen("libkrunfw.5.dylib")`.
+#[cfg(target_os = "macos")]
+fn rewrite_darwin_dylibs(lib_dir: &Path, out_dir: &Path) -> PathBuf {
+    let link_lib = out_dir.join("link-lib");
+    fs::create_dir_all(&link_lib)
+        .unwrap_or_else(|e| panic!("bux-krun: failed to create {}: {e}", link_lib.display()));
+
+    for name in ["libkrun.dylib", "libkrunfw.dylib"] {
+        let src = lib_dir.join(name);
+        assert!(
+            src.exists(),
+            "bux-krun: {name} not found in {}",
+            lib_dir.display()
+        );
+        let dest = link_lib.join(name);
+        copy_over(&src, &dest);
+        make_writable(&dest);
+        let id = format!("@loader_path/{name}");
+        run_macos_tool("install_name_tool", &["-id", &id, utf8_path(&dest)]);
+    }
+
+    let krun = link_lib.join("libkrun.dylib");
+    run_macos_tool(
+        "install_name_tool",
+        &["-add_rpath", "@loader_path", utf8_path(&krun)],
+    );
+    for name in ["libkrun.dylib", "libkrunfw.dylib"] {
+        let dest = link_lib.join(name);
+        run_macos_tool("codesign", &["--force", "-s", "-", utf8_path(&dest)]);
+    }
+    link_lib
+}
+
+#[cfg(not(target_os = "macos"))]
+fn rewrite_darwin_dylibs(_lib_dir: &Path, _out_dir: &Path) -> PathBuf {
+    panic!("bux-krun: Darwin libkrun rewrite requires macOS");
+}
+
+#[cfg(target_os = "macos")]
+fn utf8_path(path: &Path) -> &str {
+    path.to_str()
+        .unwrap_or_else(|| panic!("bux-krun: non-UTF-8 path {}", path.display()))
+}
+
+#[cfg(target_os = "macos")]
+fn make_writable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(path)
+        .unwrap_or_else(|e| panic!("bux-krun: stat {}: {e}", path.display()))
+        .permissions();
+    perms.set_mode(perms.mode() | 0o200);
+    fs::set_permissions(path, perms).unwrap_or_else(|e| {
+        panic!("bux-krun: chmod {}: {e}", path.display());
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_tool(tool: &str, args: &[&str]) {
+    let status = Command::new(tool).args(args).status().unwrap_or_else(|e| {
+        panic!("bux-krun: failed to run {tool}: {e}");
+    });
+    assert!(
+        status.success(),
+        "bux-krun: {tool} {} failed with {status}",
+        args.join(" ")
+    );
+}
+
+/// Stage libs next to cargo bins and recreate soname aliases for firmware `dlopen`.
 fn stage_libraries_beside_binaries(lib_dir: &Path, target: &str, out_dir: &Path) {
     let profile = env::var("PROFILE").expect("PROFILE not set");
     let dest = profile_bin_dir(out_dir, &profile);

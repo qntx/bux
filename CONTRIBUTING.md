@@ -22,9 +22,32 @@ Requires a working C toolchain for libkrun / e2fs / qcow2 native deps, and Go fo
 
 Release packaging ships `bux`, `bux-shim`, `bux-guest-*`, and
 `libkrun*`/`libkrunfw*` (including soname aliases) in the same directory.
-Binaries locate the dylibs via `@executable_path` (Darwin) or `$ORIGIN`
-(Linux). `cargo build` stages those dylibs into the cargo profile directory
-next to `bux` / `bux-shim`.
+`cargo build` stages those dylibs into the cargo profile directory next to
+`bux` / `bux-shim`. Versioned aliases (`libkrun.1.dylib` /
+`libkrunfw.5.dylib`, Linux `libkrun.so.1` / `libkrunfw.so.5`) are required:
+libkrun `dlopen`s the firmware leaf name (`libkrunfw.5.dylib` /
+`libkrunfw.so.5`).
+
+Darwin: `bux-krun` copies `libkrun.dylib` and `libkrunfw.dylib` into
+`$OUT_DIR/link-lib`, sets `LC_ID_DYLIB` to `@loader_path/libkrun.dylib` and
+`@loader_path/libkrunfw.dylib`, adds `LC_RPATH @loader_path` on
+`libkrun.dylib` so `dlopen("libkrunfw.5.dylib")` searches the dylib's
+directory, ad-hoc codesigns those copies, and link-searches only `link-lib`.
+Linked binaries record `@loader_path/libkrun.dylib`. Downstream Darwin
+embedders do not need rpath rustflags.
+
+Linux: `DT_NEEDED` stays the soname. This workspace stamps
+`-Wl,-rpath,$ORIGIN` via `.cargo/config.toml`. Downstream embedders must set:
+
+```toml
+# embedder .cargo/config.toml (Linux)
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN"]
+```
+
+`crates/bux-shim-bin/build.rs` emits `-Wl,-rpath,@executable_path` (Darwin)
+or `-Wl,-rpath,$ORIGIN` (Linux) so this repo's shim does not depend solely
+on `.cargo/config.toml`. Keep the workspace rustflags file.
 
 Runtime guest resolution (`ManagedGuestBinary::resolve`) is: `BUX_GUEST_PATH`,
 then a sibling of the running executable (`bux-guest-<triple>`,
