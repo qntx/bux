@@ -93,18 +93,6 @@ impl Status {
     }
 }
 
-/// VM health state, tracked independently of lifecycle [`Status`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub(crate) enum HealthState {
-    /// Health has not been checked yet.
-    Unknown,
-    /// Guest agent responded successfully.
-    Healthy,
-    /// Guest agent failed to respond within the configured threshold.
-    Unhealthy,
-}
-
 /// A virtio-fs shared directory.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -591,24 +579,5 @@ mod tests {
 
         db.delete_base_disk("bd1").unwrap();
         assert!(db.get_base_disk_by_digest("sha256:abc").unwrap().is_none());
-    }
-
-    #[test]
-    fn health_update() {
-        let db = open_test_db();
-        db.insert(&test_vm("vm1", None)).unwrap();
-
-        db.update_health("vm1", HealthState::Healthy).unwrap();
-        let vms = db.list().unwrap();
-        assert_eq!(vms.len(), 1);
-    }
-
-    #[test]
-    fn product_schema_version() {
-        let db = open_test_db();
-        // Fresh in-memory DB uses product schema.
-        assert_eq!(db::PRODUCT_SCHEMA_VERSION, 4);
-        db.insert(&test_vm("vm1", None)).unwrap();
-        assert_eq!(db.list().unwrap().len(), 1);
     }
 }

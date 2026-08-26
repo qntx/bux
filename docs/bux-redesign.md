@@ -15,7 +15,7 @@ Spine:
 3. Jail (`bux-jail`) spawns `bux-shim`; shim applies `ShimConfig` and `krun_start_enter`.
 4. Guest agent is PID 1 (Phase A). Workload is `exec`.
 5. Host `Client` uses postcard protocol v9 (one Unix-socket connection per op).
-6. SQLite `user_version` 4; mismatch refuses to open (wipe `data_dir`).
+6. SQLite `user_version` 5; mismatch refuses to open (wipe `data_dir`).
 
 ## Known defects
 

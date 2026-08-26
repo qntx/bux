@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::{HealthState, Status, VmState};
+use super::{Status, VmState};
 use crate::error::{Error, Result};
 
 /// Product state-schema version (PRAGMA `user_version`).
@@ -16,8 +16,8 @@ use crate::error::{Error, Result};
 /// Bump only on incompatible schema changes. There is **no** migration
 /// path — callers must wipe the data directory.
 ///
-/// v4: persist `NetworkSpec` in VM config JSON (replaces `network_enabled`).
-pub(crate) const PRODUCT_SCHEMA_VERSION: u32 = 4;
+/// v5: drop `vms.health`.
+pub(crate) const PRODUCT_SCHEMA_VERSION: u32 = 5;
 
 /// DDL for a fresh product database.
 const PRODUCT_SCHEMA_SQL: &str = "
@@ -28,7 +28,6 @@ CREATE TABLE vms (
     image       TEXT,
     socket      TEXT NOT NULL,
     status      TEXT NOT NULL DEFAULT 'running',
-    health      TEXT NOT NULL DEFAULT 'unknown',
     config      TEXT NOT NULL,
     created_at  REAL NOT NULL,
     updated_at  REAL
@@ -304,19 +303,6 @@ impl StateDb {
     pub(crate) fn delete(&self, id: &str) -> Result<()> {
         self.lock()
             .execute("DELETE FROM vms WHERE id = ?1", params![id])?;
-        Ok(())
-    }
-
-    /// Updates the health state of a VM.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database update fails.
-    pub(crate) fn update_health(&self, id: &str, health: HealthState) -> Result<()> {
-        self.lock().execute(
-            "UPDATE vms SET health = ?1 WHERE id = ?2",
-            params![health_str(health), id],
-        )?;
         Ok(())
     }
 
@@ -678,15 +664,6 @@ fn row_to_base_disk(row: &rusqlite::Row<'_>) -> rusqlite::Result<BaseDiskRow> {
     })
 }
 
-/// Converts a [`HealthState`] to its database string representation.
-const fn health_str(h: HealthState) -> &'static str {
-    match h {
-        HealthState::Unknown => "unknown",
-        HealthState::Healthy => "healthy",
-        HealthState::Unhealthy => "unhealthy",
-    }
-}
-
 /// Converts a [`Status`] to its database string representation.
 const fn status_str(s: Status) -> &'static str {
     match s {
@@ -719,4 +696,43 @@ fn system_time_to_f64(t: SystemTime) -> f64 {
 /// Converts seconds since UNIX epoch (`f64`) back to a [`SystemTime`].
 fn f64_to_system_time(secs: f64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs_f64(secs)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions use unwrap for clarity"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "MutexGuard must outlive rusqlite Statement"
+    )]
+    fn product_schema_version() {
+        let db = StateDb::open(":memory:").expect("open in-memory db");
+        assert_eq!(PRODUCT_SCHEMA_VERSION, 5);
+
+        let mut names = Vec::new();
+        {
+            let conn = db.lock();
+            let version: u32 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(version, 5);
+
+            let mut stmt = conn.prepare("PRAGMA table_info(vms)").unwrap();
+            let mut rows = stmt.query([]).unwrap();
+            while let Some(row) = rows.next().unwrap() {
+                names.push(row.get::<_, String>(1).unwrap());
+            }
+        }
+        assert!(
+            !names.iter().any(|n| n == "health"),
+            "vms must not have a health column, got {names:?}"
+        );
+    }
 }
