@@ -26,7 +26,6 @@ use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-pub use bux_cgroup::ResourceLimits;
 pub use error::{Error, Result};
 pub use security::{LayerStatus, SandboxKind, SecurityReport};
 
@@ -52,8 +51,6 @@ pub struct SandboxCapabilities {
     pub seccomp: bool,
     /// Whether mandatory access control is enforced (AppArmor/SELinux/Seatbelt).
     pub mandatory_access_control: bool,
-    /// Whether cgroup-based resource limits are enforced.
-    pub cgroups: bool,
 }
 
 /// Trait for platform-specific process sandboxing.
@@ -127,8 +124,6 @@ pub struct JailConfig {
     /// When `None`, auto-detects: bwrap on Linux, seatbelt on macOS,
     /// noop otherwise.
     pub sandbox: Option<Box<dyn Sandbox>>,
-    /// cgroup v2 resource limits (Linux only; ignored on other platforms).
-    pub resource_limits: Option<ResourceLimits>,
     /// File to redirect child stderr to. When `None`, stderr is inherited.
     pub stderr_file: Option<std::fs::File>,
     /// Request Landlock LSM on Linux (default product: true on Linux).
@@ -153,14 +148,6 @@ pub struct JailConfig {
 pub struct SpawnResult {
     /// The spawned child process.
     pub child: Child,
-    /// cgroup guard — holds the cgroup alive; cleaned up on drop.
-    /// `None` on non-Linux platforms or when no resource limits are set.
-    #[cfg(target_os = "linux")]
-    #[allow(
-        dead_code,
-        reason = "RAII guard: held for lifetime, never read directly"
-    )]
-    pub cgroup: Option<bux_cgroup::CgroupGuard>,
     /// Actual security posture for this spawn.
     pub security: SecurityReport,
 }
@@ -173,21 +160,14 @@ pub struct SpawnResult {
 /// # Errors
 ///
 /// Returns [`Error::Io`] if the process cannot be spawned,
-/// [`Error::Cgroup`] if resource limits cannot be applied,
 /// [`Error::LandlockUnavailable`] when Landlock is required but missing (K22),
 /// or [`Error::Landlock`] on ruleset construction failure.
-pub fn spawn(
-    shim: &Path,
-    config_path: &Path,
-    config: JailConfig,
-    vm_id: &str,
-) -> Result<SpawnResult> {
+pub fn spawn(shim: &Path, config_path: &Path, config: JailConfig) -> Result<SpawnResult> {
     let (landlock_fd, landlock_status) = prepare_landlock(&config, shim, config_path)?;
     let (mut cmd, sandbox_kind) = build_command(shim, config_path, &config);
     cmd.stdin(Stdio::null());
 
     let watchdog_fd = config.watchdog_fd;
-    let resource_limits = config.resource_limits;
     let die_with_parent = config.die_with_parent;
     if let Some(file) = config.stderr_file {
         cmd.stderr(Stdio::from(file));
@@ -207,20 +187,6 @@ pub fn spawn(
     );
     let child = cmd.spawn()?;
 
-    #[cfg(target_os = "linux")]
-    let cgroup_guard = if let Some(ref limits) = resource_limits {
-        let guard = bux_cgroup::create(vm_id, limits)?;
-        #[allow(clippy::cast_possible_wrap, reason = "PID fits in i32")]
-        bux_cgroup::add_pid(&guard, child.id() as i32)?;
-        Some(guard)
-    } else {
-        let _ = vm_id;
-        None
-    };
-
-    #[cfg(not(target_os = "linux"))]
-    let _ = (vm_id, resource_limits);
-
     let mac = match sandbox_kind {
         SandboxKind::Seatbelt => LayerStatus::Enforced,
         SandboxKind::Bwrap | SandboxKind::Noop => {
@@ -234,8 +200,6 @@ pub fn spawn(
 
     Ok(SpawnResult {
         child,
-        #[cfg(target_os = "linux")]
-        cgroup: cgroup_guard,
         security: SecurityReport {
             sandbox: sandbox_kind,
             landlock: landlock_status,

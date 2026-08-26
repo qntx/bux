@@ -40,7 +40,6 @@ impl Sandbox for SeatbeltSandbox {
             namespaces: false,
             seccomp: false,
             mandatory_access_control: true,
-            cgroups: false,
         }
     }
 
@@ -227,7 +226,6 @@ mod tests {
             virtiofs_paths: vec![],
             watchdog_fd: None,
             sandbox: None,
-            resource_limits: None,
             stderr_file: None,
             landlock: false,
             allow_degraded_security: false,

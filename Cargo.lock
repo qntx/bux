@@ -231,7 +231,6 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 name = "bux"
 version = "0.7.0"
 dependencies = [
- "bux-cgroup",
  "bux-e2fs",
  "bux-jail",
  "bux-oci",
@@ -260,13 +259,6 @@ dependencies = [
  "tar",
  "thiserror 2.0.20",
  "ureq",
-]
-
-[[package]]
-name = "bux-cgroup"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -330,7 +322,6 @@ name = "bux-jail"
 version = "0.1.0"
 dependencies = [
  "bux-bwrap",
- "bux-cgroup",
  "bux-landlock",
  "libc",
  "thiserror 2.0.20",

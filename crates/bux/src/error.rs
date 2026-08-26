@@ -76,11 +76,6 @@ pub enum Error {
     #[error(transparent)]
     Qcow2(#[from] bux_qcow2::Error),
 
-    /// cgroup v2 resource-limit error (Linux-only operations).
-    #[cfg(unix)]
-    #[error(transparent)]
-    Cgroup(#[from] bux_cgroup::Error),
-
     /// Jail / sandbox spawn error.
     #[cfg(unix)]
     #[error(transparent)]

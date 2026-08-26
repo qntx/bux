@@ -15,10 +15,6 @@ pub enum Error {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
-    /// cgroup v2 resource-limit error (Linux only).
-    #[error(transparent)]
-    Cgroup(#[from] bux_cgroup::Error),
-
     /// Landlock was requested but the kernel cannot enforce it (K22 fail-closed).
     ///
     /// Set [`crate::JailConfig::allow_degraded_security`] to proceed without Landlock.
