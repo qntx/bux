@@ -149,9 +149,10 @@ async fn resolve_image(
                 let rootfs = pull.rootfs.clone();
                 let digest = pull.digest.replace(':', "-");
                 let pull_ref = pull.reference.clone();
+                let guest_path = rt.guest_path.clone();
                 tokio::task::spawn_blocking(move || -> Result<PathBuf> {
                     info!(image = %pull_ref, "creating ext4 base image from rootfs");
-                    disk.create_managed_base(&rootfs, &digest)
+                    disk.create_managed_base(&rootfs, &digest, guest_path.as_deref())
                 })
                 .await
                 .map_err(io::Error::other)??

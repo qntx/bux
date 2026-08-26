@@ -131,11 +131,18 @@ impl DiskManager {
 
     /// Creates a managed base ext4 image with guest binary injected.
     ///
+    /// `guest_path` is the unresolved [`crate::RuntimeOptions::guest_path`].
+    ///
     /// # Errors
     ///
     /// Returns an error if image creation, injection, or rename fails.
-    pub(crate) fn create_managed_base(&self, rootfs: &Path, digest: &str) -> Result<PathBuf> {
-        let guest = ManagedGuestBinary::resolve()?;
+    pub(crate) fn create_managed_base(
+        &self,
+        rootfs: &Path,
+        digest: &str,
+        guest_path: Option<&Path>,
+    ) -> Result<PathBuf> {
+        let guest = ManagedGuestBinary::resolve(guest_path)?;
         let versioned = guest.versioned_cache_key(digest);
         let path = self.base_path(&versioned);
         if path.exists() {

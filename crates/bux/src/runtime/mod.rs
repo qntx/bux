@@ -32,8 +32,23 @@ use crate::snapshot::SnapshotManager;
 use crate::state::{StateDb, Status, VmConfig, VmState};
 use crate::volumes::VolumeManager;
 use boot::{clean_vm_files, is_pid_alive};
+use bux_oci::RegistryAuth;
 
 pub use vm::{Vm, VmInfo};
+
+/// How to open a [`Runtime`]. [`Runtime::open`] is this with defaults.
+#[derive(Debug, Clone)]
+pub struct RuntimeOptions {
+    /// Data dir (`bux.lock`, `bux.db`, disks, volumes, socks). Required.
+    pub data_dir: PathBuf,
+    /// If `Some`, must be a regular file at first use or [`crate::Error::NotFound`] (no search fallthrough).
+    /// If `None` → `BUX_SHIM_PATH` (fall through if not a file) → sibling of the running executable → `$PATH`.
+    pub shim_path: Option<PathBuf>,
+    /// Same contract as `shim_path` for the static Linux `bux-guest` ELF (`BUX_GUEST_PATH`).
+    pub guest_path: Option<PathBuf>,
+    /// Registry credentials for this Runtime's OCI handle (pull and [`crate::ImageRef::Oci`]).
+    pub registry_auth: RegistryAuth,
+}
 
 /// Cached OCI image metadata (product view).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -102,6 +117,10 @@ pub struct Runtime {
     metrics: Arc<RuntimeMetrics>,
     /// Audit event dispatcher.
     events: Arc<EventDispatcher>,
+    /// Unresolved shim binary override from [`RuntimeOptions`].
+    pub(crate) shim_path: Option<PathBuf>,
+    /// Unresolved guest ELF override from [`RuntimeOptions`].
+    pub(crate) guest_path: Option<PathBuf>,
 }
 
 // Runtime is Send + Sync because:
@@ -112,32 +131,51 @@ pub struct Runtime {
 impl Runtime {
     /// Opens (or creates) the runtime data directory and database.
     ///
-    /// Runs crash recovery to reconcile stale state from previous runs.
-    /// Acquires an exclusive file lock to prevent concurrent access.
+    /// Equivalent to [`Self::open_with`] with no sidecar paths and anonymous
+    /// registry auth. Runs crash recovery to reconcile stale state from
+    /// previous runs. Acquires an exclusive file lock to prevent concurrent
+    /// access.
     ///
     /// # Errors
     ///
-    /// Returns an error if the data directory cannot be created, the lock
-    /// is already held, or the database fails to open.
+    /// Returns [`crate::Error::Busy`] if another Runtime holds the lock.
+    /// Returns an error if the data directory cannot be created or the
+    /// database fails to open.
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self> {
-        let base = data_dir.as_ref();
+        Self::open_with(RuntimeOptions {
+            data_dir: data_dir.as_ref().to_path_buf(),
+            shim_path: None,
+            guest_path: None,
+            registry_auth: RegistryAuth::Anonymous,
+        })
+    }
+
+    /// Opens a runtime with explicit sidecar paths and registry auth.
+    ///
+    /// Sidecar paths are stored unresolved and copied onto each [`Vm`]. They
+    /// are resolved at first shim spawn / guest inject, not at open, and are
+    /// not stored in `SQLite`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::Busy`] if another Runtime holds the lock.
+    /// Returns an error if the data directory cannot be created or the
+    /// database fails to open.
+    pub fn open_with(opts: RuntimeOptions) -> Result<Self> {
+        let base = opts.data_dir.as_path();
         fs::create_dir_all(base)?;
 
         let lock_file = fs::File::create(base.join("bux.lock"))?;
-        let lock =
-            Flock::lock(lock_file, FlockArg::LockExclusiveNonblock).map_err(|(_, errno)| {
-                io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!("another bux runtime is using {}: {errno}", base.display()),
-                )
-            })?;
+        let lock = Flock::lock(lock_file, FlockArg::LockExclusiveNonblock).map_err(|_| {
+            crate::Error::Busy(format!("another bux runtime is using {}", base.display()))
+        })?;
 
         let socks_dir = base.join("socks");
         fs::create_dir_all(&socks_dir)?;
 
         let db = Arc::new(StateDb::open(base.join("bux.db"))?);
         let disk = DiskManager::open(base)?;
-        let oci = bux_oci::Oci::open_at(base)?;
+        let oci = bux_oci::Oci::open_at(base, opts.registry_auth)?;
         let snapshots = SnapshotManager::new(Arc::clone(&db), base)?;
         let secrets = Arc::new(Mutex::new(HashMap::new()));
         let volumes = VolumeManager::open(base, Arc::clone(&db))?;
@@ -153,6 +191,8 @@ impl Runtime {
             volumes,
             metrics: Arc::new(RuntimeMetrics::new()),
             events: Arc::new(EventDispatcher::new()),
+            shim_path: opts.shim_path,
+            guest_path: opts.guest_path,
         };
 
         rt.recover();
@@ -453,6 +493,8 @@ impl Runtime {
             self.snapshots.clone(),
             Arc::clone(&self.secrets),
             self.volumes.clone(),
+            self.shim_path.clone(),
+            self.guest_path.clone(),
         ))
     }
 
@@ -556,8 +598,9 @@ mod tests {
     use crate::options::NetworkSpec;
     use crate::secrets::LiveSecrets;
     use crate::state::VmConfig;
+    use bux_oci::RegistryAuth;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::SystemTime;
 
@@ -942,5 +985,146 @@ mod tests {
         drop(rt);
         drop(child.kill());
         drop(child.wait());
+    }
+
+    #[test]
+    fn open_flock_contention_is_busy_not_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let _rt = Runtime::open(dir.path()).unwrap();
+        let open_err = Runtime::open(dir.path()).unwrap_err();
+        assert!(
+            matches!(open_err, crate::Error::Busy(_)),
+            "open contention must be Busy: {open_err}"
+        );
+        let with_err = Runtime::open_with(RuntimeOptions {
+            data_dir: dir.path().to_path_buf(),
+            shim_path: None,
+            guest_path: None,
+            registry_auth: RegistryAuth::Anonymous,
+        })
+        .unwrap_err();
+        assert!(
+            matches!(with_err, crate::Error::Busy(_)),
+            "open_with contention must be Busy: {with_err}"
+        );
+    }
+
+    #[test]
+    fn open_with_anonymous_matches_open_db_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let open_dir = dir.path().join("open");
+        let with_dir = dir.path().join("with");
+        drop(Runtime::open(&open_dir).unwrap());
+        drop(
+            Runtime::open_with(RuntimeOptions {
+                data_dir: with_dir.clone(),
+                shim_path: None,
+                guest_path: None,
+                registry_auth: RegistryAuth::Anonymous,
+            })
+            .unwrap(),
+        );
+
+        let names = |base: &Path| -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(base)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(names(&open_dir), names(&with_dir));
+        assert!(open_dir.join("bux.db").is_file());
+        assert!(with_dir.join("bux.db").is_file());
+    }
+
+    #[test]
+    fn runtime_options_debug_redacts_registry_auth() {
+        let opts = RuntimeOptions {
+            data_dir: PathBuf::from("/tmp/bux-data"),
+            shim_path: None,
+            guest_path: None,
+            registry_auth: RegistryAuth::Bearer {
+                token: "tokensecret".into(),
+            },
+        };
+        let dbg = format!("{opts:?}");
+        assert!(dbg.contains("***"), "{dbg}");
+        assert!(!dbg.contains("tokensecret"), "{dbg}");
+    }
+
+    #[test]
+    fn get_copies_unresolved_shim_path_from_open_with() {
+        let dir = tempfile::tempdir().unwrap();
+        let planted = dir.path().join("planted-shim");
+        fs::write(&planted, b"shim").unwrap();
+        let rt = Runtime::open_with(RuntimeOptions {
+            data_dir: dir.path().join("rt"),
+            shim_path: Some(planted.clone()),
+            guest_path: None,
+            registry_auth: RegistryAuth::Anonymous,
+        })
+        .unwrap();
+        insert_cfg(
+            &rt,
+            "getshim000001",
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig::default(),
+        );
+        let vm = rt.get("getshim000001").unwrap();
+        assert_eq!(vm.shim_path.as_deref(), Some(planted.as_path()));
+        assert!(vm.guest_path.is_none());
+    }
+
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "env lock must outlive create_managed_base"
+    )]
+    fn create_managed_base_uses_runtime_guest_path_not_path_decoy() {
+        let mut env = crate::guest::sidecar_env::lock();
+        let planted_bytes = crate::guest::test_static_guest_elf(b"PLANT-GUEST-ELF!");
+        let decoy_bytes = crate::guest::test_static_guest_elf(b"DECOY-GUEST-ELF!");
+
+        let files = tempfile::tempdir().unwrap();
+        let planted = files.path().join("planted-guest");
+        let decoy = files.path().join("decoy-guest");
+        fs::write(&planted, &planted_bytes).unwrap();
+        fs::write(&decoy, &decoy_bytes).unwrap();
+
+        let decoy_bin = tempfile::tempdir().unwrap();
+        fs::write(decoy_bin.path().join("bux-guest"), &decoy_bytes).unwrap();
+        env.prepend_path(decoy_bin.path());
+        env.set("BUX_GUEST_PATH", &decoy);
+
+        let data = tempfile::tempdir().unwrap();
+        let rt = Runtime::open_with(RuntimeOptions {
+            data_dir: data.path().to_path_buf(),
+            shim_path: None,
+            guest_path: Some(planted),
+            registry_auth: RegistryAuth::Anonymous,
+        })
+        .unwrap();
+
+        let rootfs = tempfile::tempdir().unwrap();
+        fs::write(rootfs.path().join("placeholder"), b"root").unwrap();
+        let image = rt
+            .disk()
+            .create_managed_base(rootfs.path(), "testdigest", rt.guest_path.as_deref())
+            .unwrap();
+        let image_bytes = fs::read(&image).unwrap();
+        assert!(
+            image_bytes
+                .windows(planted_bytes.len())
+                .any(|w| w == planted_bytes.as_slice()),
+            "ext4 image must contain the planted guest ELF"
+        );
+        assert!(
+            image_bytes
+                .windows(decoy_bytes.len())
+                .all(|w| w != decoy_bytes.as_slice()),
+            "ext4 image must not contain the PATH decoy guest ELF"
+        );
     }
 }

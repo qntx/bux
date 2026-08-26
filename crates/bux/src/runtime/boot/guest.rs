@@ -9,22 +9,28 @@ use crate::guest::ManagedGuestBinary;
 use crate::state::VmConfig;
 
 /// First boot: inject guest into a host rootfs. Rejects unprepared raw disks.
-pub(super) fn prepare_managed_config(config: &mut VmConfig) -> Result<()> {
+pub(super) fn prepare_managed_config(
+    config: &mut VmConfig,
+    guest_path: Option<&Path>,
+) -> Result<()> {
     if is_overlay_only(config) {
         return Err(crate::Error::InvalidConfig(
             "managed runtime does not support direct root_disk boot without a managed guest-rootfs preparation step".to_owned(),
         ));
     }
-    apply_guest_pid1(config)
+    apply_guest_pid1(config, guest_path)
 }
 
 /// Restart: overlay already has the injected guest. Skip host guest resolve.
-pub(crate) fn prepare_restart_config(config: &mut VmConfig) -> Result<()> {
+pub(crate) fn prepare_restart_config(
+    config: &mut VmConfig,
+    guest_path: Option<&Path>,
+) -> Result<()> {
     if is_overlay_only(config) {
         set_guest_pid1(config);
         return Ok(());
     }
-    apply_guest_pid1(config)
+    apply_guest_pid1(config, guest_path)
 }
 
 /// Persisted overlay: `root_disk` set, no host rootfs / base to inject.
@@ -40,8 +46,8 @@ fn set_guest_pid1(config: &mut VmConfig) {
 }
 
 /// Resolve the host guest ELF and inject into a rootfs directory when present.
-fn apply_guest_pid1(config: &mut VmConfig) -> Result<()> {
-    let guest = ManagedGuestBinary::resolve()?;
+fn apply_guest_pid1(config: &mut VmConfig, guest_path: Option<&Path>) -> Result<()> {
+    let guest = ManagedGuestBinary::resolve(guest_path)?;
     if let Some(rootfs) = config.rootfs.as_deref() {
         guest.inject_into_rootfs(Path::new(rootfs))?;
     }
@@ -171,7 +177,7 @@ mod tests {
             ..VmConfig::default()
         };
         assert!(matches!(
-            prepare_managed_config(&mut cfg),
+            prepare_managed_config(&mut cfg, None),
             Err(crate::Error::InvalidConfig(_))
         ));
     }
@@ -184,12 +190,60 @@ mod tests {
             exec_path: Some("/bux/bin/bux-guest".into()),
             ..VmConfig::default()
         };
-        prepare_restart_config(&mut cfg).unwrap();
+        prepare_restart_config(&mut cfg, None).unwrap();
         assert_eq!(
             cfg.exec_path.as_deref(),
             Some(ManagedGuestBinary::exec_path())
         );
         assert!(cfg.exec_args.is_empty());
         assert!(cfg.env.is_none());
+    }
+
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "env lock must outlive inject"
+    )]
+    fn apply_guest_pid1_uses_runtime_guest_path_not_path_decoy() {
+        let mut env = crate::guest::sidecar_env::lock();
+        let planted_bytes = crate::guest::test_static_guest_elf(b"PLANT-GUEST-ELF!");
+        let decoy_bytes = crate::guest::test_static_guest_elf(b"DECOY-GUEST-ELF!");
+
+        let files = tempfile::tempdir().unwrap();
+        let planted = files.path().join("planted-guest");
+        let decoy = files.path().join("decoy-guest");
+        std::fs::write(&planted, &planted_bytes).unwrap();
+        std::fs::write(&decoy, &decoy_bytes).unwrap();
+
+        let decoy_bin = tempfile::tempdir().unwrap();
+        std::fs::write(decoy_bin.path().join("bux-guest"), &decoy_bytes).unwrap();
+        env.prepend_path(decoy_bin.path());
+        env.set("BUX_GUEST_PATH", &decoy);
+
+        let data = tempfile::tempdir().unwrap();
+        let rt = crate::Runtime::open_with(crate::RuntimeOptions {
+            data_dir: data.path().to_path_buf(),
+            shim_path: None,
+            guest_path: Some(planted),
+            registry_auth: crate::RegistryAuth::Anonymous,
+        })
+        .unwrap();
+
+        let rootfs = tempfile::tempdir().unwrap();
+        let mut cfg = VmConfig {
+            rootfs: Some(rootfs.path().to_string_lossy().into_owned()),
+            ..VmConfig::default()
+        };
+        prepare_managed_config(&mut cfg, rt.guest_path.as_deref()).unwrap();
+        let injected =
+            std::fs::read(rootfs.path().join(ManagedGuestBinary::relative_path())).unwrap();
+        assert_eq!(
+            injected, planted_bytes,
+            "rootfs must contain the planted ELF"
+        );
+        assert_ne!(
+            injected, decoy_bytes,
+            "rootfs must not contain the PATH decoy"
+        );
     }
 }

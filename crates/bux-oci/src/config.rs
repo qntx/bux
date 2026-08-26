@@ -1,8 +1,41 @@
 //! Configuration and result types for OCI image operations.
 
+use std::fmt;
 use std::path::PathBuf;
 
-use oci_client::secrets::RegistryAuth;
+/// Registry credentials for image pull.
+#[derive(Clone, Default)]
+pub enum RegistryAuth {
+    /// No credentials (public registries).
+    #[default]
+    Anonymous,
+    /// HTTP Basic authentication.
+    Basic {
+        /// Registry username.
+        username: String,
+        /// Registry password.
+        password: String,
+    },
+    /// Bearer token authentication.
+    Bearer {
+        /// Registry bearer token.
+        token: String,
+    },
+}
+
+impl fmt::Debug for RegistryAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Anonymous => f.write_str("Anonymous"),
+            Self::Basic { username, .. } => f
+                .debug_struct("Basic")
+                .field("username", username)
+                .field("password", &"***")
+                .finish(),
+            Self::Bearer { .. } => f.debug_struct("Bearer").field("token", &"***").finish(),
+        }
+    }
+}
 
 /// Configuration for initializing [`crate::Oci`].
 #[non_exhaustive]
@@ -78,4 +111,46 @@ pub struct PullResult {
     pub rootfs: PathBuf,
     /// Image configuration (Cmd, Env, `WorkingDir`, etc.).
     pub config: Option<ImageConfig>,
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "tests")]
+mod tests {
+    use super::RegistryAuth;
+
+    #[test]
+    fn debug_redacts_basic_password_and_bearer_token() {
+        assert_eq!(format!("{:?}", RegistryAuth::Anonymous), "Anonymous");
+
+        let basic = RegistryAuth::Basic {
+            username: "alice".into(),
+            password: "s3cret".into(),
+        };
+        let basic_dbg = format!("{basic:?}");
+        assert!(
+            basic_dbg.contains("alice"),
+            "username must remain visible: {basic_dbg}"
+        );
+        assert!(
+            basic_dbg.contains("***"),
+            "password must be redacted: {basic_dbg}"
+        );
+        assert!(
+            !basic_dbg.contains("s3cret"),
+            "password must not leak: {basic_dbg}"
+        );
+
+        let bearer = RegistryAuth::Bearer {
+            token: "tokensecret".into(),
+        };
+        let bearer_dbg = format!("{bearer:?}");
+        assert!(
+            bearer_dbg.contains("***"),
+            "token must be redacted: {bearer_dbg}"
+        );
+        assert!(
+            !bearer_dbg.contains("tokensecret"),
+            "token must not leak: {bearer_dbg}"
+        );
+    }
 }
