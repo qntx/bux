@@ -54,6 +54,8 @@ mod volumes;
 #[cfg(unix)]
 mod watchdog;
 
+#[cfg(unix)]
+pub use bux_oci::RegistryAuth;
 pub use bux_proto::ExecStart;
 #[cfg(unix)]
 pub use client::{ExecHandle, ExecOutput, PongInfo};
@@ -68,7 +70,7 @@ pub use metrics::{RuntimeMetrics, VmMetrics};
 pub use options::{ImageRef, NetworkSpec, VmOptions};
 pub use ports::{PortSpec, PublishedPort, parse_publish_spec};
 #[cfg(unix)]
-pub use runtime::{HealthStatus, ImageInfo, Runtime, Vm, VmInfo, default_data_dir};
+pub use runtime::{HealthStatus, ImageInfo, Runtime, RuntimeOptions, Vm, VmInfo, default_data_dir};
 #[cfg(unix)]
 pub use secrets::{Secret, StartOptions};
 pub use security::{HostInfo, LayerStatus, SecurityOptions, SecurityStatus};

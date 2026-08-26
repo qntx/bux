@@ -28,9 +28,9 @@ use std::path::{Path, PathBuf};
 
 use oci_client::Reference;
 use oci_client::client::ClientConfig;
-use oci_client::secrets::RegistryAuth;
+use oci_client::secrets::RegistryAuth as ClientRegistryAuth;
 
-pub use config::{ImageConfig, OciConfig, PullResult};
+pub use config::{ImageConfig, OciConfig, PullResult, RegistryAuth};
 pub use error::{OciError, Result};
 pub use store::ImageMeta;
 use store::Store;
@@ -45,7 +45,7 @@ pub struct Oci {
     /// OCI registry HTTP client.
     client: oci_client::Client,
     /// Registry authentication credentials.
-    auth: RegistryAuth,
+    auth: ClientRegistryAuth,
 }
 
 impl std::fmt::Debug for Oci {
@@ -63,7 +63,7 @@ impl Oci {
     ///
     /// Returns an error if the store directory cannot be created or the database fails to open.
     pub fn open() -> Result<Self> {
-        Self::open_with(OciConfig::default())
+        Self::open_at(&dirs_default_store(), RegistryAuth::Anonymous)
     }
 
     /// Opens the OCI manager with explicit configuration.
@@ -77,22 +77,29 @@ impl Oci {
             platform_resolver: Some(Box::new(linux_platform_resolver)),
             ..Default::default()
         });
+        let auth = match config.auth {
+            RegistryAuth::Anonymous => ClientRegistryAuth::Anonymous,
+            RegistryAuth::Basic { username, password } => {
+                ClientRegistryAuth::Basic(username, password)
+            }
+            RegistryAuth::Bearer { token } => ClientRegistryAuth::Bearer(token),
+        };
         Ok(Self {
             store,
             client,
-            auth: config.auth,
+            auth,
         })
     }
 
-    /// Opens the OCI manager rooted at a specific directory.
+    /// Opens the OCI manager rooted at `store_dir` with the given registry auth.
     ///
     /// # Errors
     ///
     /// Returns an error if the store directory cannot be created or the database fails to open.
-    pub fn open_at(store_dir: &Path) -> Result<Self> {
+    pub fn open_at(store_dir: &Path, auth: RegistryAuth) -> Result<Self> {
         Self::open_with(OciConfig {
             store_dir: store_dir.to_path_buf(),
-            ..Default::default()
+            auth,
         })
     }
 

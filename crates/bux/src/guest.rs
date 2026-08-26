@@ -31,7 +31,17 @@ pub(crate) struct ManagedGuestBinary {
 }
 
 impl ManagedGuestBinary {
-    pub(crate) fn resolve() -> Result<Self> {
+    pub(crate) fn resolve(explicit: Option<&Path>) -> Result<Self> {
+        if let Some(path) = explicit {
+            if !path.is_file() {
+                return Err(Error::NotFound(format!(
+                    "bux-guest not found at {} (RuntimeOptions.guest_path)",
+                    path.display()
+                )));
+            }
+            return Self::from_path(path);
+        }
+
         let mut invalid = Vec::new();
         for path in candidate_paths() {
             if !path.exists() {
@@ -46,12 +56,12 @@ impl ManagedGuestBinary {
         let target = linux_guest_target();
         if invalid.is_empty() {
             return Err(Error::NotFound(format!(
-                "no valid Linux bux-guest binary found; set BUX_GUEST_PATH to a static {target} build"
+                "bux-guest not found (set RuntimeOptions.guest_path, BUX_GUEST_PATH, place a static {target} bux-guest next to the running executable, or on PATH)"
             )));
         }
 
         Err(Error::InvalidConfig(format!(
-            "failed to find a usable Linux bux-guest binary; set BUX_GUEST_PATH to a static {target} build. Candidates: {}",
+            "failed to find a usable Linux bux-guest binary; set RuntimeOptions.guest_path or BUX_GUEST_PATH to a static {target} build. Candidates: {}",
             invalid.join("; ")
         )))
     }
@@ -286,6 +296,124 @@ fn short_hash(data: &[u8]) -> String {
     out
 }
 
+/// Static Linux ELF for this host with a unique 16-byte tag at offset 64.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "test helper")]
+pub(crate) fn test_static_guest_elf(tag: &[u8; 16]) -> Vec<u8> {
+    let machine = expected_machine().unwrap();
+    let mut data = vec![0_u8; 128];
+    data[..4].copy_from_slice(&ELF_MAGIC);
+    data[4] = 2;
+    data[5] = 1;
+    data[6] = 1;
+    data[18..20].copy_from_slice(&machine.to_le_bytes());
+    data[64..80].copy_from_slice(tag);
+    data
+}
+
+#[cfg(test)]
+#[allow(
+    unsafe_code,
+    clippy::unwrap_used,
+    clippy::disallowed_methods,
+    reason = "tests isolate PATH and BUX_*_PATH under a mutex"
+)]
+pub(crate) mod sidecar_env {
+    use std::ffi::{OsStr, OsString};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard};
+
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    #[must_use]
+    pub(crate) struct Guard {
+        _lock: MutexGuard<'static, ()>,
+        restores: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    pub(crate) fn lock() -> Guard {
+        Guard {
+            _lock: LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            restores: Vec::new(),
+        }
+    }
+
+    impl Guard {
+        pub(crate) fn set(&mut self, key: &'static str, val: impl AsRef<OsStr>) {
+            if !self.restores.iter().any(|(k, _)| *k == key) {
+                self.restores.push((key, std::env::var_os(key)));
+            }
+            // SAFETY: `LOCK` serializes env mutation for sidecar tests.
+            unsafe { std::env::set_var(key, val) };
+        }
+
+        pub(crate) fn unset(&mut self, key: &'static str) {
+            if !self.restores.iter().any(|(k, _)| *k == key) {
+                self.restores.push((key, std::env::var_os(key)));
+            }
+            // SAFETY: `LOCK` serializes env mutation for sidecar tests.
+            unsafe { std::env::remove_var(key) };
+        }
+
+        pub(crate) fn prepend_path(&mut self, dir: &Path) {
+            let mut dirs = vec![dir.to_path_buf()];
+            if let Some(p) = std::env::var_os("PATH") {
+                dirs.extend(std::env::split_paths(&p));
+            }
+            self.set("PATH", std::env::join_paths(&dirs).unwrap());
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            for (key, old) in self.restores.drain(..).rev() {
+                restore_var(key, old);
+            }
+        }
+    }
+
+    fn restore_var(key: &'static str, old: Option<OsString>) {
+        if let Some(v) = old {
+            // SAFETY: caller holds `LOCK` for the Guard lifetime.
+            unsafe { std::env::set_var(key, v) };
+        } else {
+            // SAFETY: caller holds `LOCK` for the Guard lifetime.
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+
+    #[must_use]
+    pub(crate) struct Planted {
+        path: PathBuf,
+        backup: Option<Vec<u8>>,
+    }
+
+    impl Planted {
+        pub(crate) fn sibling(name: &str, data: &[u8]) -> Self {
+            let path = std::env::current_exe().unwrap().with_file_name(name);
+            let backup = fs::read(&path).ok();
+            fs::write(&path, data).unwrap();
+            Self { path, backup }
+        }
+
+        pub(crate) fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for Planted {
+        fn drop(&mut self) {
+            match &self.backup {
+                Some(bytes) => drop(fs::write(&self.path, bytes)),
+                None => drop(fs::remove_file(&self.path)),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -370,5 +498,41 @@ mod tests {
             guest.versioned_cache_key("rootfs-digest"),
             "rootfs-digest-guest-deadbeefcafebabe"
         );
+    }
+
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "env lock must outlive resolve"
+    )]
+    fn resolve_some_missing_does_not_consult_path() {
+        let mut env = sidecar_env::lock();
+        let decoy_dir = tempfile::tempdir().unwrap();
+        let decoy_bytes = test_static_guest_elf(b"DECOY-GUEST-ELF!");
+        fs::write(decoy_dir.path().join("bux-guest"), &decoy_bytes).unwrap();
+        env.prepend_path(decoy_dir.path());
+        env.set("BUX_GUEST_PATH", decoy_dir.path().join("bux-guest"));
+
+        let missing = decoy_dir.path().join("missing-guest");
+        let err = ManagedGuestBinary::resolve(Some(&missing)).unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, Error::NotFound(_)), "{msg}");
+        assert!(msg.contains("RuntimeOptions.guest_path"), "{msg}");
+        assert!(!msg.contains("bux binary"), "{msg}");
+        assert!(!missing.exists(), "must not create the missing path");
+    }
+
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "env lock must outlive resolve"
+    )]
+    fn resolve_none_finds_planted_sibling() {
+        let mut env = sidecar_env::lock();
+        env.unset("BUX_GUEST_PATH");
+        let planted_bytes = test_static_guest_elf(b"SIBLING-GUEST-OK");
+        let planted = sidecar_env::Planted::sibling("bux-guest", &planted_bytes);
+        let guest = ManagedGuestBinary::resolve(None).unwrap();
+        assert_eq!(guest.host_path, planted.path());
     }
 }

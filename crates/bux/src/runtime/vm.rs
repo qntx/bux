@@ -123,6 +123,10 @@ pub struct Vm {
     volumes: VolumeManager,
     /// When this VM was spawned (for uptime tracking).
     spawned_at: std::time::Instant,
+    /// Unresolved shim override (`Some` fail-closed; `None` searches).
+    pub(crate) shim_path: Option<PathBuf>,
+    /// Unresolved guest override (`Some` fail-closed; `None` searches).
+    pub(crate) guest_path: Option<PathBuf>,
 }
 
 impl Vm {
@@ -141,6 +145,8 @@ impl Vm {
         snapshots: SnapshotManager,
         secrets: Arc<Mutex<HashMap<String, LiveSecrets>>>,
         volumes: VolumeManager,
+        shim_path: Option<PathBuf>,
+        guest_path: Option<PathBuf>,
     ) -> Self {
         let client = Client::new(&state.socket);
         Self {
@@ -156,6 +162,8 @@ impl Vm {
             secrets,
             volumes,
             spawned_at: std::time::Instant::now(),
+            shim_path,
+            guest_path,
         }
     }
 
@@ -445,7 +453,7 @@ impl Vm {
             )));
         }
 
-        prepare_restart_config(&mut self.state.config)?;
+        prepare_restart_config(&mut self.state.config, self.guest_path.as_deref())?;
 
         let live = if opts.secrets.is_empty() {
             let held = {
@@ -501,6 +509,7 @@ impl Vm {
             &socks_dir,
             network,
             gvproxy,
+            self.shim_path.as_deref(),
         )?;
 
         self.state.config.security_status = shim.security.clone();

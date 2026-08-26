@@ -103,7 +103,7 @@ pub(crate) fn spawn_config(
     reject_long_unix_path(&socket)?;
     let socket_str = socket.to_string_lossy().into_owned();
 
-    prepare_managed_config(&mut config)?;
+    prepare_managed_config(&mut config, rt.guest_path.as_deref())?;
     config.auto_remove = auto_remove;
     config.vsock_ports.push(VsockPort {
         port: AGENT_PORT,
@@ -153,7 +153,14 @@ pub(crate) fn spawn_config(
     }
 
     let config_path = rt.socks_dir.join(format!("{id}.json"));
-    let shim = spawn_shim(&config, &config_path, &rt.socks_dir, network, gvproxy)?;
+    let shim = spawn_shim(
+        &config,
+        &config_path,
+        &rt.socks_dir,
+        network,
+        gvproxy,
+        rt.shim_path.as_deref(),
+    )?;
     abort.pid = Some(shim.pid);
 
     config.security_status = shim.security.clone();
@@ -196,6 +203,8 @@ pub(crate) fn spawn_config(
         rt.snapshots.clone(),
         std::sync::Arc::clone(&rt.secrets),
         rt.volumes.clone(),
+        rt.shim_path.clone(),
+        rt.guest_path.clone(),
     ))
 }
 
@@ -275,6 +284,7 @@ pub(crate) fn spawn_shim(
     socks_dir: &Path,
     network: Option<ShimNetwork>,
     gvproxy: Option<ShimGvproxy>,
+    shim_path: Option<&Path>,
 ) -> Result<ShimSpawnResult> {
     if network.is_some() != gvproxy.is_some() {
         return Err(crate::Error::InvalidConfig(
@@ -301,7 +311,7 @@ pub(crate) fn spawn_shim(
     } else {
         (None, None)
     };
-    let shim = find_shim()?;
+    let shim = find_shim(shim_path)?;
 
     let readonly_paths = config
         .root_disk
@@ -402,8 +412,25 @@ fn map_jail_error(e: bux_jail::Error, shim: &Path) -> crate::Error {
 }
 
 /// Locates the `bux-shim` binary.
-fn find_shim() -> io::Result<PathBuf> {
+///
+/// `Some` must be a regular file or [`crate::Error::NotFound`]; `None` searches
+/// env, then a sibling of the running executable, then `$PATH`.
+///
+/// # Errors
+///
+/// Returns [`crate::Error::NotFound`] if the shim cannot be located.
+pub(crate) fn find_shim(explicit: Option<&Path>) -> Result<PathBuf> {
     const NAME: &str = "bux-shim";
+
+    if let Some(path) = explicit {
+        if path.is_file() {
+            return Ok(path.to_path_buf());
+        }
+        return Err(crate::Error::NotFound(format!(
+            "bux-shim not found at {} (RuntimeOptions.shim_path)",
+            path.display()
+        )));
+    }
 
     if let Ok(p) = std::env::var("BUX_SHIM_PATH") {
         let path = PathBuf::from(p);
@@ -428,9 +455,8 @@ fn find_shim() -> io::Result<PathBuf> {
         }
     }
 
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        format!("'{NAME}' not found; install it next to the bux binary or in $PATH"),
+    Err(crate::Error::NotFound(
+        "bux-shim not found (set RuntimeOptions.shim_path, BUX_SHIM_PATH, place bux-shim next to the running executable, or on PATH)".into(),
     ))
 }
 
@@ -488,5 +514,47 @@ mod tests {
         assert!(msg.contains("sun_path"), "{msg}");
         assert!(msg.contains(".sock"), "{msg}");
         assert!(!msg.contains(".net.sock"), "{msg}");
+    }
+
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "env lock must outlive find_shim"
+    )]
+    fn find_shim_some_missing_does_not_consult_path() {
+        let mut env = crate::guest::sidecar_env::lock();
+        let decoy_dir = tempfile::tempdir().unwrap();
+        fs::write(decoy_dir.path().join("bux-shim"), b"decoy-shim").unwrap();
+        env.prepend_path(decoy_dir.path());
+        env.set("BUX_SHIM_PATH", decoy_dir.path().join("bux-shim"));
+
+        let missing = decoy_dir.path().join("missing-shim");
+        let err = find_shim(Some(&missing)).unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, crate::Error::NotFound(_)), "{msg}");
+        assert!(msg.contains("RuntimeOptions.shim_path"), "{msg}");
+        assert!(!msg.contains("bux binary"), "{msg}");
+    }
+
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "env lock must outlive find_shim"
+    )]
+    fn find_shim_none_finds_planted_sibling() {
+        let mut env = crate::guest::sidecar_env::lock();
+        env.unset("BUX_SHIM_PATH");
+        let planted = crate::guest::sidecar_env::Planted::sibling("bux-shim", b"planted-shim");
+        let found = find_shim(None).unwrap();
+        assert_eq!(found, planted.path());
+    }
+
+    #[test]
+    fn find_shim_some_planted_returns_that_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let planted = dir.path().join("planted-shim");
+        fs::write(&planted, b"shim").unwrap();
+        let found = find_shim(Some(&planted)).unwrap();
+        assert_eq!(found, planted);
     }
 }
