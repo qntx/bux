@@ -150,10 +150,6 @@ pub(crate) struct VmConfig {
     #[serde(default)]
     pub vsock_ports: Vec<VsockPort>,
 
-    /// Global log level.
-    #[serde(default)]
-    pub log_level: Option<crate::log_level::LogLevel>,
-
     /// Guest network (gvproxy or offline).
     #[serde(default)]
     pub network: crate::options::NetworkSpec,
@@ -232,7 +228,6 @@ impl Default for VmConfig {
             published_ports: Vec::new(),
             virtiofs: Vec::new(),
             vsock_ports: Vec::new(),
-            log_level: None,
             network: crate::options::NetworkSpec::default(),
             secrets_required: false,
             workload_env: Vec::new(),

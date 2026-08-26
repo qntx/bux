@@ -124,7 +124,6 @@ mod tests {
 
     fn base_cfg() -> ShimConfig {
         ShimConfig {
-            vm_id: String::new(),
             vcpus: 1,
             ram_mib: 256,
             rootfs: Some("/rootfs".into()),
@@ -134,17 +133,9 @@ mod tests {
             vsock_ports: vec![],
             network: None,
             gvproxy: None,
-            log_level: None,
             exec_path: None,
             exec_args: vec![],
             env: None,
-            workdir: None,
-            uid: None,
-            gid: None,
-            rlimits: vec![],
-            nested_virt: None,
-            snd_device: None,
-            console_output: None,
         }
     }
 
