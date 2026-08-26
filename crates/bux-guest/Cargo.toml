@@ -14,7 +14,7 @@ bux-proto = { workspace = true }
 futures = "0.3"
 libc = { workspace = true }
 nix = { workspace = true }
-rtnetlink = "0.14"
+rtnetlink = "0.23"
 serde_json = { workspace = true }
 tar = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "io-util", "process", "fs", "time", "sync", "signal"] }

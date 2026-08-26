@@ -5,10 +5,11 @@
 //! Uses rtnetlink (pure Rust) — no `ip` binary dependency.
 
 use std::fs;
+use std::net::Ipv4Addr;
 
 use bux_proto::net::{GATEWAY_IP, GATEWAY_IPV4, GUEST_INTERFACE, GUEST_IP, GUEST_IPV4, PREFIX_LEN};
 use futures::stream::TryStreamExt;
-use rtnetlink::new_connection;
+use rtnetlink::{LinkUnspec, RouteMessageBuilder, new_connection};
 
 /// Bring up loopback + eth0 with static IP and default route.
 ///
@@ -30,8 +31,7 @@ pub async fn configure_static_eth0() -> std::io::Result<()> {
         {
             handle
                 .link()
-                .set(link.header.index)
-                .up()
+                .set(LinkUnspec::new_with_index(link.header.index).up().build())
                 .execute()
                 .await
                 .map_err(|e| std::io::Error::other(format!("lo up: {e}")))?;
@@ -58,8 +58,7 @@ pub async fn configure_static_eth0() -> std::io::Result<()> {
 
     handle
         .link()
-        .set(idx)
-        .up()
+        .set(LinkUnspec::new_with_index(idx).up().build())
         .execute()
         .await
         .map_err(|e| std::io::Error::other(format!("{GUEST_INTERFACE} up: {e}")))?;
@@ -78,20 +77,16 @@ pub async fn configure_static_eth0() -> std::io::Result<()> {
             }
         })?;
 
-    handle
-        .route()
-        .add()
-        .v4()
+    let route = RouteMessageBuilder::<Ipv4Addr>::new()
         .gateway(GATEWAY_IPV4)
-        .execute()
-        .await
-        .or_else(|e| {
-            if e.to_string().contains("File exists") || e.to_string().contains("EEXIST") {
-                Ok(())
-            } else {
-                Err(std::io::Error::other(format!("default route: {e}")))
-            }
-        })?;
+        .build();
+    handle.route().add(route).execute().await.or_else(|e| {
+        if e.to_string().contains("File exists") || e.to_string().contains("EEXIST") {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!("default route: {e}")))
+        }
+    })?;
 
     write_resolv_gateway();
     ensure_hosts_and_hostname();
