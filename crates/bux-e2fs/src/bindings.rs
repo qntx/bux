@@ -51,6 +51,8 @@ pub const LINUX_S_IFDIR: u32 = 16384;
 pub const LINUX_S_IFCHR: u32 = 8192;
 pub const LINUX_S_IFIFO: u32 = 4096;
 pub const EXT2_FLAG_FLUSH_NO_SYNC: u32 = 1;
+pub const POPULATE_FS_NO_COPY_XATTRS: u32 = 1;
+pub const POPULATE_FS_LINK_APPEND: u32 = 2;
 pub type __dev_t = ::core::ffi::c_ulong;
 pub type __uid_t = ::core::ffi::c_uint;
 pub type __gid_t = ::core::ffi::c_uint;
@@ -969,10 +971,12 @@ pub struct struct_io_stats {
     pub reserved: ::core::ffi::c_int,
     pub bytes_read: ::core::ffi::c_ulonglong,
     pub bytes_written: ::core::ffi::c_ulonglong,
+    pub cache_hits: ::core::ffi::c_ulonglong,
+    pub cache_misses: ::core::ffi::c_ulonglong,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of struct_io_stats"][::core::mem::size_of::<struct_io_stats>() - 24usize];
+    ["Size of struct_io_stats"][::core::mem::size_of::<struct_io_stats>() - 40usize];
     ["Alignment of struct_io_stats"][::core::mem::align_of::<struct_io_stats>() - 8usize];
     ["Offset of field: struct_io_stats::num_fields"]
         [::core::mem::offset_of!(struct_io_stats, num_fields) - 0usize];
@@ -982,6 +986,10 @@ const _: () = {
         [::core::mem::offset_of!(struct_io_stats, bytes_read) - 8usize];
     ["Offset of field: struct_io_stats::bytes_written"]
         [::core::mem::offset_of!(struct_io_stats, bytes_written) - 16usize];
+    ["Offset of field: struct_io_stats::cache_hits"]
+        [::core::mem::offset_of!(struct_io_stats, cache_hits) - 24usize];
+    ["Offset of field: struct_io_stats::cache_misses"]
+        [::core::mem::offset_of!(struct_io_stats, cache_misses) - 32usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -1639,6 +1647,16 @@ unsafe extern "C" {
     ) -> errcode_t;
 }
 unsafe extern "C" {
+    pub fn populate_fs3(
+        fs: ext2_filsys,
+        parent_ino: ext2_ino_t,
+        source_dir: *const ::core::ffi::c_char,
+        root: ext2_ino_t,
+        flags: ::core::ffi::c_int,
+        fs_callbacks: *mut fs_ops_callbacks,
+    ) -> errcode_t;
+}
+unsafe extern "C" {
     pub fn do_symlink_internal(
         fs: ext2_filsys,
         cwd: ext2_ino_t,
@@ -1652,6 +1670,7 @@ unsafe extern "C" {
         fs: ext2_filsys,
         cwd: ext2_ino_t,
         name: *const ::core::ffi::c_char,
+        flags: ::core::ffi::c_ulong,
         root: ext2_ino_t,
     ) -> errcode_t;
 }
@@ -1661,6 +1680,7 @@ unsafe extern "C" {
         cwd: ext2_ino_t,
         src: *const ::core::ffi::c_char,
         dest: *const ::core::ffi::c_char,
+        flags: ::core::ffi::c_ulong,
         root: ext2_ino_t,
     ) -> errcode_t;
 }
