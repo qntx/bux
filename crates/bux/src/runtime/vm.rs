@@ -123,9 +123,9 @@ pub struct Vm {
     volumes: VolumeManager,
     /// When this VM was spawned (for uptime tracking).
     spawned_at: std::time::Instant,
-    /// Unresolved shim path copied from the opening [`super::Runtime`].
+    /// Unresolved shim override (`Some` fail-closed; `None` searches).
     pub(crate) shim_path: Option<PathBuf>,
-    /// Unresolved guest path copied from the opening [`super::Runtime`].
+    /// Unresolved guest override (`Some` fail-closed; `None` searches).
     pub(crate) guest_path: Option<PathBuf>,
 }
 

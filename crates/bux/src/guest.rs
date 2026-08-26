@@ -296,13 +296,6 @@ fn short_hash(data: &[u8]) -> String {
     out
 }
 
-#[cfg(test)]
-impl ManagedGuestBinary {
-    pub(crate) fn host_path(&self) -> &Path {
-        &self.host_path
-    }
-}
-
 /// Static Linux ELF for this host with a unique 16-byte tag at offset 64.
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "test helper")]
@@ -540,6 +533,6 @@ mod tests {
         let planted_bytes = test_static_guest_elf(b"SIBLING-GUEST-OK");
         let planted = sidecar_env::Planted::sibling("bux-guest", &planted_bytes);
         let guest = ManagedGuestBinary::resolve(None).unwrap();
-        assert_eq!(guest.host_path(), planted.path());
+        assert_eq!(guest.host_path, planted.path());
     }
 }

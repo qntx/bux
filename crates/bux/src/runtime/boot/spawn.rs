@@ -413,8 +413,8 @@ fn map_jail_error(e: bux_jail::Error, shim: &Path) -> crate::Error {
 
 /// Locates the `bux-shim` binary.
 ///
-/// `explicit` is [`crate::RuntimeOptions::shim_path`]: `Some` is fail-closed;
-/// `None` searches env, then a sibling of the running executable, then `$PATH`.
+/// `Some` must be a regular file or [`crate::Error::NotFound`]; `None` searches
+/// env, then a sibling of the running executable, then `$PATH`.
 ///
 /// # Errors
 ///
