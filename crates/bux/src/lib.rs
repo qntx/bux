@@ -2,7 +2,10 @@
 //!
 //! `bux` wraps [`libkrun`] into a managed [`Runtime`]: create isolated
 //! machines from OCI images, exec through the guest agent, and control
-//! egress at the host gvproxy boundary.
+//! egress at the host gvproxy boundary. Sidecar `bux-shim` and `bux-guest`
+//! are [`RuntimeOptions::shim_path`] / [`RuntimeOptions::guest_path`], else
+//! `BUX_SHIM_PATH` / `BUX_GUEST_PATH`, a sibling of the running executable,
+//! then `$PATH`.
 //!
 //! # Quick start
 //!
