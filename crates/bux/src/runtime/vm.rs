@@ -600,44 +600,6 @@ impl Vm {
         is_pid_alive(self.state.pid)
     }
 
-    /// Pauses the VM by quiescing its filesystems and sending `SIGSTOP`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the VM cannot be paused or the signal fails.
-    pub async fn pause(&mut self) -> Result<()> {
-        if !self.state.status.can_pause() {
-            return Err(crate::Error::InvalidState(format!(
-                "VM {} cannot be paused (status: {:?})",
-                self.state.id, self.state.status
-            )));
-        }
-        drop(self.client.quiesce().await);
-        signal::kill(Pid::from_raw(self.state.pid), Signal::SIGSTOP)?;
-        self.state.status = Status::Paused;
-        self.db.update_status(&self.state.id, Status::Paused)?;
-        Ok(())
-    }
-
-    /// Resumes a paused VM by sending `SIGCONT` and thawing its filesystems.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the VM cannot be resumed or the signal fails.
-    pub async fn resume(&mut self) -> Result<()> {
-        if !self.state.status.can_resume() {
-            return Err(crate::Error::InvalidState(format!(
-                "VM {} cannot be resumed (status: {:?})",
-                self.state.id, self.state.status
-            )));
-        }
-        signal::kill(Pid::from_raw(self.state.pid), Signal::SIGCONT)?;
-        drop(self.client.thaw().await);
-        self.state.status = Status::Running;
-        self.db.update_status(&self.state.id, Status::Running)?;
-        Ok(())
-    }
-
     /// Sends a POSIX signal to the VM process.
     ///
     /// # Errors

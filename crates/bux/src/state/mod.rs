@@ -10,23 +10,15 @@ use crate::disk::DiskFormat;
 /// VM lifecycle status.
 ///
 /// ```text
-/// Creating ──► Running ──► Stopping ──► Stopped
-///                │  ▲                      ▲
-///                ▼  │                      │
-///              Paused ────────────────────►┘
+/// Stopped ──► Running ──► Stopping ──► Stopped
+///                │                        ▲
+///                └────────────────────────┘
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Status {
-    /// VM is being prepared (disk creation, etc.).
-    Creating,
     /// VM process is running.
     Running,
-    /// VM is frozen via SIGSTOP (vCPUs and virtio backends paused).
-    ///
-    /// Filesystem may also be quiesced (FIFREEZE) for point-in-time consistency.
-    /// Resume with [`Vm::resume()`](crate::runtime::Vm::resume).
-    Paused,
     /// A graceful shutdown has been requested; waiting for the process to exit.
     Stopping,
     /// VM has been stopped or exited.
@@ -37,7 +29,7 @@ impl Status {
     /// Returns `true` if the VM process may still be alive.
     #[must_use]
     pub const fn is_active(self) -> bool {
-        matches!(self, Self::Running | Self::Paused | Self::Stopping)
+        matches!(self, Self::Running | Self::Stopping)
     }
 
     /// Returns `true` if `exec()` can be called.
@@ -49,19 +41,7 @@ impl Status {
     /// Returns `true` if `stop()` can be called.
     #[must_use]
     pub const fn can_stop(self) -> bool {
-        matches!(self, Self::Running | Self::Paused)
-    }
-
-    /// Returns `true` if `pause()` can be called.
-    #[must_use]
-    pub const fn can_pause(self) -> bool {
         matches!(self, Self::Running)
-    }
-
-    /// Returns `true` if `resume()` can be called.
-    #[must_use]
-    pub const fn can_resume(self) -> bool {
-        matches!(self, Self::Paused)
     }
 
     /// Returns `true` if `remove()` can be called.
@@ -73,22 +53,17 @@ impl Status {
     /// Returns `true` if transitioning from `self` to `target` is valid.
     ///
     /// ```text
-    /// Creating ──► Running ──► Stopping ──► Stopped
-    ///                │  ▲                      ▲
-    ///                ▼  │                      │
-    ///              Paused ────────────────────►┘
+    /// Stopped ──► Running ──► Stopping ──► Stopped
+    ///                │                        ▲
+    ///                └────────────────────────┘
     /// ```
     #[must_use]
     pub const fn can_transition_to(self, target: Self) -> bool {
         matches!(
             (self, target),
-            (Self::Creating | Self::Paused | Self::Stopped, Self::Running)
-                | (
-                    Self::Creating | Self::Running | Self::Paused | Self::Stopping,
-                    Self::Stopped
-                )
-                | (Self::Running, Self::Paused | Self::Stopping)
-                | (Self::Paused, Self::Stopping)
+            (Self::Stopped, Self::Running)
+                | (Self::Running | Self::Stopping, Self::Stopped)
+                | (Self::Running, Self::Stopping)
         )
     }
 }
@@ -514,17 +489,22 @@ mod tests {
 
     #[test]
     fn status_transitions() {
-        assert!(Status::Creating.can_transition_to(Status::Running));
-        assert!(Status::Running.can_transition_to(Status::Paused));
-        assert!(Status::Running.can_transition_to(Status::Stopping));
-        assert!(Status::Paused.can_transition_to(Status::Running));
-        assert!(Status::Stopping.can_transition_to(Status::Stopped));
         assert!(Status::Stopped.can_transition_to(Status::Running));
+        assert!(Status::Running.can_transition_to(Status::Stopping));
+        assert!(Status::Running.can_transition_to(Status::Stopped));
+        assert!(Status::Stopping.can_transition_to(Status::Stopped));
 
-        // Invalid transitions.
-        assert!(!Status::Stopped.can_transition_to(Status::Paused));
-        assert!(!Status::Creating.can_transition_to(Status::Paused));
-        assert!(!Status::Running.can_transition_to(Status::Creating));
+        assert!(!Status::Stopped.can_transition_to(Status::Stopping));
+        assert!(!Status::Stopping.can_transition_to(Status::Running));
+        assert!(!Status::Stopping.can_transition_to(Status::Stopping));
+
+        assert!(Status::Running.can_stop());
+        assert!(!Status::Stopping.can_stop());
+        assert!(!Status::Stopped.can_stop());
+
+        assert!(Status::Running.is_active());
+        assert!(Status::Stopping.is_active());
+        assert!(!Status::Stopped.is_active());
     }
 
     #[test]
