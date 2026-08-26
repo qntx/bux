@@ -732,7 +732,6 @@ pub(super) fn spawn_shim(
             .collect(),
         watchdog_fd: shim_wd_fd.as_ref().map(AsRawFd::as_raw_fd),
         sandbox,
-        resource_limits: None,
         stderr_file: Some(stderr_file),
         landlock: sec.landlock,
         allow_degraded_security: sec.allow_degraded,
@@ -740,8 +739,8 @@ pub(super) fn spawn_shim(
         network_host: policy.network_host,
     };
 
-    let result = bux_jail::spawn(&shim, config_path, jail_config, vm_id)
-        .map_err(|e| map_jail_error(e, &shim))?;
+    let result =
+        bux_jail::spawn(&shim, config_path, jail_config).map_err(|e| map_jail_error(e, &shim))?;
 
     #[allow(
         clippy::cast_possible_wrap,

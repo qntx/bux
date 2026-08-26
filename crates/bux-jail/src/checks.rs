@@ -66,9 +66,6 @@ pub fn audit_isolation(caps: &HostCapabilities) -> Vec<String> {
         warnings
             .push("no MAC (AppArmor/SELinux/Seatbelt) — no mandatory access control".to_owned());
     }
-    if !caps.cgroups {
-        warnings.push("cgroups v2 not available — no resource limits enforcement".to_owned());
-    }
     if !caps.landlock {
         warnings.push(
             "Landlock LSM not available — filesystem restrictions degraded unless fail-closed"
