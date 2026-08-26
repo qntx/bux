@@ -580,32 +580,4 @@ mod tests {
         db.delete_base_disk("bd1").unwrap();
         assert!(db.get_base_disk_by_digest("sha256:abc").unwrap().is_none());
     }
-
-    #[test]
-    fn product_schema_version() {
-        let db = open_test_db();
-        assert_eq!(db::PRODUCT_SCHEMA_VERSION, 5);
-
-        let mut names = Vec::new();
-        {
-            let conn = db.lock();
-            let version: u32 = conn
-                .query_row("PRAGMA user_version", [], |r| r.get(0))
-                .unwrap();
-            assert_eq!(version, 5);
-
-            let mut stmt = conn.prepare("PRAGMA table_info(vms)").unwrap();
-            let mut rows = stmt.query([]).unwrap();
-            while let Some(row) = rows.next().unwrap() {
-                names.push(row.get::<_, String>(1).unwrap());
-            }
-        }
-        assert!(
-            !names.iter().any(|n| n == "health"),
-            "vms must not have a health column, got {names:?}"
-        );
-
-        db.insert(&test_vm("vm1", None)).unwrap();
-        assert_eq!(db.list().unwrap().len(), 1);
-    }
 }

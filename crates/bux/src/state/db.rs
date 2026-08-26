@@ -143,7 +143,7 @@ impl StateDb {
     /// Panics if the mutex is poisoned, which indicates a prior panic
     /// during a database operation — an unrecoverable state.
     #[allow(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
-    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().expect("StateDb mutex poisoned")
     }
 
@@ -696,4 +696,39 @@ fn system_time_to_f64(t: SystemTime) -> f64 {
 /// Converts seconds since UNIX epoch (`f64`) back to a [`SystemTime`].
 fn f64_to_system_time(secs: f64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs_f64(secs)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions use unwrap for clarity"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn product_schema_version() {
+        let db = StateDb::open(":memory:").expect("open in-memory db");
+        assert_eq!(PRODUCT_SCHEMA_VERSION, 5);
+
+        let mut names = Vec::new();
+        {
+            let conn = db.lock();
+            let version: u32 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(version, 5);
+
+            let mut stmt = conn.prepare("PRAGMA table_info(vms)").unwrap();
+            let mut rows = stmt.query([]).unwrap();
+            while let Some(row) = rows.next().unwrap() {
+                names.push(row.get::<_, String>(1).unwrap());
+            }
+        }
+        assert!(
+            !names.iter().any(|n| n == "health"),
+            "vms must not have a health column, got {names:?}"
+        );
+    }
 }
