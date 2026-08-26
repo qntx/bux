@@ -11,9 +11,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Pin native library versions — keep in sync with crates/bux-krun/build.rs HEADER_URL.
-  LIBKRUN_VERSION: "1.17.4"
-  LIBKRUNFW_VERSION: "5.2.1"
+  # Pin native library versions — keep in sync with crates/bux-krun/build.rs.
+  LIBKRUN_VERSION: "1.19.4"
+  LIBKRUNFW_VERSION: "5.5.0"
 
 jobs:
   build:
@@ -32,7 +32,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          toolchain: 1.97.1
 
       - name: Install build dependencies (macOS)
         if: runner.os == 'macOS'
@@ -42,7 +44,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           # Download prebuilt kernel.c source, compile locally to .dylib
-          curl -fsSL "https://github.com/containers/libkrunfw/releases/download/v${LIBKRUNFW_VERSION}/libkrunfw-prebuilt-aarch64.tgz" \
+          curl -fsSL "https://github.com/libkrun/libkrunfw/releases/download/v${LIBKRUNFW_VERSION}/libkrunfw-prebuilt-aarch64.tgz" \
             -o /tmp/libkrunfw.tgz
           mkdir -p /tmp/libkrunfw-src && tar xzf /tmp/libkrunfw.tgz -C /tmp/libkrunfw-src
           cd /tmp/libkrunfw-src/libkrunfw
@@ -57,7 +59,7 @@ jobs:
           export LIBCLANG_PATH="${LLVM_PREFIX}/lib"
           export PKG_CONFIG_PATH="${{ github.workspace }}/prefix/lib/pkgconfig"
           git clone --depth 1 --branch "v${LIBKRUN_VERSION}" --recurse-submodules \
-            https://github.com/containers/libkrun.git libkrun-src
+            https://github.com/libkrun/libkrun.git libkrun-src
           cd libkrun-src
           # NET=1 BLK=1 only — no GPU, no external deps beyond Hypervisor.framework
           make -j$(sysctl -n hw.ncpu) NET=1 BLK=1
@@ -75,7 +77,7 @@ jobs:
         run: |
           ARCH=$(uname -m)
           mkdir -p "${{ github.workspace }}/prefix"
-          curl -fsSL "https://github.com/containers/libkrunfw/releases/download/v${LIBKRUNFW_VERSION}/libkrunfw-${ARCH}.tgz" | \
+          curl -fsSL "https://github.com/libkrun/libkrunfw/releases/download/v${LIBKRUNFW_VERSION}/libkrunfw-${ARCH}.tgz" | \
             tar xz -C "${{ github.workspace }}/prefix"
 
       - name: Build libkrun (Linux)
@@ -83,7 +85,7 @@ jobs:
         run: |
           export PKG_CONFIG_PATH="${{ github.workspace }}/prefix/lib64/pkgconfig"
           git clone --depth 1 --branch "v${LIBKRUN_VERSION}" --recurse-submodules \
-            https://github.com/containers/libkrun.git libkrun-src
+            https://github.com/libkrun/libkrun.git libkrun-src
           cd libkrun-src
           make -j$(nproc) NET=1 BLK=1
           make PREFIX="${{ github.workspace }}/prefix" install
@@ -137,14 +139,3 @@ jobs:
         with:
           files: bux-deps-*.tar.gz
           generate_release_notes: true
-
-  publish-krun:
-    needs: release
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/krun-v')
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo publish -p bux-krun
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

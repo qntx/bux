@@ -3,8 +3,8 @@
 //! All types and functions are **auto-generated** by [`bindgen`](https://docs.rs/bindgen)
 //! from the [`libkrun.h`] header. Do not edit `bindings.rs` manually.
 //!
-//! [`libkrun`]: https://github.com/containers/libkrun
-//! [`libkrun.h`]: https://github.com/qntx/libkrun/blob/main/include/libkrun.h
+//! [`libkrun`]: https://github.com/libkrun/libkrun
+//! [`libkrun.h`]: https://github.com/libkrun/libkrun/blob/main/include/libkrun.h
 
 #![allow(
     unsafe_code,

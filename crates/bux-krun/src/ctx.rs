@@ -1,8 +1,8 @@
 //! Safe wrappers around the raw `krun_*` FFI calls.
 //!
-//! Every public function in this module corresponds 1:1 to a
-//! non-deprecated `krun_*` C entry point declared by [`libkrun.h`].
-//! All `unsafe` inside `bux-krun` is confined here and in [`crate::sys`].
+//! Public functions in this module correspond 1:1 to `krun_*` C entry
+//! points declared by [`libkrun.h`]. All `unsafe` inside `bux-krun` is
+//! confined here and in [`crate::sys`].
 //!
 //! Callers manage libkrun context IDs directly: start with
 //! [`create_ctx`] (returns `u32`), pass the ID to the various
@@ -10,8 +10,8 @@
 //! [`start_enter`] (takes over the process) or [`free_ctx`] to release
 //! it. Higher layers (`bux`) wrap the raw context ID in RAII types.
 //!
-//! [`libkrun`]: https://github.com/containers/libkrun
-//! [`libkrun.h`]: https://github.com/qntx/libkrun/blob/main/include/libkrun.h
+//! [`libkrun`]: https://github.com/libkrun/libkrun
+//! [`libkrun.h`]: https://github.com/libkrun/libkrun/blob/main/include/libkrun.h
 
 #![allow(
     unsafe_code,
@@ -113,6 +113,8 @@ pub enum Feature {
     AwsNitro = 9,
     /// virgl resource map v2.
     VirglResourceMap2 = 10,
+    /// Built-in default init binary.
+    InitBlob = 11,
 }
 
 /// Translate a signed libkrun status code into a [`Result`].
@@ -1013,4 +1015,20 @@ pub fn split_irqchip(ctx: u32, enable: bool) -> Result<()> {
     check("split_irqchip", unsafe {
         sys::krun_split_irqchip(ctx, enable)
     })
+}
+
+/// Discriminant checks against `libkrun.h` constants.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Feature::InitBlob` matches `KRUN_FEATURE_INIT_BLOB`.
+    #[test]
+    fn init_blob_matches_libkrun_constant() {
+        assert_eq!(
+            Feature::InitBlob as u64,
+            u64::from(sys::KRUN_FEATURE_INIT_BLOB),
+            "Feature::InitBlob must match KRUN_FEATURE_INIT_BLOB",
+        );
+    }
 }

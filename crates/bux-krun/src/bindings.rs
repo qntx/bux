@@ -11,13 +11,17 @@ pub const KRUN_LOG_STYLE_AUTO: u32 = 0;
 pub const KRUN_LOG_STYLE_ALWAYS: u32 = 1;
 pub const KRUN_LOG_STYLE_NEVER: u32 = 2;
 pub const KRUN_LOG_OPTION_NO_ENV: u32 = 1;
+pub const KRUN_FS_ROOT_TAG: &[u8; 10] = b"/dev/root\0";
 pub const KRUN_DISK_FORMAT_RAW: u32 = 0;
 pub const KRUN_DISK_FORMAT_QCOW2: u32 = 1;
 pub const KRUN_DISK_FORMAT_VMDK: u32 = 2;
 pub const KRUN_SYNC_NONE: u32 = 0;
 pub const KRUN_SYNC_RELAXED: u32 = 1;
 pub const KRUN_SYNC_FULL: u32 = 2;
+pub const KRUN_SEMANTICS_LINUX_COMPLETE: u32 = 0;
+pub const KRUN_SEMANTICS_LINUX_SIMPLIFIED: u32 = 1;
 pub const NET_FLAG_VFKIT: u32 = 1;
+pub const NET_FLAG_DHCP_CLIENT: u32 = 2;
 pub const KRUN_TSI_HIJACK_INET: u32 = 1;
 pub const KRUN_TSI_HIJACK_UNIX: u32 = 2;
 pub const NET_FEATURE_CSUM: u32 = 1;
@@ -58,10 +62,12 @@ pub const KRUN_FEATURE_AMD_SEV: u32 = 7;
 pub const KRUN_FEATURE_INTEL_TDX: u32 = 8;
 pub const KRUN_FEATURE_AWS_NITRO: u32 = 9;
 pub const KRUN_FEATURE_VIRGL_RESOURCE_MAP2: u32 = 10;
-pub type __uid_t = ::core::ffi::c_uint;
-pub type __gid_t = ::core::ffi::c_uint;
-pub type gid_t = __gid_t;
-pub type uid_t = __uid_t;
+pub const KRUN_FEATURE_INIT_BLOB: u32 = 11;
+pub type __uint32_t = ::core::ffi::c_uint;
+pub type __darwin_gid_t = __uint32_t;
+pub type __darwin_uid_t = __uint32_t;
+pub type uid_t = __darwin_uid_t;
+pub type gid_t = __darwin_gid_t;
 unsafe extern "C" {
     #[doc = " Sets the log level for the library.\n\n Arguments:\n  \"level\" can be one of the following values:\n    0: Off\n    1: Error\n    2: Warn\n    3: Info\n    4: Debug\n    5: Trace\n\n Returns:\n  Zero on success or a negative error number on failure."]
     pub fn krun_set_log_level(level: u32) -> i32;
@@ -88,7 +94,7 @@ unsafe extern "C" {
     pub fn krun_set_vm_config(ctx_id: u32, num_vcpus: u8, ram_mib: u32) -> i32;
 }
 unsafe extern "C" {
-    #[doc = " Sets the path to be use as root for the microVM. Not available in libkrun-SEV.\n\n Arguments:\n  \"ctx_id\"    - the configuration context ID.\n  \"root_path\" - a null-terminated string representing the path to be used as root.\n\n Returns:\n  Zero on success or a negative error number on failure."]
+    #[doc = " Sets the path to be use as root for the microVM. Not available in libkrun-SEV.\n\n For more control over the root filesystem (e.g. read-only, DAX window size),\n use krun_add_virtiofs3() with KRUN_FS_ROOT_TAG instead.\n\n Arguments:\n  \"ctx_id\"    - the configuration context ID.\n  \"root_path\" - a null-terminated string representing the path to be used as root.\n\n Returns:\n  Zero on success or a negative error number on failure."]
     pub fn krun_set_root(ctx_id: u32, root_path: *const ::core::ffi::c_char) -> i32;
 }
 unsafe extern "C" {
@@ -152,6 +158,27 @@ unsafe extern "C" {
         c_tag: *const ::core::ffi::c_char,
         c_path: *const ::core::ffi::c_char,
         shm_size: u64,
+    ) -> i32;
+}
+unsafe extern "C" {
+    #[doc = " Adds an independent virtio-fs device pointing to a host's directory with a tag. This\n variant allows specifying the size of the DAX window and a read-only flag.\n\n Arguments:\n  \"ctx_id\"         - the configuration context ID.\n  \"c_tag\"          - tag to identify the filesystem in the guest.\n  \"c_path\"         - full path to the directory in the host to be exposed to the guest.\n  \"shm_size\"       - size of the DAX SHM window in bytes.\n  \"read_only\"      - if true, the filesystem will be exposed as read-only to the guest.\n\n Returns:\n  Zero on success or a negative error number on failure."]
+    pub fn krun_add_virtiofs3(
+        ctx_id: u32,
+        c_tag: *const ::core::ffi::c_char,
+        c_path: *const ::core::ffi::c_char,
+        shm_size: u64,
+        read_only: bool,
+    ) -> i32;
+}
+unsafe extern "C" {
+    #[doc = " Adds an independent virtio-fs device pointing to a host's directory with a\n tag. This variant allows specifying the permission semantics to be emulated.\n\n Arguments:\n  \"ctx_id\"         - the configuration context ID.\n  \"c_tag\"          - tag to identify the filesystem in the guest.\n  \"c_path\"         - full path to the directory in the host to be exposed to the guest.\n  \"shm_size\"       - size of the DAX SHM window in bytes.\n  \"read_only\"      - if true, the filesystem will be exposed as read-only to the guest.\n  \"semantics\"      - the permissions semantics to be emulated.\n\n Returns:\n  Zero on success or a negative error number on failure."]
+    pub fn krun_add_virtiofs4(
+        ctx_id: u32,
+        c_tag: *const ::core::ffi::c_char,
+        c_path: *const ::core::ffi::c_char,
+        shm_size: u64,
+        read_only: bool,
+        semantics: u32,
     ) -> i32;
 }
 unsafe extern "C" {
@@ -353,11 +380,11 @@ unsafe extern "C" {
     pub fn krun_setgid(ctx_id: u32, gid: gid_t) -> i32;
 }
 unsafe extern "C" {
-    #[doc = " Configures the microVM to support Nested Virtualization\n\n Arguments:\n  \"ctx_id\"  - the configuration context ID.\n  \"enabled\" - true to enable Nested Virtualization in the microVM.\n\n Notes:\n  This feature is only supported on macOS.\n\n Returns:\n  Zero on success or a negative error number on failure. Success doesn't imply that\n  Nested Virtualization is supported on the system, only that it's going to be requested\n  when the microVM is created after calling \"krun_start_enter\"."]
+    #[doc = " Configures the microVM to support Nested Virtualization\n\n Arguments:\n  \"ctx_id\"  - the configuration context ID.\n  \"enabled\" - true to enable Nested Virtualization in the microVM.\n\n Returns:\n  Zero on success or a negative error number on failure. Success doesn't imply that\n  Nested Virtualization is supported on the system, only that it's going to be requested\n  when the microVM is created after calling \"krun_start_enter\"."]
     pub fn krun_set_nested_virt(ctx_id: u32, enabled: bool) -> i32;
 }
 unsafe extern "C" {
-    #[doc = " Check the system if Nested Virtualization is supported\n\n Notes:\n  This feature is only supported on macOS.\n\n Returns:\n  - 1 : Success and Nested Virtualization is supported\n  - 0 : Success and Nested Virtualization is not supported\n  - <0: Failure"]
+    #[doc = " Check the system if Nested Virtualization is supported\n\n Returns:\n  - 1 : Success and Nested Virtualization is supported\n  - 0 : Success and Nested Virtualization is not supported\n  - <0: Failure"]
     pub fn krun_check_nested_virt() -> i32;
 }
 unsafe extern "C" {
@@ -374,6 +401,35 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn krun_disable_implicit_console(ctx_id: u32) -> i32;
+}
+unsafe extern "C" {
+    #[doc = " Do not inject the default init binary (/init.krun) into the root\n filesystem. Must be called before krun_set_root().\n\n No-op when libkrun is built without the \"init-blob\" feature (there is no\n implicit init to disable).\n\n Arguments:\n  \"ctx_id\" - the configuration context ID.\n\n Returns:\n  Zero on success or a negative error number on failure."]
+    pub fn krun_disable_implicit_init(ctx_id: u32) -> i32;
+}
+unsafe extern "C" {
+    #[doc = " Get a pointer to the built-in default init binary.\n\n This is the same binary that libkrun injects as /init.krun by default.\n Callers that use krun_disable_implicit_init() can use this to inject the\n init binary themselves (e.g. via krun_fs_add_overlay_file with custom\n settings).\n\n The returned pointer is valid for the lifetime of the process (static data).\n\n Arguments:\n  \"data_out\" - receives a pointer to the init binary bytes.\n  \"len_out\"  - receives the length in bytes.\n\n Returns:\n  Zero on success or a negative error number on failure.\n  -EINVAL   - data_out or len_out is NULL\n  -ENOTSUP  - libkrun was built without the \"init-blob\" feature"]
+    pub fn krun_get_default_init(data_out: *mut *const u8, len_out: *mut usize) -> i32;
+}
+unsafe extern "C" {
+    #[doc = " Add a virtual overlay file to a virtiofs device.\n\n The file is backed entirely by host memory (no host file). The data\n pointer is NOT copied — the caller must keep the memory valid for the\n full VM lifetime.\n\n \"path\" may contain '/' to place the file inside a virtual directory\n previously created with krun_fs_add_overlay_dir (e.g. \"etc/hostname\").\n All intermediate directories must already exist; -ENOENT is returned\n if a component is missing, -ENOTDIR if a component is not a directory.\n\n Arguments:\n  \"ctx_id\"   - the configuration context ID.\n  \"fs_tag\"   - tag of the virtiofs device (e.g. \"/dev/root\").\n  \"path\"     - path of the file (e.g. \"init.krun\" or \"etc/hostname\").\n  \"data\"     - pointer to the file content.\n  \"data_len\" - length of the file content in bytes.\n  \"mode\"     - file mode bits (e.g. 0100644 for a regular file).\n  \"one_shot\" - if true, the file can only be looked up once.\n\n Returns:\n  Zero on success or a negative error number on failure.\n  -EINVAL  - invalid parameters (NULL pointer, empty path component)\n  -ENOENT  - context, fs_tag, or intermediate path component not found\n  -ENOTDIR - intermediate path component is not a directory"]
+    pub fn krun_fs_add_overlay_file(
+        ctx_id: u32,
+        fs_tag: *const ::core::ffi::c_char,
+        path: *const ::core::ffi::c_char,
+        data: *const u8,
+        data_len: usize,
+        mode: u32,
+        one_shot: bool,
+    ) -> i32;
+}
+unsafe extern "C" {
+    #[doc = " Add a virtual overlay directory to a virtiofs device.\n\n The directory is empty and read-only, useful as a mount point.\n\n \"path\" may contain '/' to nest inside an existing virtual directory\n (e.g. \"usr/lib\"). All intermediate directories must already exist;\n -ENOENT is returned if a component is missing, -ENOTDIR if a component\n is not a directory.\n\n Arguments:\n  \"ctx_id\"   - the configuration context ID.\n  \"fs_tag\"   - tag of the virtiofs device (e.g. \"/dev/root\").\n  \"path\"     - path of the directory (e.g. \"dev\" or \"usr/lib\").\n  \"mode\"     - directory mode bits (e.g. 040755).\n\n Returns:\n  Zero on success or a negative error number on failure.\n  -EINVAL  - invalid parameters (NULL pointer, empty path component)\n  -ENOENT  - context, fs_tag, or intermediate path component not found\n  -ENOTDIR - intermediate path component is not a directory"]
+    pub fn krun_fs_add_overlay_dir(
+        ctx_id: u32,
+        fs_tag: *const ::core::ffi::c_char,
+        path: *const ::core::ffi::c_char,
+        mode: u32,
+    ) -> i32;
 }
 unsafe extern "C" {
     #[doc = " Disable the implicit vsock device.\n\n By default, libkrun creates a vsock device automatically. This function\n disables that behavior entirely - no vsock device will be created.\n\n Arguments:\n  \"ctx_id\" - the configuration context ID.\n\n Returns:\n  Zero on success or a negative error number on failure."]

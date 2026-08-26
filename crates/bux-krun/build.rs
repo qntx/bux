@@ -10,7 +10,7 @@
 //!   When set, skips downloading. Primary flow for local development.
 //!
 //! - `BUX_DEPS_VERSION` — Override the deps release version to download.
-//!   Defaults to the crate version from `Cargo.toml`.
+//!   Defaults to the pinned `LIBKRUN_VERSION`.
 //!
 //! - `BUX_UPDATE_BINDINGS` — When set alongside the `regenerate` feature, the
 //!   freshly generated `bindings.rs` is copied back to `src/bindings.rs` so it
@@ -36,13 +36,13 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
 
-/// Pinned native library versions — keep in sync with `.github/workflows/deps-build.yml`.
-const LIBKRUN_VERSION: &str = "1.17.4";
-const LIBKRUNFW_VERSION: &str = "5.2.1";
+/// Pinned native library versions — keep in sync with `.github/workflows/krun-build.yml`.
+const LIBKRUN_VERSION: &str = "1.19.4";
+const LIBKRUNFW_VERSION: &str = "5.5.0";
 
 /// Base URL template for downloading the libkrun header.
 #[cfg(feature = "regenerate")]
-const HEADER_URL_BASE: &str = "https://raw.githubusercontent.com/containers/libkrun";
+const HEADER_URL_BASE: &str = "https://raw.githubusercontent.com/libkrun/libkrun";
 
 /// GitHub repository for downloading pre-built library releases.
 const GITHUB_REPO: &str = "qntx/bux";
@@ -148,8 +148,7 @@ fn obtain_libraries(target: &str, out_dir: &Path) -> PathBuf {
         return lib_dir;
     }
 
-    let version = env::var("BUX_DEPS_VERSION")
-        .unwrap_or_else(|_| env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION not set"));
+    let version = env::var("BUX_DEPS_VERSION").unwrap_or_else(|_| LIBKRUN_VERSION.to_owned());
     let lib_dir = out_dir.join("lib");
 
     if !lib_dir.join(lib_filename(target)).exists() {
