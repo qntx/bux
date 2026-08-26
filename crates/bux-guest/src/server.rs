@@ -14,6 +14,7 @@ use crate::exec;
 use crate::files;
 use crate::mounts;
 use crate::network;
+use crate::reaper::Reaper;
 
 /// Boot timestamp, set once at agent startup.
 pub static BOOT_T0: OnceLock<Instant> = OnceLock::new();
@@ -24,13 +25,14 @@ pub fn uptime_ms() -> u64 {
     BOOT_T0.get().map_or(0, |t| t.elapsed().as_millis() as u64)
 }
 
-/// Entry point: tmpfs, net, MITM CA, virtio-fs volumes, then vsock listen.
+/// Entry point: tmpfs, boot config, net, MITM CA, virtio-fs, reaper, then vsock listen.
+///
+/// # Errors
+///
+/// Returns an error if boot, network, CA, virtiofs, reaper start, or vsock listen fails.
 pub async fn run() -> io::Result<()> {
     BOOT_T0.set(Instant::now()).ok();
     eprintln!("[bux-guest] T+0ms: starting");
-
-    // PID 1 duty: auto-reap zombie children.
-    unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
 
     mounts::mount_essential_tmpfs();
     eprintln!("[bux-guest] T+{}ms: tmpfs mounted", uptime_ms());
@@ -80,6 +82,8 @@ pub async fn run() -> io::Result<()> {
         );
     }
 
+    let reaper = Reaper::start()?;
+
     let addr = tokio_vsock::VsockAddr::new(libc::VMADDR_CID_ANY, AGENT_PORT);
     let listener =
         VsockListener::bind(addr).map_err(|e| io::Error::new(io::ErrorKind::AddrInUse, e))?;
@@ -90,8 +94,9 @@ pub async fn run() -> io::Result<()> {
 
     loop {
         let (stream, _addr) = listener.accept().await?;
+        let reaper = reaper.clone();
         tokio::spawn(async move {
-            if let Err(e) = session(stream).await {
+            if let Err(e) = session(stream, reaper).await {
                 eprintln!("[bux-guest] session error: {e}");
             }
         });
@@ -99,7 +104,7 @@ pub async fn run() -> io::Result<()> {
 }
 
 /// Dispatches a single connection based on its [`Hello`] message.
-async fn session(stream: tokio_vsock::VsockStream) -> io::Result<()> {
+async fn session(stream: tokio_vsock::VsockStream, reaper: Reaper) -> io::Result<()> {
     let (reader, writer) = tokio::io::split(stream);
     let mut r = BufReader::new(reader);
     let mut w = BufWriter::new(writer);
@@ -129,7 +134,7 @@ async fn session(stream: tokio_vsock::VsockStream) -> io::Result<()> {
             w.flush().await?;
             control::handle(&mut r, &mut w).await
         }
-        Hello::Exec(req) => exec::handle(&mut r, &mut w, req).await,
+        Hello::Exec(req) => exec::handle(&mut r, &mut w, req, reaper).await,
         Hello::FileRead { path } => {
             bux_proto::send(&mut w, &HelloAck::Ready).await?;
             w.flush().await?;

@@ -8,6 +8,9 @@ use std::process::{Command, Stdio};
 use bux_proto::{ExecStart, TtyConfig};
 use nix::pty::{OpenptyResult, Winsize, openpty};
 use nix::unistd::dup;
+use tokio::sync::oneshot;
+
+use crate::reaper::{Exit, Reaper};
 
 /// Handle to a process spawned with a PTY.
 pub struct PtyHandle {
@@ -17,6 +20,8 @@ pub struct PtyHandle {
     pub master_read: tokio::fs::File,
     /// Async writer for the PTY master (child's stdin).
     pub master_write: tokio::fs::File,
+    /// Completes when the reaper observes this child's exit.
+    pub exit: oneshot::Receiver<Exit>,
     /// Raw fd of the PTY master, kept alive for `TIOCSWINSZ`.
     master_fd: OwnedFd,
 }
@@ -45,7 +50,12 @@ impl PtyHandle {
 /// The child gets a new session (`setsid`) and the PTY slave becomes its
 /// controlling terminal (`TIOCSCTTY`). In PTY mode, stdout and stderr are
 /// merged into a single stream through the PTY master.
-pub fn spawn(req: &ExecStart) -> io::Result<PtyHandle> {
+///
+/// # Errors
+///
+/// Returns an error if the PTY cannot be opened, credentials cannot be
+/// resolved, or the child fails to spawn.
+pub fn spawn(req: &ExecStart, reaper: &Reaper) -> io::Result<PtyHandle> {
     let Some(tty) = req.tty.as_ref() else {
         return Err(io::Error::other("tty config required for PTY spawn"));
     };
@@ -107,10 +117,11 @@ pub fn spawn(req: &ExecStart) -> io::Result<PtyHandle> {
         });
     }
 
-    let child = cmd.spawn()?;
+    let spawned = reaper.spawn(&mut cmd)?;
 
     #[allow(clippy::cast_possible_wrap)]
-    let pid = child.id() as i32;
+    let pid = spawned.child.id() as i32;
+    drop(spawned.child);
 
     // Close slave in parent — child has its own copies after fork.
     drop(slave);
@@ -119,15 +130,11 @@ pub fn spawn(req: &ExecStart) -> io::Result<PtyHandle> {
     let read_fd = dup_fd(&master, "master_read")?;
     let write_fd = dup_fd(&master, "master_write")?;
 
-    let master_read =
-        tokio::fs::File::from_std(unsafe { std::fs::File::from_raw_fd(read_fd.into_raw_fd()) });
-    let master_write =
-        tokio::fs::File::from_std(unsafe { std::fs::File::from_raw_fd(write_fd.into_raw_fd()) });
-
     Ok(PtyHandle {
         pid,
-        master_read,
-        master_write,
+        master_read: super::file_from_stdio(read_fd),
+        master_write: super::file_from_stdio(write_fd),
+        exit: spawned.exit,
         master_fd: master,
     })
 }
