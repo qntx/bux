@@ -81,7 +81,7 @@ fn main() {
     println!("cargo:LIB_DIR={}", link_lib.display());
 }
 
-/// Download `libkrun.h` from the pinned fork into `$OUT_DIR`.
+/// Download `libkrun.h` from the pinned libkrun tag into `$OUT_DIR`.
 #[cfg(feature = "regenerate")]
 fn download_header(out_dir: &Path) -> PathBuf {
     let path = out_dir.join("libkrun.h");

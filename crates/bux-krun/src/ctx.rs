@@ -1017,12 +1017,10 @@ pub fn split_irqchip(ctx: u32, enable: bool) -> Result<()> {
     })
 }
 
-/// Discriminant checks against `libkrun.h` constants.
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// `Feature::InitBlob` matches `KRUN_FEATURE_INIT_BLOB`.
     #[test]
     fn init_blob_matches_libkrun_constant() {
         assert_eq!(
