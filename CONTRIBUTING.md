@@ -10,6 +10,13 @@ cargo build -p bux-guest --target aarch64-unknown-linux-musl   # or x86_64-...
 
 Requires a working C toolchain for libkrun / e2fs / qcow2 native deps, and Go for `bux-gvproxy` (build.rs compiles the bridge).
 
+## Native libraries
+
+Prebuilt libkrun, e2fsprogs, and (Linux) bubblewrap download from GitHub
+Releases tagged `krun-v{LIBKRUN_VERSION}` (not crate versions). Pins,
+compile-from-cold, bindgen, and the tag-PR-SHA-then-merge loop:
+[`docs/native-deps.md`](docs/native-deps.md).
+
 ## Capture environment
 
 | Variable | Purpose |
