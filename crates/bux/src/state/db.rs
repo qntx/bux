@@ -708,6 +708,10 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "MutexGuard must outlive rusqlite Statement"
+    )]
     fn product_schema_version() {
         let db = StateDb::open(":memory:").expect("open in-memory db");
         assert_eq!(PRODUCT_SCHEMA_VERSION, 5);
