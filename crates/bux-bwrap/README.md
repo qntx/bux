@@ -15,7 +15,7 @@ Bundles the [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) san
 ## Environment variables
 
 - **`BUX_BWRAP_DIR`** — Local directory containing a pre-built `bwrap` binary. Skips downloading.
-- **`BUX_BWRAP_VERSION`** — Override the release version to download (default: crate version).
+- **`BUX_BWRAP_VERSION`** — Override the release version to download (default: bubblewrap version).
 
 ## License
 
