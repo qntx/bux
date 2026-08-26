@@ -85,13 +85,9 @@ jobs:
           # That symbol lives in create_inode_libarchive.c — when built
           # without HAVE_ARCHIVE_H it compiles to a stub returning an error.
           # Both .o files must be in the archive.
-          #
-          # We also stub no_copy_xattrs (normally in mke2fs.c).
           cd misc
           make create_inode.o create_inode_libarchive.o
-          printf 'int no_copy_xattrs = 1;\n' > e2fs_stubs.c
-          ${CC:-cc} $CFLAGS -c -o e2fs_stubs.o e2fs_stubs.c
-          ar rcs libcreate_inode.a create_inode.o create_inode_libarchive.o e2fs_stubs.o
+          ar rcs libcreate_inode.a create_inode.o create_inode_libarchive.o
           cd ..
 
           # Collect static libraries into dist/lib/.
