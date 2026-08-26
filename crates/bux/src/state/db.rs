@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::{HealthState, Status, VmState};
+use super::{Status, VmState};
 use crate::error::{Error, Result};
 
 /// Product state-schema version (PRAGMA `user_version`).
@@ -16,8 +16,8 @@ use crate::error::{Error, Result};
 /// Bump only on incompatible schema changes. There is **no** migration
 /// path — callers must wipe the data directory.
 ///
-/// v4: persist `NetworkSpec` in VM config JSON (replaces `network_enabled`).
-pub(crate) const PRODUCT_SCHEMA_VERSION: u32 = 4;
+/// v5: drop `vms.health`.
+pub(crate) const PRODUCT_SCHEMA_VERSION: u32 = 5;
 
 /// DDL for a fresh product database.
 const PRODUCT_SCHEMA_SQL: &str = "
@@ -28,7 +28,6 @@ CREATE TABLE vms (
     image       TEXT,
     socket      TEXT NOT NULL,
     status      TEXT NOT NULL DEFAULT 'running',
-    health      TEXT NOT NULL DEFAULT 'unknown',
     config      TEXT NOT NULL,
     created_at  REAL NOT NULL,
     updated_at  REAL
@@ -144,7 +143,7 @@ impl StateDb {
     /// Panics if the mutex is poisoned, which indicates a prior panic
     /// during a database operation — an unrecoverable state.
     #[allow(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
-    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().expect("StateDb mutex poisoned")
     }
 
@@ -304,19 +303,6 @@ impl StateDb {
     pub(crate) fn delete(&self, id: &str) -> Result<()> {
         self.lock()
             .execute("DELETE FROM vms WHERE id = ?1", params![id])?;
-        Ok(())
-    }
-
-    /// Updates the health state of a VM.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database update fails.
-    pub(crate) fn update_health(&self, id: &str, health: HealthState) -> Result<()> {
-        self.lock().execute(
-            "UPDATE vms SET health = ?1 WHERE id = ?2",
-            params![health_str(health), id],
-        )?;
         Ok(())
     }
 
@@ -676,15 +662,6 @@ fn row_to_base_disk(row: &rusqlite::Row<'_>) -> rusqlite::Result<BaseDiskRow> {
         ref_count: row.get(3)?,
         created_at: f64_to_system_time(row.get(4)?),
     })
-}
-
-/// Converts a [`HealthState`] to its database string representation.
-const fn health_str(h: HealthState) -> &'static str {
-    match h {
-        HealthState::Unknown => "unknown",
-        HealthState::Healthy => "healthy",
-        HealthState::Unhealthy => "unhealthy",
-    }
 }
 
 /// Converts a [`Status`] to its database string representation.

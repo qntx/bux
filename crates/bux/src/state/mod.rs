@@ -93,18 +93,6 @@ impl Status {
     }
 }
 
-/// VM health state, tracked independently of lifecycle [`Status`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub(crate) enum HealthState {
-    /// Health has not been checked yet.
-    Unknown,
-    /// Guest agent responded successfully.
-    Healthy,
-    /// Guest agent failed to respond within the configured threshold.
-    Unhealthy,
-}
-
 /// A virtio-fs shared directory.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -594,20 +582,29 @@ mod tests {
     }
 
     #[test]
-    fn health_update() {
-        let db = open_test_db();
-        db.insert(&test_vm("vm1", None)).unwrap();
-
-        db.update_health("vm1", HealthState::Healthy).unwrap();
-        let vms = db.list().unwrap();
-        assert_eq!(vms.len(), 1);
-    }
-
-    #[test]
     fn product_schema_version() {
         let db = open_test_db();
-        // Fresh in-memory DB uses product schema.
-        assert_eq!(db::PRODUCT_SCHEMA_VERSION, 4);
+        assert_eq!(db::PRODUCT_SCHEMA_VERSION, 5);
+
+        let mut names = Vec::new();
+        {
+            let conn = db.lock();
+            let version: u32 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(version, 5);
+
+            let mut stmt = conn.prepare("PRAGMA table_info(vms)").unwrap();
+            let mut rows = stmt.query([]).unwrap();
+            while let Some(row) = rows.next().unwrap() {
+                names.push(row.get::<_, String>(1).unwrap());
+            }
+        }
+        assert!(
+            !names.iter().any(|n| n == "health"),
+            "vms must not have a health column, got {names:?}"
+        );
+
         db.insert(&test_vm("vm1", None)).unwrap();
         assert_eq!(db.list().unwrap().len(), 1);
     }
