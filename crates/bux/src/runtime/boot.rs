@@ -244,7 +244,7 @@ pub(crate) fn spawn_config(
     }
 
     let config_path = rt.socks_dir.join(format!("{id}.json"));
-    let shim = spawn_shim(&config, &config_path, &rt.socks_dir, &id, network, gvproxy)?;
+    let shim = spawn_shim(&config, &config_path, &rt.socks_dir, network, gvproxy)?;
     abort.pid = Some(shim.pid);
 
     config.security_status = shim.security.clone();
@@ -664,7 +664,6 @@ pub(super) fn spawn_shim(
     config: &VmConfig,
     config_path: &Path,
     socks_dir: &Path,
-    vm_id: &str,
     network: Option<ShimNetwork>,
     gvproxy: Option<ShimGvproxy>,
 ) -> Result<ShimSpawnResult> {
