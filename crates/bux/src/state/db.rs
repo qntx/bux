@@ -667,9 +667,7 @@ fn row_to_base_disk(row: &rusqlite::Row<'_>) -> rusqlite::Result<BaseDiskRow> {
 /// Converts a [`Status`] to its database string representation.
 const fn status_str(s: Status) -> &'static str {
     match s {
-        Status::Creating => "creating",
         Status::Running => "running",
-        Status::Paused => "paused",
         Status::Stopping => "stopping",
         Status::Stopped => "stopped",
     }
@@ -678,9 +676,7 @@ const fn status_str(s: Status) -> &'static str {
 /// Parses a database string into a [`Status`].
 fn parse_status(s: &str) -> Status {
     match s {
-        "creating" => Status::Creating,
         "running" => Status::Running,
-        "paused" => Status::Paused,
         "stopping" => Status::Stopping,
         _ => Status::Stopped,
     }
