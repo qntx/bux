@@ -123,10 +123,6 @@ pub fn install_seccomp() -> Result<()> {
 
 /// Apply every field of `cfg` to an existing libkrun context.
 fn apply_all(ctx: u32, cfg: &ShimConfig) -> Result<()> {
-    if let Some(level) = cfg.log_level {
-        sys::set_log_level(level)?;
-    }
-
     sys::set_vm_config(ctx, cfg.vcpus, cfg.ram_mib)?;
 
     match (&cfg.rootfs, &cfg.root_disk) {
@@ -180,34 +176,12 @@ fn apply_all(ctx: u32, cfg: &ShimConfig) -> Result<()> {
         add_vsock(ctx, 0)?;
     }
 
-    if let Some(ref workdir) = cfg.workdir {
-        sys::set_workdir(ctx, workdir)?;
-    }
-
     if let Some(ref exec_path) = cfg.exec_path {
         sys::set_exec(ctx, exec_path, &cfg.exec_args, cfg.env.as_deref())?;
     } else if let Some(ref env) = cfg.env {
         sys::set_env(ctx, env)?;
     }
 
-    if let Some(uid) = cfg.uid {
-        sys::setuid(ctx, uid)?;
-    }
-    if let Some(gid) = cfg.gid {
-        sys::setgid(ctx, gid)?;
-    }
-    if !cfg.rlimits.is_empty() {
-        sys::set_rlimits(ctx, &cfg.rlimits)?;
-    }
-    if let Some(enable) = cfg.nested_virt {
-        sys::set_nested_virt(ctx, enable)?;
-    }
-    if let Some(enable) = cfg.snd_device {
-        sys::set_snd_device(ctx, enable)?;
-    }
-    if let Some(ref path) = cfg.console_output {
-        sys::set_console_output(ctx, path)?;
-    }
     for vs in &cfg.vsock_ports {
         sys::add_vsock_port2(ctx, vs.port, &vs.path, vs.listen)?;
     }
@@ -271,7 +245,6 @@ mod tests {
 
     fn offline_cfg(rootfs: &str, vsock: &str) -> ShimConfig {
         ShimConfig {
-            vm_id: "offline-tsi".into(),
             vcpus: 1,
             ram_mib: 128,
             rootfs: Some(rootfs.into()),
@@ -285,17 +258,9 @@ mod tests {
             }],
             network: None,
             gvproxy: None,
-            log_level: None,
             exec_path: None,
             exec_args: vec![],
             env: None,
-            workdir: None,
-            uid: None,
-            gid: None,
-            rlimits: vec![],
-            nested_virt: None,
-            snd_device: None,
-            console_output: None,
         }
     }
 

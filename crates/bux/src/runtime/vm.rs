@@ -499,7 +499,6 @@ impl Vm {
             &self.state.config,
             &config_path,
             &socks_dir,
-            &self.state.id,
             network,
             gvproxy,
         )?;

@@ -34,7 +34,6 @@ mod events;
 mod guest;
 #[cfg(unix)]
 mod lifecycle;
-mod log_level;
 mod metrics;
 #[cfg(unix)]
 mod options;

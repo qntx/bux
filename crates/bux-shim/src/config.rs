@@ -140,10 +140,6 @@ impl fmt::Debug for ShimSecret {
 /// Written as JSON by Runtime; consumed only by `bux-shim`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShimConfig {
-    /// Optional id for logs (not required by libkrun).
-    #[serde(default)]
-    pub vm_id: String,
-
     /// Virtual CPUs.
     pub vcpus: u8,
     /// RAM in MiB.
@@ -175,10 +171,6 @@ pub struct ShimConfig {
     #[serde(default)]
     pub gvproxy: Option<ShimGvproxy>,
 
-    /// libkrun log level as raw u32 (matches krun enum).
-    #[serde(default)]
-    pub log_level: Option<u32>,
-
     /// Guest PID 1 / agent executable path inside the guest root.
     #[serde(default)]
     pub exec_path: Option<String>,
@@ -188,28 +180,6 @@ pub struct ShimConfig {
     /// Environment `KEY=VALUE`. `None` = inherit host env in libkrun.
     #[serde(default)]
     pub env: Option<Vec<String>>,
-    /// Guest working directory for the exec'd process.
-    #[serde(default)]
-    pub workdir: Option<String>,
-
-    /// UID before start.
-    #[serde(default)]
-    pub uid: Option<u32>,
-    /// GID before start.
-    #[serde(default)]
-    pub gid: Option<u32>,
-    /// rlimits (`RESOURCE=soft:hard`).
-    #[serde(default)]
-    pub rlimits: Vec<String>,
-    /// Nested virtualization (macOS).
-    #[serde(default)]
-    pub nested_virt: Option<bool>,
-    /// virtio-snd.
-    #[serde(default)]
-    pub snd_device: Option<bool>,
-    /// Console log path on host.
-    #[serde(default)]
-    pub console_output: Option<String>,
 }
 
 impl ShimConfig {
@@ -253,7 +223,6 @@ mod tests {
     #[test]
     fn roundtrip_minimal() {
         let cfg = ShimConfig {
-            vm_id: "abc".into(),
             vcpus: 2,
             ram_mib: 512,
             rootfs: Some("/rootfs".into()),
@@ -267,21 +236,12 @@ mod tests {
             }],
             network: None,
             gvproxy: None,
-            log_level: Some(3),
             exec_path: Some("/bux/bin/bux-guest".into()),
             exec_args: vec![],
             env: Some(vec!["BUX_GUEST_CONFIG={}".into()]),
-            workdir: None,
-            uid: None,
-            gid: None,
-            rlimits: vec![],
-            nested_virt: None,
-            snd_device: None,
-            console_output: None,
         };
         let json = cfg.to_json().unwrap();
         let de = ShimConfig::from_json(&json).unwrap();
-        assert_eq!(de.vm_id, "abc");
         assert_eq!(de.vcpus, 2);
         assert!(de.network.is_none());
         assert_eq!(de.vsock_ports.first().map(|v| v.port), Some(1024));
@@ -290,7 +250,6 @@ mod tests {
     #[test]
     fn network_variant_roundtrip() {
         let cfg = ShimConfig {
-            vm_id: String::new(),
             vcpus: 1,
             ram_mib: 256,
             rootfs: None,
@@ -315,17 +274,9 @@ mod tests {
                 ca_cert_pem: "CERT".into(),
                 ca_key_pem: "KEY".into(),
             }),
-            log_level: None,
             exec_path: None,
             exec_args: vec![],
             env: None,
-            workdir: None,
-            uid: None,
-            gid: None,
-            rlimits: vec![],
-            nested_virt: None,
-            snd_device: None,
-            console_output: None,
         };
         let de = ShimConfig::from_json(&cfg.to_json().unwrap()).unwrap();
         let net = de.network.unwrap();

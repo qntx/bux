@@ -244,7 +244,7 @@ pub(crate) fn spawn_config(
     }
 
     let config_path = rt.socks_dir.join(format!("{id}.json"));
-    let shim = spawn_shim(&config, &config_path, &rt.socks_dir, &id, network, gvproxy)?;
+    let shim = spawn_shim(&config, &config_path, &rt.socks_dir, network, gvproxy)?;
     abort.pid = Some(shim.pid);
 
     config.security_status = shim.security.clone();
@@ -423,13 +423,11 @@ fn config_from_options(
 ///
 /// Port publish is gvproxy-only; this mapping never sets a TSI port map.
 fn to_shim_config(
-    vm_id: &str,
     config: &VmConfig,
     network: Option<ShimNetwork>,
     gvproxy: Option<ShimGvproxy>,
 ) -> ShimConfig {
     ShimConfig {
-        vm_id: vm_id.to_owned(),
         vcpus: config.vcpus,
         ram_mib: config.ram_mib,
         rootfs: config.rootfs.clone(),
@@ -457,17 +455,9 @@ fn to_shim_config(
             .collect(),
         network,
         gvproxy,
-        log_level: config.log_level.map(|l| l as u32),
         exec_path: config.exec_path.clone(),
         exec_args: config.exec_args.clone(),
         env: config.env.clone(),
-        workdir: None,
-        uid: None,
-        gid: None,
-        rlimits: Vec::new(),
-        nested_virt: None,
-        snd_device: None,
-        console_output: None,
     }
 }
 
@@ -674,7 +664,6 @@ pub(super) fn spawn_shim(
     config: &VmConfig,
     config_path: &Path,
     socks_dir: &Path,
-    vm_id: &str,
     network: Option<ShimNetwork>,
     gvproxy: Option<ShimGvproxy>,
 ) -> Result<ShimSpawnResult> {
@@ -684,7 +673,7 @@ pub(super) fn spawn_shim(
         ));
     }
     let policy = spawn_policy(config);
-    let shim_cfg = to_shim_config(vm_id, config, network, gvproxy);
+    let shim_cfg = to_shim_config(config, network, gvproxy);
     let json = shim_cfg
         .to_json()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -910,13 +899,9 @@ mod tests {
     #[test]
     fn to_shim_config_offline_has_no_network() {
         let cfg = VmConfig::default();
-        let shim = to_shim_config("vm1", &cfg, None, None);
+        let shim = to_shim_config(&cfg, None, None);
         assert!(shim.network.is_none());
         assert!(shim.gvproxy.is_none());
-        assert!(shim.uid.is_none());
-        assert!(shim.gid.is_none());
-        assert!(shim.rlimits.is_empty());
-        assert!(shim.workdir.is_none());
     }
 
     #[test]
