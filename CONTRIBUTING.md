@@ -111,28 +111,36 @@ BUX_E2E_FULL=1 ./scripts/e2e/smoke.sh
 job. GitHub-hosted runners must not set `BUX_E2E_FULL=1`. Self-hosted runners
 can take it later without redesign.
 
-The first green FULL is recorded by the operator on **local HVF (Apple
-Silicon)**. Until this file contains that record, do not call the tree
-production-ready. KVM later without redesign.
+The first green FULL is recorded below on **local HVF (Apple Silicon)**.
+Host CI (`BUX_E2E_FULL=0`) is not that proof. KVM later without redesign.
 
 ### Layer 1 FULL record
 
-Empty. Fill from `./target/debug/bux` after a local HVF run. Do not invent values.
+Operator FULL 2026-08-28 local HVF (smoke START 2026-08-27T19:48:37Z UTC,
+`SMOKE_EXIT=0`, `OK (full e2e)`). Capture binary `./target/debug/bux` (not
+PATH `bux`). `$BUX_HOME` was `/Users/xu/bux-full-hvf-119` (no `bux-e2e`
+substring).
 
 | Field | Value |
 | ----- | ----- |
-| Date | |
-| uname | |
-| kern.hv_support | |
-| rustc | |
-| git | |
-| BUX_GUEST_PATH triple | |
-| ELF sha256 | |
-| host.virtualization | |
-| host.krun_features | |
-| host.mandatory_access_control | |
-| image reference | |
-| image digest | |
+| Date | 2026-08-28 |
+| uname | Darwin X-2.local 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:16:20 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T8142 arm64 |
+| kern.hv_support | 1 |
+| rustc | rustc 1.97.1 (8bab26f4f 2026-07-14) |
+| git | 42f02b0bbfe3c883417ad132f21e025afcc102a0 |
+| BUX_GUEST_PATH triple | aarch64-unknown-linux-musl |
+| ELF sha256 | 03ade6fffdc2d7968f5429a2257c14b9c42e2501d6fd14153a7500dceb2157d2 |
+| host.virtualization | true |
+| host.krun_features | ["net","blk"] |
+| host.mandatory_access_control | true |
+| image reference | docker.io/library/alpine:latest |
+| image digest | sha256:e7a1a92a5bfeee40966aea60f0796b0e7917cc35591542701834f03a68fa3d18 |
+
+Leftover sibling `BUX_GUEST_PATH` host mode **0644** is OK to record (inject
+0555 is #108 sidecar). Item 7 `NO_ETH0` sysfs still counts as offline proof.
+Item 5/7 wget-fail is unclassified; do not treat as HVF proof of
+`allow_net` / offline **policy**. This record is not GitHub-hosted
+`BUX_E2E_FULL=1`.
 
 Capture `.host.*` with `./target/debug/bux system info --format json` and image
 reference/digest with `./target/debug/bux images --format json`. Pin `$BUX_HOME`
@@ -192,8 +200,8 @@ OCI (`bux pull` / `bux create IMAGE`).
    restart must still survive CLI exit)
 10. secrets: value not in `bux.db` or guest `/proc/1/environ`
 
-Until that checklist is green on local HVF (Apple Silicon), do not call the
-tree production-ready.
+The Layer 1 record above is that green local HVF run. Host CI
+(`BUX_E2E_FULL=0`) is not that proof.
 
 Schema mismatches require `bux system reset` (or wiping `$BUX_HOME`).
 
