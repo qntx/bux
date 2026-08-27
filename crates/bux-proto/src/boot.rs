@@ -101,6 +101,19 @@ pub struct GuestBootConfig {
     pub volumes: Vec<GuestVolume>,
 }
 
+/// Make compact JSON survivable as one libkrun cmdline token.
+///
+/// libkrun v1.19.4 `collapse_str_array` wraps each `KEY=VALUE` in quotes and
+/// places it on the kernel cmdline. Linux `lib/cmdline.c` `next_arg` toggles
+/// `in_quote` on every `"` and splits on unquoted kernel `isspace`. JSON `"`
+/// therefore leaves PEM `BEGIN CERTIFICATE` unquoted; U+0020 truncates the
+/// guest env. Compact `serde_json::to_string` already has no insignificant
+/// whitespace and already emits `\n`/`\t`/`\r` for other controls; remaining
+/// U+0020 is inside strings. Guest `from_env` is unchanged (`serde_json::from_str`).
+fn cmdline_safe_json(json: &str) -> String {
+    json.replace(' ', "\\u0020")
+}
+
 impl GuestBootConfig {
     /// Build a config for the common managed paths.
     #[must_use]
@@ -121,7 +134,10 @@ impl GuestBootConfig {
     /// for this type).
     pub fn to_env_assignment(&self) -> Result<String, String> {
         let json = serde_json::to_string(self).map_err(|e| e.to_string())?;
-        Ok(format!("{GUEST_BOOT_CONFIG_ENV}={json}"))
+        Ok(format!(
+            "{GUEST_BOOT_CONFIG_ENV}={}",
+            cmdline_safe_json(&json)
+        ))
     }
 
     /// Parse from process environment (`BUX_GUEST_CONFIG`).
@@ -240,5 +256,163 @@ mod tests {
         };
         let err = v.validate().unwrap_err();
         assert!(err.contains("tag"), "{err}");
+    }
+
+    /// Kernel `isspace` as used by Linux `lib/cmdline.c` (includes VT / U+000B).
+    fn kernel_isspace(b: u8) -> bool {
+        matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c' | b'\x0b')
+    }
+
+    /// Linux `lib/cmdline.c` `next_arg` (v6.6) value of the first token.
+    ///
+    /// libkrun `collapse_str_array` wraps each `KEY=VALUE` in quotes. `next_arg`
+    /// toggles `in_quote` on every `"`, splits on unquoted kernel isspace, then
+    /// strips the wrap quote. Backslash is not an escape.
+    fn next_arg_val(cmdline: &str) -> Option<String> {
+        let mut buf = cmdline.as_bytes().to_vec();
+        buf.push(0);
+
+        let mut args = 0usize;
+        let quoted = buf.first().copied() == Some(b'"');
+        if quoted {
+            args += 1;
+        }
+        let mut in_quote = quoted;
+
+        let mut i = 0usize;
+        let mut equals = 0usize;
+        loop {
+            let b = buf.get(args + i).copied()?;
+            if b == 0 {
+                break;
+            }
+            if kernel_isspace(b) && !in_quote {
+                break;
+            }
+            if equals == 0 && b == b'=' {
+                equals = i;
+            }
+            if b == b'"' {
+                in_quote = !in_quote;
+            }
+            i += 1;
+        }
+
+        if equals == 0 {
+            return None;
+        }
+
+        *buf.get_mut(args + equals)? = 0;
+        let mut val = args + equals + 1;
+        if buf.get(val).copied() == Some(b'"') {
+            val += 1;
+        }
+        if i > 0 && buf.get(args + i - 1).copied() == Some(b'"') {
+            *buf.get_mut(args + i - 1)? = 0;
+        }
+        if quoted && i > 0 && buf.get(args + i - 1).copied() == Some(b'"') {
+            *buf.get_mut(args + i - 1)? = 0;
+        }
+        if buf.get(args + i).copied().is_some_and(|b| b != 0) {
+            *buf.get_mut(args + i)? = 0;
+        }
+
+        let end = val + buf.get(val..)?.iter().position(|&b| b == 0)?;
+        let bytes = buf.get(val..end)?;
+        std::str::from_utf8(bytes).ok().map(str::to_owned)
+    }
+
+    fn pem_boot_config() -> GuestBootConfig {
+        let mut cfg = GuestBootConfig::new("vm1", GuestNetworkMode::Enabled);
+        cfg.mitm_ca_pem =
+            Some("-----BEGIN CERTIFICATE-----\nMII\n-----END CERTIFICATE-----\n".into());
+        cfg
+    }
+
+    #[test]
+    fn next_arg_truncates_unescaped_pem_json() {
+        let cfg = pem_boot_config();
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(
+            json.contains("BEGIN CERTIFICATE"),
+            "fixture must keep the PEM space: {json}"
+        );
+        let wrapped = format!("\"{GUEST_BOOT_CONFIG_ENV}={json}\"");
+        let val = next_arg_val(&wrapped).expect("next_arg val");
+        assert_eq!(
+            val, r#"{"network":"enabled","mitm_ca_pem":"-----BEGIN"#,
+            "unquoted PEM space must split the token"
+        );
+        assert_eq!(val.len(), 46, "truncated getenv length: {val:?}");
+        assert!(
+            val.ends_with("-----BEGIN"),
+            "split must stay on BEGIN CERTIFICATE: {val:?}"
+        );
+        let err = serde_json::from_str::<GuestBootConfig>(&val)
+            .expect_err("truncated JSON must not parse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("column 46") || msg.contains("EOF while parsing a string"),
+            "truncated PEM JSON must fail parse: {msg}"
+        );
+    }
+
+    #[test]
+    fn to_env_assignment_pem_survives_next_arg() {
+        let cfg = pem_boot_config();
+        let assignment = cfg.to_env_assignment().unwrap();
+        let suffix = assignment
+            .strip_prefix(&format!("{GUEST_BOOT_CONFIG_ENV}="))
+            .expect("assignment prefix");
+        assert_eq!(
+            suffix,
+            cmdline_safe_json(&serde_json::to_string(&cfg).unwrap()),
+            "to_env_assignment must use cmdline_safe_json"
+        );
+        assert!(
+            !suffix.bytes().any(kernel_isspace),
+            "encoder must remove kernel isspace from the suffix: {suffix}"
+        );
+        let wrapped = format!("\"{assignment}\"");
+        let val = next_arg_val(&wrapped).expect("next_arg val");
+        assert_eq!(val, suffix, "next_arg must return the entire suffix");
+        let de: GuestBootConfig = serde_json::from_str(&val).unwrap();
+        assert_eq!(de, cfg);
+        assert!(
+            !assignment.contains("PRIVATE KEY"),
+            "guest env must not carry the CA private key"
+        );
+        assert!(
+            wrapped.len() + 256 < 2048,
+            "wrapped assignment plus krun prolog must fit aarch64 CMDLINE_MAX_SIZE (2048); got {}",
+            wrapped.len()
+        );
+    }
+
+    #[test]
+    fn to_env_assignment_guest_path_space_survives_next_arg() {
+        let mut cfg = GuestBootConfig::new("vm1", GuestNetworkMode::Enabled);
+        cfg.volumes.push(GuestVolume {
+            tag: "vol0".into(),
+            guest_path: "/data dir".into(),
+            read_only: false,
+        });
+        let assignment = cfg.to_env_assignment().unwrap();
+        let suffix = assignment
+            .strip_prefix(&format!("{GUEST_BOOT_CONFIG_ENV}="))
+            .expect("assignment prefix");
+        assert_eq!(
+            suffix,
+            cmdline_safe_json(&serde_json::to_string(&cfg).unwrap()),
+            "to_env_assignment must use cmdline_safe_json"
+        );
+        assert!(
+            !suffix.bytes().any(kernel_isspace),
+            "encoder must remove kernel isspace from the suffix: {suffix}"
+        );
+        let wrapped = format!("\"{assignment}\"");
+        let val = next_arg_val(&wrapped).expect("next_arg val");
+        let de: GuestBootConfig = serde_json::from_str(&val).unwrap();
+        assert_eq!(de, cfg);
     }
 }

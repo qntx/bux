@@ -132,6 +132,12 @@ mod tests {
         let boot: GuestBootConfig = serde_json::from_str(json).unwrap();
         assert_eq!(boot.mitm_ca_pem.as_deref(), Some(live.ca_cert_pem.as_str()));
         assert!(!json.contains("PRIVATE KEY"));
+        assert!(
+            !json
+                .bytes()
+                .any(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c' | b'\x0b')),
+            "kernel isspace in the env suffix would split the libkrun-quoted token"
+        );
         let dbg = format!("{live:?}");
         assert!(dbg.contains("[REDACTED]"));
         assert!(!dbg.contains(&live.ca_key_pem));
