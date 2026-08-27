@@ -2,7 +2,7 @@
 //!
 //! A snapshot copies the current QCOW2 overlay disk, optionally quiescing
 //! guest filesystems first (via `FIFREEZE`) for consistency. Snapshots can
-//! be listed, restored (creating a new VM from the snapshot), or deleted.
+//! be listed or deleted.
 //!
 //! The snapshot workflow:
 //! 1. Quiesce guest filesystems (if VM is running).
@@ -52,7 +52,7 @@ impl From<SnapshotRow> for SnapshotInfo {
     }
 }
 
-/// Manages snapshot lifecycle: create, list, restore, delete.
+/// Manages snapshot lifecycle: create, list, delete.
 #[derive(Debug, Clone)]
 pub(crate) struct SnapshotManager {
     /// Shared state database.
