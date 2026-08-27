@@ -401,7 +401,10 @@ impl Runtime {
         let source_state = source.stored();
 
         let clone_id = crate::state::gen_id();
-        let clone_base = self.disk.bases_dir().join(format!("clone-{clone_id}.raw"));
+        let clone_base = self
+            .disk
+            .bases_dir()
+            .join(format!("clone-{clone_id}.qcow2"));
         self.disk.flatten_vm_disk(&source_state.id, &clone_base)?;
 
         let opts = clone_vm_options(&source_state.config, name, clone_base);
@@ -745,7 +748,7 @@ mod tests {
             network: NetworkSpec::Disabled,
             ..VmConfig::default()
         };
-        let opts = clone_vm_options(&source, Some("n".into()), PathBuf::from("/tmp/clone.raw"));
+        let opts = clone_vm_options(&source, Some("n".into()), PathBuf::from("/tmp/clone.qcow2"));
         assert!(
             opts.detach,
             "disk-clone must boot detached even if source is attached"
@@ -756,7 +759,7 @@ mod tests {
         assert_eq!(opts.name.as_deref(), Some("n"));
         assert_eq!(opts.network, NetworkSpec::Disabled);
         assert!(
-            matches!(&opts.image, ImageRef::BaseDisk(p) if p == Path::new("/tmp/clone.raw")),
+            matches!(&opts.image, ImageRef::BaseDisk(p) if p == Path::new("/tmp/clone.qcow2")),
             "clone image must be the flattened base"
         );
     }
