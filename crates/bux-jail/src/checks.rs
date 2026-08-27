@@ -1,4 +1,4 @@
-//! Host and guest capability checks for security validation.
+//! Host capability checks for security validation.
 //!
 //! Pre-flight checks that verify the host system supports the required
 //! isolation features before attempting to spawn sandboxed VMs.
@@ -212,18 +212,17 @@ mod tests {
 
     #[test]
     fn audit_reports_missing_features() {
-        let caps = HostCapabilities {
-            virtualization: false,
-            namespaces: false,
-            seccomp: false,
-            mandatory_access_control: false,
-            cgroups: false,
-            landlock: false,
-        };
-        let warnings = audit_isolation(&caps);
-
         #[cfg(target_os = "linux")]
         {
+            let caps = HostCapabilities {
+                virtualization: true,
+                namespaces: false,
+                seccomp: false,
+                mandatory_access_control: false,
+                cgroups: false,
+                landlock: false,
+            };
+            let warnings = audit_isolation(&caps);
             assert!(warnings.len() >= 4);
             assert!(warnings.iter().any(|w| w.contains("namespace")));
             assert!(warnings.iter().any(|w| w.contains("Landlock")));
@@ -231,6 +230,16 @@ mod tests {
 
         #[cfg(target_os = "macos")]
         {
+            let caps = HostCapabilities {
+                virtualization: false,
+                namespaces: false,
+                seccomp: false,
+                mandatory_access_control: false,
+                cgroups: false,
+                landlock: false,
+            };
+            let warnings = audit_isolation(&caps);
+            assert_eq!(warnings.len(), 2);
             assert!(warnings.iter().any(|w| w.contains("virtualization")));
             assert!(warnings.iter().any(|w| w.contains("sandbox-exec")));
             assert!(!warnings.iter().any(|w| w.contains("namespace")));

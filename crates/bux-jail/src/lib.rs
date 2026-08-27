@@ -8,7 +8,7 @@
 //! The default sandbox is auto-detected at runtime. Override via
 //! [`JailConfig::sandbox`].
 
-/// Host / guest capability probes.
+/// Host capability probes.
 pub mod checks;
 mod error;
 mod pre_exec;
