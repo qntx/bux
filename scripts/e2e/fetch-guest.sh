@@ -66,9 +66,7 @@ while true; do
       echo "downloaded ${artifact} but missing bux-guest-${TRIPLE}" >&2
       exit 1
     fi
-    mkdir -p "${ROOT}/target/debug"
-    cp "${src}" "${dest}"
-    python3 - "${dest}" "${ARCH}" <<'PY'
+    if ! python3 - "${src}" "${ARCH}" <<'PY'
 import struct, sys
 path, arch = sys.argv[1], sys.argv[2]
 expected = {"x86_64": 0x3E, "aarch64": 0xB7}.get(arch)
@@ -98,6 +96,12 @@ for i in range(e_phnum):
         sys.exit(1)
 sys.exit(0)
 PY
+    then
+      echo "downloaded bux-guest-${TRIPLE} failed ELF checks (64-bit LE, host arch, no PT_INTERP)" >&2
+      exit 1
+    fi
+    mkdir -p "${ROOT}/target/debug"
+    cp "${src}" "${dest}"
     echo "export BUX_GUEST_PATH=${dest}"
     exit 0
   fi
