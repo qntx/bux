@@ -215,6 +215,10 @@ Item 16 is not in the `42f02b0` Layer 1 row.
 
 16. clone flatten: `bux clone` of an OCI VM; `/clone-marker` on the root disk (not tmpfs)
 
+Operator FULL 2026-08-28 on `04fca66945fe24fc16fda5aff113c8e4782cbc68`
+(capture binary `./target/debug/bux`, `$BUX_HOME=/Users/xu/bux-full-hvf-clone`)
+exited 0 including clone flatten (`SMOKE_EXIT=0`, `OK (full e2e)`).
+
 Schema mismatches require `bux system reset` (or wiping `$BUX_HOME`).
 
 ## Lints

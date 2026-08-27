@@ -25,11 +25,11 @@ Spine:
 | D2 | Fixed in engine: `disable_implicit_vsock` + `add_vsock(0)`; **guest proof is FULL `offline-no-eth0`** |
 | D3 | Fixed in agent: virtiofs mount from `GuestBootConfig`; **guest proof is FULL volume ls** |
 | D4 | Fixed: CONTRIBUTING Layer 1 |
-| D5 | Open: engine fix landed, guest proof pending |
+| D5 | Fixed: CONTRIBUTING item 16 / smoke |
 
 D1–D3 are complete in code. D4 is the recorded green `BUX_E2E_FULL=1` on local
-HVF (Apple Silicon) in CONTRIBUTING Layer 1. Host CI (`BUX_E2E_FULL=0`) is not
-that proof.
+HVF (Apple Silicon) in CONTRIBUTING Layer 1. D5 is clone flatten in CONTRIBUTING
+item 16 / smoke. Host CI (`BUX_E2E_FULL=0`) is not that proof.
 
 ## See also
 
