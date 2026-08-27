@@ -269,7 +269,8 @@ Same for e2fs (`e2fs-v1.47.4`). bwrap verify is Linux-only.
 ## Guest ELF / FULL
 
 Darwin guest fetch: [`scripts/e2e/fetch-guest.sh`](../scripts/e2e/fetch-guest.sh)
-(procedure in [`CONTRIBUTING.md`](../CONTRIBUTING.md)). Darwin does not compile
+(procedure in [`CONTRIBUTING.md`](../CONTRIBUTING.md)). Release tag
+`guest-<40-char-sha>` attaches `bux-guest-<triple>`. Darwin does not compile
 musl. FULL needs `BUX_GUEST_PATH` from that script or a Linux
 `aarch64-unknown-linux-musl` / `x86_64-unknown-linux-musl` build.
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Poll cd.yml for this HEAD's guest-<triple> artifact. Does not dispatch.
+# Prefer Release guest-<sha> asset bux-guest-<triple>; else poll cd.yml
+# guest-<triple> artifact for this HEAD. Does not dispatch.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -36,37 +37,12 @@ print_dispatch() {
   if [[ "${branch}" == "HEAD" ]]; then
     branch=main
   fi
+  echo "git tag guest-${SHA} ${SHA} && git push origin guest-${SHA}" >&2
   echo "gh workflow run cd.yml --repo qntx/bux --ref ${branch}" >&2
 }
 
-RUN="$(gh run list --repo qntx/bux --workflow cd.yml --commit "${SHA}" \
-  --json databaseId,headSha,event,status,conclusion \
-  --jq 'if length == 0 then empty else (max_by(.databaseId).databaseId | tostring) end')"
-if [[ -z "${RUN}" ]]; then
-  print_dispatch
-  exit 1
-fi
-
-tmp="$(mktemp -d)"
-trap 'rm -rf "${tmp}"' EXIT
-
-dest="${ROOT}/target/debug/bux-guest-${TRIPLE}"
-artifact="guest-${TRIPLE}"
-
-while true; do
-  rm -rf "${tmp:?}/"*
-  if gh run download "${RUN}" --repo qntx/bux -n "${artifact}" -D "${tmp}"; then
-    nested="${tmp}/${artifact}/bux-guest-${TRIPLE}"
-    flat="${tmp}/bux-guest-${TRIPLE}"
-    if [[ -f "${nested}" ]]; then
-      src="${nested}"
-    elif [[ -f "${flat}" ]]; then
-      src="${flat}"
-    else
-      echo "downloaded ${artifact} but missing bux-guest-${TRIPLE}" >&2
-      exit 1
-    fi
-    if ! python3 - "${src}" "${ARCH}" <<'PY'
+validate_guest_elf() {
+  python3 - "$1" "${ARCH}" <<'PY'
 import struct, sys
 path, arch = sys.argv[1], sys.argv[2]
 expected = {"x86_64": 0x3E, "aarch64": 0xB7}.get(arch)
@@ -96,14 +72,53 @@ for i in range(e_phnum):
         sys.exit(1)
 sys.exit(0)
 PY
-    then
-      echo "downloaded bux-guest-${TRIPLE} failed ELF checks (64-bit LE, host arch, no PT_INTERP)" >&2
+}
+
+install_from() {
+  local src="$1"
+  if ! validate_guest_elf "${src}"; then
+    echo "downloaded bux-guest-${TRIPLE} failed ELF checks (64-bit LE, host arch, no PT_INTERP)" >&2
+    exit 1
+  fi
+  mkdir -p "${ROOT}/target/debug"
+  cp "${src}" "${dest}"
+  echo "export BUX_GUEST_PATH=${dest}"
+  exit 0
+}
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "${tmp}"' EXIT
+
+dest="${ROOT}/target/debug/bux-guest-${TRIPLE}"
+artifact="guest-${TRIPLE}"
+
+if gh release download "guest-${SHA}" --repo qntx/bux -p "bux-guest-${TRIPLE}" -D "${tmp}" \
+  && [[ -f "${tmp}/bux-guest-${TRIPLE}" ]]; then
+  install_from "${tmp}/bux-guest-${TRIPLE}"
+fi
+
+RUN="$(gh run list --repo qntx/bux --workflow cd.yml --commit "${SHA}" \
+  --json databaseId,headSha,event,status,conclusion \
+  --jq 'if length == 0 then empty else (max_by(.databaseId).databaseId | tostring) end')"
+if [[ -z "${RUN}" ]]; then
+  print_dispatch
+  exit 1
+fi
+
+while true; do
+  rm -rf "${tmp:?}/"*
+  if gh run download "${RUN}" --repo qntx/bux -n "${artifact}" -D "${tmp}"; then
+    nested="${tmp}/${artifact}/bux-guest-${TRIPLE}"
+    flat="${tmp}/bux-guest-${TRIPLE}"
+    if [[ -f "${nested}" ]]; then
+      src="${nested}"
+    elif [[ -f "${flat}" ]]; then
+      src="${flat}"
+    else
+      echo "downloaded ${artifact} but missing bux-guest-${TRIPLE}" >&2
       exit 1
     fi
-    mkdir -p "${ROOT}/target/debug"
-    cp "${src}" "${dest}"
-    echo "export BUX_GUEST_PATH=${dest}"
-    exit 0
+    install_from "${src}"
   fi
 
   meta="$(gh run view "${RUN}" --repo qntx/bux --json status,conclusion \

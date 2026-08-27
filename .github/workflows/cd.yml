@@ -2,7 +2,7 @@ name: CD
 
 on:
   push:
-    tags: ["v*.*.*"]
+    tags: ["v*.*.*", "guest-*"]
   workflow_dispatch:
 
 permissions:
@@ -82,6 +82,7 @@ jobs:
 
   build:
     needs: guest
+    if: ${{ !startsWith(github.ref, 'refs/tags/guest-') }}
     strategy:
       fail-fast: false
       matrix:
@@ -226,3 +227,91 @@ jobs:
             bux-*.tar.gz
             bux-*.sha256
             bux-guest-*
+
+  guest-release:
+    needs: guest
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/guest-')
+    steps:
+      - name: Assert tag is guest-<this-commit-sha>
+        if: github.ref_name != format('guest-{0}', github.sha)
+        run: |
+          echo "tag ${{ github.ref_name }} is not guest-${{ github.sha }}" >&2
+          exit 1
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: guest-*
+          merge-multiple: true
+
+      - name: Validate guest ELFs
+        run: |
+          python3 - "bux-guest-x86_64-unknown-linux-musl" "x86_64" <<'PY'
+          import struct, sys
+          path, arch = sys.argv[1], sys.argv[2]
+          expected = {"x86_64": 0x3E, "aarch64": 0xB7}.get(arch)
+          if expected is None:
+              sys.exit(1)
+          try:
+              data = open(path, "rb").read()
+          except OSError:
+              sys.exit(1)
+          if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+              sys.exit(1)
+          machine = struct.unpack_from("<H", data, 18)[0]
+          if machine != expected:
+              sys.exit(1)
+          e_phoff = struct.unpack_from("<Q", data, 32)[0]
+          e_phentsize = struct.unpack_from("<H", data, 54)[0]
+          e_phnum = struct.unpack_from("<H", data, 56)[0]
+          if e_phoff == 0 or e_phentsize == 0 or e_phnum == 0:
+              sys.exit(0)
+          for i in range(e_phnum):
+              off = e_phoff + i * e_phentsize
+              end = off + 4
+              if end > len(data):
+                  break
+              p_type = struct.unpack_from("<I", data, off)[0]
+              if p_type == 3:
+                  sys.exit(1)
+          sys.exit(0)
+          PY
+          python3 - "bux-guest-aarch64-unknown-linux-musl" "aarch64" <<'PY'
+          import struct, sys
+          path, arch = sys.argv[1], sys.argv[2]
+          expected = {"x86_64": 0x3E, "aarch64": 0xB7}.get(arch)
+          if expected is None:
+              sys.exit(1)
+          try:
+              data = open(path, "rb").read()
+          except OSError:
+              sys.exit(1)
+          if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+              sys.exit(1)
+          machine = struct.unpack_from("<H", data, 18)[0]
+          if machine != expected:
+              sys.exit(1)
+          e_phoff = struct.unpack_from("<Q", data, 32)[0]
+          e_phentsize = struct.unpack_from("<H", data, 54)[0]
+          e_phnum = struct.unpack_from("<H", data, 56)[0]
+          if e_phoff == 0 or e_phentsize == 0 or e_phnum == 0:
+              sys.exit(0)
+          for i in range(e_phnum):
+              off = e_phoff + i * e_phentsize
+              end = off + 4
+              if end > len(data):
+                  break
+              p_type = struct.unpack_from("<I", data, off)[0]
+              if p_type == 3:
+                  sys.exit(1)
+          sys.exit(0)
+          PY
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body: Static musl guest at ${{ github.sha }}. Not a product release. Not FULL proof.
+          files: |
+            bux-guest-x86_64-unknown-linux-musl
+            bux-guest-aarch64-unknown-linux-musl

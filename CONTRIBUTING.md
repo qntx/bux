@@ -150,16 +150,23 @@ present; the ELF must still pass validation (64-bit LE, host guest arch
 x86_64/aarch64, no `PT_INTERP`). Missing or dynamic ELF exits before `bux
 create`. FULL needs python3 for the guest ELF validator and Go for
 `bux-shim-bin`; Darwin FULL still needs `BUX_GUEST_PATH` and `gh` authenticated
-to `qntx/bux` with `workflow` if they must dispatch; `gh run download` is enough
+to `qntx/bux` with `workflow` if they must dispatch; `gh release download
+guest-<sha>` is enough when that Release exists; `gh run download` is enough
 when a matching run already exists.
 
-CD `cd.yml` guest artifact:
+CD `cd.yml` musl guest:
 
-- artifact **name**: `guest-<triple>`
+- Release tag: `guest-<40-char-sha>` of that commit (never `v0.4.1`)
+- Release asset **file**: `bux-guest-<triple>`
+- GHA artifact **name**: `guest-<triple>` (never `bux-guest-*`)
 - **file** inside the artifact: `bux-guest-<triple>`
 - sibling after fetch: `target/debug/bux-guest-<triple>`
 
-`scripts/e2e/fetch-guest.sh` polls that artifact for this `HEAD` and copies the
+Do not vendor the ELF in git. Do not fill the FULL record above from a
+Release download.
+
+`scripts/e2e/fetch-guest.sh` prefers the `guest-<sha>` Release asset, else
+polls the `guest-<triple>` workflow artifact for this `HEAD`, and copies the
 file next to `target/debug/bux`. Do not `gh run download -n bux-guest-*`.
 
 Pin `$BUX_E2E_IMAGE` if alpine wget/httpd is missing. There is no in-repo
