@@ -211,6 +211,10 @@ Items 11–15 are not in the `42f02b0` Layer 1 row.
 14. recover: dead shim inspect JSON `"Stopped"`, then `rm` without `-f`
 15. named-vol dir: `bux volume create` then bind `${BUX_HOME}/volumes/${NV}:/data`
 
+Operator FULL 2026-08-28 on `f4ff20ffaabfde6aedb30d9e2e23d5916405765f`
+(capture binary `./target/debug/bux`, `$BUX_HOME=/Users/xu/bux-full-hvf-addenda3`)
+exited 0 including items 11–15 (`SMOKE_EXIT=0`, `OK (full e2e)`).
+
 Item 16 is not in the `42f02b0` Layer 1 row.
 
 16. clone flatten: `bux clone` of an OCI VM; `/clone-marker` on the root disk (not tmpfs)
