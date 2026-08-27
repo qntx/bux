@@ -167,7 +167,8 @@ Release download.
 
 `scripts/e2e/fetch-guest.sh` prefers the `guest-<sha>` Release asset, else
 polls the `guest-<triple>` workflow artifact for this `HEAD`, and copies the
-file next to `target/debug/bux`. Do not `gh run download -n bux-guest-*`.
+file next to `target/debug/bux`. Dest is `chmod 0755` after copy; the script
+exits 1 if not `-x`. Do not `gh run download -n bux-guest-*`.
 
 Pin `$BUX_E2E_IMAGE` if alpine wget/httpd is missing. There is no in-repo
 custom e2e image.

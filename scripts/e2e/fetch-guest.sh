@@ -82,6 +82,11 @@ install_from() {
   fi
   mkdir -p "${ROOT}/target/debug"
   cp "${src}" "${dest}"
+  chmod 0755 "${dest}"
+  if [[ ! -x "${dest}" ]]; then
+    echo "failed to make ${dest} executable" >&2
+    exit 1
+  fi
   echo "export BUX_GUEST_PATH=${dest}"
   exit 0
 }

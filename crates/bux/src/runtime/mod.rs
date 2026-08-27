@@ -603,6 +603,7 @@ mod tests {
     use crate::state::VmConfig;
     use bux_oci::RegistryAuth;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::SystemTime;
@@ -1083,10 +1084,13 @@ mod tests {
     #[test]
     #[allow(
         clippy::significant_drop_tightening,
-        reason = "env lock must outlive create_managed_base"
+        reason = "env lock then ext4 lock must outlive create_managed_base and namei"
     )]
     fn create_managed_base_uses_runtime_guest_path_not_path_decoy() {
         let mut env = crate::guest::sidecar_env::lock();
+        let _ext4 = crate::guest::EXT4_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let planted_bytes = crate::guest::test_static_guest_elf(b"PLANT-GUEST-ELF!");
         let decoy_bytes = crate::guest::test_static_guest_elf(b"DECOY-GUEST-ELF!");
 
@@ -1094,6 +1098,7 @@ mod tests {
         let planted = files.path().join("planted-guest");
         let decoy = files.path().join("decoy-guest");
         fs::write(&planted, &planted_bytes).unwrap();
+        fs::set_permissions(&planted, fs::Permissions::from_mode(0o644)).unwrap();
         fs::write(&decoy, &decoy_bytes).unwrap();
 
         let decoy_bin = tempfile::tempdir().unwrap();
@@ -1128,6 +1133,16 @@ mod tests {
                 .windows(decoy_bytes.len())
                 .all(|w| w != decoy_bytes.as_slice()),
             "ext4 image must not contain the PATH decoy guest ELF"
+        );
+        let ext4 = bux_e2fs::Filesystem::open(&image).unwrap();
+        let ino = ext4
+            .namei(crate::guest::ManagedGuestBinary::relative_path())
+            .unwrap();
+        let inode = ext4.read_inode(ino).unwrap();
+        assert_eq!(
+            u32::from(inode.i_mode) & 0o777,
+            0o555,
+            "managed-base guest inode must be 0555"
         );
     }
 }

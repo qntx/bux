@@ -65,4 +65,13 @@ unsafe extern "C" {
     /// Idempotent — maps already loaded are left alone — and it installs the
     /// `write_bitmaps` callback so `ext2fs_close` flushes them to disk.
     pub fn ext2fs_read_bitmaps(fs: ext2_filsys) -> errcode_t;
+
+    /// Resolves `name` from `root`/`cwd` into an inode number.
+    pub fn ext2fs_namei(
+        fs: ext2_filsys,
+        root: ext2_ino_t,
+        cwd: ext2_ino_t,
+        name: *const ::core::ffi::c_char,
+        inode: *mut ext2_ino_t,
+    ) -> errcode_t;
 }

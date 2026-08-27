@@ -41,6 +41,7 @@ jobs:
           export "$env_var=musl-gcc"
           cargo build --release --target "${{ matrix.guest_target }}" -p bux-guest
           cp "target/${{ matrix.guest_target }}/release/bux-guest" "bux-guest-${{ matrix.guest_target }}"
+          chmod 0755 "bux-guest-${{ matrix.guest_target }}"
           file "bux-guest-${{ matrix.guest_target }}"
           arch="${{ matrix.guest_target }}"
           arch="${arch%%-*}"
@@ -171,6 +172,7 @@ jobs:
             exit 1
           fi
           cp "$guest_src" "$staging/"
+          chmod 0755 "$staging/bux-guest-$guest_target"
 
           if [[ "$target" == *apple-darwin* ]]; then
             krun_files="libkrun.dylib libkrunfw.dylib libkrun.1.dylib libkrunfw.5.dylib"
@@ -306,6 +308,7 @@ jobs:
                   sys.exit(1)
           sys.exit(0)
           PY
+          chmod 0755 bux-guest-x86_64-unknown-linux-musl bux-guest-aarch64-unknown-linux-musl
 
       - uses: softprops/action-gh-release@v2
         with:

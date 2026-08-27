@@ -108,6 +108,7 @@ fn copy_if_needed(source: &Path, dest: &Path) -> std::io::Result<()> {
         && dest_meta.len() == source_meta.len()
         && dest_meta.modified()? >= source_meta.modified()?
     {
+        chmod_executable(dest)?;
         return Ok(());
     }
 
@@ -115,11 +116,26 @@ fn copy_if_needed(source: &Path, dest: &Path) -> std::io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     fs::copy(source, dest)?;
-    fs::set_permissions(dest, source_meta.permissions())?;
+    chmod_executable(dest)?;
     println!(
         "cargo:warning=staged guest binary {} -> {}",
         source.display(),
         dest.display()
     );
+    Ok(())
+}
+
+fn chmod_executable(dest: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dest, fs::Permissions::from_mode(0o755))?;
+        if fs::metadata(dest)?.permissions().mode() & 0o111 == 0 {
+            return Err(std::io::Error::other(format!(
+                "{} is not executable after staging",
+                dest.display()
+            )));
+        }
+    }
     Ok(())
 }

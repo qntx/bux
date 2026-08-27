@@ -122,6 +122,8 @@ pin_full_guest() {
       cp "${ROOT}/target/${musl_triple}/debug/bux-guest" \
         "${ROOT}/target/debug/bux-guest-${musl_triple}"
       guest="${ROOT}/target/debug/bux-guest-${musl_triple}"
+      chmod 0755 "${guest}"
+      [[ -x "${guest}" ]] || full_guest_fail
       validate_guest_elf "${guest}" "${arch}" || full_guest_fail
     fi
   fi

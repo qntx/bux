@@ -414,6 +414,29 @@ impl Filesystem {
         }
     }
 
+    /// Looks up `path` relative to the filesystem root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if path conversion or the lookup fails.
+    pub fn namei(&self, path: &str) -> Result<u32> {
+        let c_path = str_to_cstring(path)?;
+        unsafe {
+            let mut ino: sys::ext2_ino_t = 0;
+            check(
+                "ext2fs_namei",
+                sys::ext2fs_namei(
+                    self.inner,
+                    sys::EXT2_ROOT_INO,
+                    sys::EXT2_ROOT_INO,
+                    c_path.as_ptr(),
+                    &raw mut ino,
+                ),
+            )?;
+            Ok(ino)
+        }
+    }
+
     /// Reads the on-disk inode structure for the given inode number.
     ///
     /// # Errors

@@ -79,7 +79,7 @@ impl ManagedGuestBinary {
     }
 
     pub(crate) fn versioned_cache_key(&self, base: &str) -> String {
-        format!("{base}-guest-{}", self.cache_key)
+        format!("{base}-guest-{}-x", self.cache_key)
     }
 
     pub(crate) const fn exec_path() -> &'static str {
@@ -97,6 +97,8 @@ impl ManagedGuestBinary {
     pub(crate) fn inject_into_rootfs(&self, rootfs: &Path) -> Result<()> {
         let dest = rootfs.join(Self::relative_path());
         if is_binary_up_to_date(&self.host_path, &dest)? {
+            #[cfg(unix)]
+            fs::set_permissions(&dest, fs::Permissions::from_mode(0o555))?;
             return Ok(());
         }
         if let Some(parent) = dest.parent() {
@@ -112,8 +114,44 @@ impl ManagedGuestBinary {
     }
 
     pub(crate) fn inject_into_disk(&self, image: &Path) -> Result<()> {
-        bux_e2fs::inject_file(image, &self.host_path, Self::relative_path())?;
+        let staged = stage_executable_copy(&self.host_path, image)?;
+        let _guard = UnlinkOnDrop(staged.clone());
+        bux_e2fs::inject_file(image, &staged, Self::relative_path())?;
         Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct UnlinkOnDrop(PathBuf);
+
+impl Drop for UnlinkOnDrop {
+    fn drop(&mut self) {
+        drop(fs::remove_file(&self.0));
+    }
+}
+
+fn stage_executable_copy(src: &Path, beside: &Path) -> Result<PathBuf> {
+    let dest = beside.with_extension("guest-inject");
+    if let Err(err) = fs::copy(src, &dest) {
+        drop(fs::remove_file(&dest));
+        return Err(err.into());
+    }
+    if let Err(err) = fs::set_permissions(&dest, fs::Permissions::from_mode(0o555)) {
+        drop(fs::remove_file(&dest));
+        return Err(err.into());
+    }
+    match fs::metadata(&dest) {
+        Ok(meta) if meta.permissions().mode() & 0o111 != 0 => Ok(dest),
+        Ok(_) => {
+            drop(fs::remove_file(&dest));
+            Err(Error::InvalidConfig(
+                "guest binary is not executable after staging".to_owned(),
+            ))
+        }
+        Err(err) => {
+            drop(fs::remove_file(&dest));
+            Err(err.into())
+        }
     }
 }
 
@@ -296,6 +334,11 @@ fn short_hash(data: &[u8]) -> String {
     out
 }
 
+// libext2fs getmntinfo is not thread-safe on macOS; tests that build images
+// must run serially.
+#[cfg(all(test, unix))]
+pub(crate) static EXT4_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Static Linux ELF for this host with a unique 16-byte tag at offset 64.
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "test helper")]
@@ -423,6 +466,7 @@ pub(crate) mod sidecar_env {
 )]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn make_elf(machine: u16, with_interp: bool) -> Vec<u8> {
         let mut data = vec![0_u8; 128];
@@ -496,7 +540,106 @@ mod tests {
         };
         assert_eq!(
             guest.versioned_cache_key("rootfs-digest"),
-            "rootfs-digest-guest-deadbeefcafebabe"
+            "rootfs-digest-guest-deadbeefcafebabe-x"
+        );
+    }
+
+    #[test]
+    fn stage_executable_copy_sets_0555_from_0644() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("guest");
+        let beside = dir.path().join("image.raw.tmp");
+        fs::write(&src, test_static_guest_elf(b"STAGE-COPY-0555!")).unwrap();
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o644)).unwrap();
+        let dest = stage_executable_copy(&src, &beside).unwrap();
+        let mode = fs::metadata(&dest).unwrap().permissions().mode();
+        assert_ne!(mode & 0o111, 0, "staged copy must be executable");
+        assert_eq!(mode & 0o777, 0o555, "staged copy mode must be 0555");
+    }
+
+    #[test]
+    fn inject_into_rootfs_sets_0555_from_0644_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("guest");
+        fs::write(&src, test_static_guest_elf(b"ROOTFS-COPY-0555")).unwrap();
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o644)).unwrap();
+        let guest = ManagedGuestBinary::from_path(&src).unwrap();
+        guest.inject_into_rootfs(dir.path()).unwrap();
+        let dest = dir.path().join(ManagedGuestBinary::relative_path());
+        let mode = fs::metadata(&dest).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o555, "rootfs dest must be 0555");
+    }
+
+    #[test]
+    fn inject_into_rootfs_repairs_existing_0644_dest() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("guest");
+        let bytes = test_static_guest_elf(b"REPAIR-ROOTFS-OK");
+        fs::write(&src, &bytes).unwrap();
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o644)).unwrap();
+        let dest = dir.path().join(ManagedGuestBinary::relative_path());
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::copy(&src, &dest).unwrap();
+        fs::set_permissions(&dest, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            is_binary_up_to_date(&src, &dest).unwrap(),
+            "precondition: dest is up to date so inject skips copy"
+        );
+        let guest = ManagedGuestBinary::from_path(&src).unwrap();
+        guest.inject_into_rootfs(dir.path()).unwrap();
+        let mode = fs::metadata(&dest).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o555,
+            "stale 0644 dest must be repaired to 0555"
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "ext4 lock must outlive create_from_dir and namei"
+    )]
+    fn inject_into_disk_sets_ext4_inode_0555_from_0644_source() {
+        let _lock = EXT4_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs");
+        fs::create_dir(&rootfs).unwrap();
+        let image = dir.path().join("image.raw");
+        bux_e2fs::create_from_dir(&rootfs, &image, 64 * 1024 * 1024).unwrap();
+
+        let planted = dir.path().join("planted-guest");
+        fs::write(&planted, test_static_guest_elf(b"INODE-GATE-0555!")).unwrap();
+        fs::set_permissions(&planted, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let guest = ManagedGuestBinary::from_path(&planted).unwrap();
+        guest.inject_into_disk(&image).unwrap();
+
+        let ext4 = bux_e2fs::Filesystem::open(&image).unwrap();
+        let ino = ext4.namei(ManagedGuestBinary::relative_path()).unwrap();
+        let inode = ext4.read_inode(ino).unwrap();
+        assert_eq!(
+            u32::from(inode.i_mode) & 0o777,
+            0o555,
+            "ext4 inode permission bits must be 0555"
+        );
+        assert_eq!(
+            u32::from(inode.i_mode) & 0o170_000,
+            0o100_000,
+            "ext4 inode must be a regular file"
+        );
+
+        let host_mode = fs::metadata(&planted).unwrap().permissions().mode();
+        assert_eq!(
+            host_mode & 0o777,
+            0o644,
+            "inject must not chmod the host planted file"
+        );
+        assert!(
+            !image.with_extension("guest-inject").exists(),
+            "sidecar *.guest-inject must be gone after inject_into_disk"
         );
     }
 
