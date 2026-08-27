@@ -306,9 +306,9 @@ mod tests {
         let mut val = args + equals + 1;
         if buf.get(val).copied() == Some(b'"') {
             val += 1;
-        }
-        if i > 0 && buf.get(args + i - 1).copied() == Some(b'"') {
-            *buf.get_mut(args + i - 1)? = 0;
+            if i > 0 && buf.get(args + i - 1).copied() == Some(b'"') {
+                *buf.get_mut(args + i - 1)? = 0;
+            }
         }
         if quoted && i > 0 && buf.get(args + i - 1).copied() == Some(b'"') {
             *buf.get_mut(args + i - 1)? = 0;
