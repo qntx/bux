@@ -439,6 +439,37 @@ fn unpack_guest_tar(bytes: &[u8], dest: &std::path::Path) -> std::io::Result<()>
     Ok(())
 }
 
+#[cfg(unix)]
+fn pack_dir_for_copy_in(src: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    {
+        let mut ar = tar::Builder::new(&mut buf);
+        append_dir_tree(&mut ar, src, std::path::Path::new(""))?;
+        ar.finish()?;
+    }
+    Ok(buf)
+}
+
+#[cfg(unix)]
+fn append_dir_tree<W: std::io::Write>(
+    ar: &mut tar::Builder<W>,
+    src: &std::path::Path,
+    rel: &std::path::Path,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let child_rel = rel.join(entry.file_name());
+        let child_src = entry.path();
+        if entry.file_type()?.is_dir() {
+            ar.append_dir(&child_rel, &child_src)?;
+            append_dir_tree(ar, &child_src, &child_rel)?;
+        } else {
+            ar.append_path_with_name(&child_src, &child_rel)?;
+        }
+    }
+    Ok(())
+}
+
 /// Parses `vm:path` guest reference. Returns `(vm, guest_path)`.
 #[cfg(unix)]
 fn parse_guest_ref(s: &str) -> Option<(&str, &str)> {
@@ -468,12 +499,8 @@ pub async fn cp(args: CpArgs) -> Result<()> {
             let handle = rt.get(id)?;
             let meta = std::fs::metadata(src)?;
             if meta.is_dir() {
-                let mut buf = Vec::new();
-                {
-                    let mut ar = tar::Builder::new(&mut buf);
-                    ar.append_dir_all(".", src)?;
-                    ar.finish()?;
-                }
+                // leftover guest ELF denies CurDir-only `./`; do not pack that member.
+                let buf = pack_dir_for_copy_in(std::path::Path::new(src))?;
                 handle.copy_in(guest_path, &buf).await?;
             } else {
                 let data = std::fs::read(src)?;
@@ -701,7 +728,7 @@ unix_only_stub! {
 #[cfg(test)]
 #[cfg(unix)]
 mod unpack_guest_tar_tests {
-    use super::unpack_guest_tar;
+    use super::{pack_dir_for_copy_in, unpack_guest_tar};
 
     #[test]
     fn unpack_guest_tar_skips_parent_dir_member() {
@@ -736,5 +763,27 @@ mod unpack_guest_tar_tests {
             !outside.exists(),
             "ParentDir member must not land at dest.parent()/outside.txt"
         );
+    }
+
+    #[test]
+    fn pack_dir_for_copy_in_omits_curdir_member() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("x.txt"), b"ok\n").expect("write x.txt");
+        let bytes = pack_dir_for_copy_in(dir.path()).expect("pack");
+        let mut archive = tar::Archive::new(bytes.as_slice());
+        let mut saw_x = false;
+        for entry in archive.entries().expect("entries") {
+            let entry = entry.expect("entry");
+            let path = entry.path().expect("path").into_owned();
+            assert!(
+                path.components()
+                    .any(|c| matches!(c, std::path::Component::Normal(_))),
+                "must not pack CurDir-only member {path:?}"
+            );
+            if path.as_os_str() == "x.txt" {
+                saw_x = true;
+            }
+        }
+        assert!(saw_x, "packed dir must contain x.txt");
     }
 }

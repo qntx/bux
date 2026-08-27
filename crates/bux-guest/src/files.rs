@@ -212,7 +212,7 @@ pub(crate) fn copy_in_parent_under_dest(canonical_dest: &Path, entry: &Path) -> 
     {
         return Err(copy_in_traversal_blocked(entry));
     }
-    // append_dir_all(".", src) emits `./`; join drops CurDir so parent() is dest's parent.
+    // CurDir-only `./`: join drops CurDir so parent() is dest's parent.
     if !entry
         .components()
         .any(|c| matches!(c, std::path::Component::Normal(_)))
