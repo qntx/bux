@@ -33,5 +33,5 @@ local HVF (Apple Silicon). Host CI (`BUX_E2E_FULL=0`) is not that proof.
 ## See also
 
 - [`CONTRIBUTING.md`](../CONTRIBUTING.md) — build, env, tests
-- [`crates/bux/src/runtime/boot.rs`](../crates/bux/src/runtime/boot.rs) — managed boot
+- [`crates/bux/src/runtime/boot/mod.rs`](../crates/bux/src/runtime/boot/mod.rs) — managed boot
 - [`crates/bux-shim/README.md`](../crates/bux-shim/README.md) — engine boundary
