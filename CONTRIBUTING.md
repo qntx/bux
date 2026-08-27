@@ -112,21 +112,55 @@ job. GitHub-hosted runners must not set `BUX_E2E_FULL=1`. Self-hosted runners
 can take it later without redesign.
 
 The first green FULL is recorded by the operator on **local HVF (Apple
-Silicon)**. Until this file contains that record (OS, arch, `bux system info`
-libkrun features, image ref/digest, date), do not call the tree
+Silicon)**. Until this file contains that record, do not call the tree
 production-ready. KVM later without redesign.
+
+### Layer 1 FULL record
+
+Empty. Fill from `./target/debug/bux` after a local HVF run. Do not invent values.
+
+| Field | Value |
+| ----- | ----- |
+| Date | |
+| uname | |
+| kern.hv_support | |
+| rustc | |
+| git | |
+| BUX_GUEST_PATH triple | |
+| ELF sha256 | |
+| host.virtualization | |
+| host.krun_features | |
+| host.mandatory_access_control | |
+| image reference | |
+| image digest | |
+
+Capture `.host.*` with `./target/debug/bux system info --format json` and image
+reference/digest with `./target/debug/bux images --format json`. Pin `$BUX_HOME`
+to a path **without** substring `bux-e2e` (`scripts/e2e/smoke.sh` removes that
+data dir on exit). Darwin guest ELF: `scripts/e2e/fetch-guest.sh`.
 
 FULL always builds `target/debug/bux` and `target/debug/bux-shim` and ignores a
 PATH `bux`. On Darwin the script ad-hoc codesigns the shim with
 `crates/bux-shim/bux-shim.entitlements`. Darwin HVF needs that codesign plus a
-guest ELF via `BUX_GUEST_PATH` (CD `workflow_dispatch` artifact, or a prior
-`aarch64-unknown-linux-musl` build). Darwin does not compile the guest and does
-not use zig cc. Linux FULL may `cargo build -p bux-guest --target
+guest ELF via `BUX_GUEST_PATH` from `scripts/e2e/fetch-guest.sh` (not a cwd
+`gh run download` that leaves the ELF nested). Darwin does not compile the guest
+and does not use zig cc. Linux FULL may `cargo build -p bux-guest --target
 $ARCH-unknown-linux-musl` only when `musl-gcc` and that rustc target are already
 present; the ELF must still pass validation (64-bit LE, host guest arch
 x86_64/aarch64, no `PT_INTERP`). Missing or dynamic ELF exits before `bux
 create`. FULL needs python3 for the guest ELF validator and Go for
-`bux-shim-bin`; Darwin FULL still needs `BUX_GUEST_PATH`.
+`bux-shim-bin`; Darwin FULL still needs `BUX_GUEST_PATH` and `gh` authenticated
+to `qntx/bux` with `workflow` if they must dispatch; `gh run download` is enough
+when a matching run already exists.
+
+CD `cd.yml` guest artifact:
+
+- artifact **name**: `guest-<triple>`
+- **file** inside the artifact: `bux-guest-<triple>`
+- sibling after fetch: `target/debug/bux-guest-<triple>`
+
+`scripts/e2e/fetch-guest.sh` polls that artifact for this `HEAD` and copies the
+file next to `target/debug/bux`. Do not `gh run download -n bux-guest-*`.
 
 Pin `$BUX_E2E_IMAGE` if alpine wget/httpd is missing. There is no in-repo
 custom e2e image.

@@ -268,9 +268,10 @@ Same for e2fs (`e2fs-v1.47.4`). bwrap verify is Linux-only.
 
 ## Guest ELF / FULL
 
-Darwin does not compile musl. FULL needs `BUX_GUEST_PATH` from CD
-`workflow_dispatch` or a Linux `aarch64-unknown-linux-musl` /
-`x86_64-unknown-linux-musl` build.
+Darwin guest fetch: [`scripts/e2e/fetch-guest.sh`](../scripts/e2e/fetch-guest.sh)
+(procedure in [`CONTRIBUTING.md`](../CONTRIBUTING.md)). Darwin does not compile
+musl. FULL needs `BUX_GUEST_PATH` from that script or a Linux
+`aarch64-unknown-linux-musl` / `x86_64-unknown-linux-musl` build.
 
 This Apple Silicon host (2026-08-26): `kern.hv_support=1`, **no** musl
 `bux-guest` ELF. Host CI (`.github/workflows/e2e-host.yml`) forces
