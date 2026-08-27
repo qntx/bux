@@ -89,6 +89,11 @@ pub enum HelloAck {
 }
 
 /// Host → guest on a control connection.
+///
+/// [`Self::Metrics`], [`Self::HealthCheck`], and [`Self::PrepareSnapshot`] are
+/// unimplemented. The host never sends them. The guest closes the control
+/// connection on unknown variants (`unsupported control request`) and does not
+/// send [`ControlResp::Error`].
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum ControlReq {
@@ -100,15 +105,20 @@ pub enum ControlReq {
     Quiesce,
     /// Thaw previously frozen filesystems (`FITHAW`).
     Thaw,
-    /// Request guest resource metrics (CPU, memory, disk I/O).
+    /// Unimplemented. Host never sends this; guest tears down the control connection.
     Metrics,
-    /// Run a deep health check (beyond simple ping).
+    /// Unimplemented. Host never sends this; guest tears down the control connection.
     HealthCheck,
-    /// Prepare for an external snapshot (quiesce + sync + signal ready).
+    /// Unimplemented. Host never sends this; guest tears down the control connection.
     PrepareSnapshot,
 }
 
 /// Guest → host on a control connection.
+///
+/// [`Self::MetricsData`], [`Self::HealthOk`], and [`Self::SnapshotPrepared`] are
+/// unimplemented. The guest never sends them: unknown [`ControlReq`] variants
+/// tear down the control connection instead of producing these replies or
+/// [`Self::Error`].
 #[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ControlResp {
@@ -131,7 +141,7 @@ pub enum ControlResp {
         /// Number of filesystems thawed.
         thawed_count: u32,
     },
-    /// Reply to [`ControlReq::Metrics`]: guest resource usage.
+    /// Unimplemented reply to [`ControlReq::Metrics`]. Guest never sends this.
     MetricsData {
         /// CPU usage as a percentage (0.0–100.0+).
         cpu_percent: f32,
@@ -142,12 +152,12 @@ pub enum ControlResp {
         /// Total disk write bytes since boot.
         disk_write_bytes: u64,
     },
-    /// Reply to [`ControlReq::HealthCheck`]: deep health check passed.
+    /// Unimplemented reply to [`ControlReq::HealthCheck`]. Guest never sends this.
     HealthOk {
         /// Number of checks that passed.
         checks_passed: u32,
     },
-    /// Reply to [`ControlReq::PrepareSnapshot`]: guest is snapshot-ready.
+    /// Unimplemented reply to [`ControlReq::PrepareSnapshot`]. Guest never sends this.
     SnapshotPrepared,
     /// Control request failed.
     Error(ErrorInfo),

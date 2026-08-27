@@ -611,15 +611,11 @@ pub async fn stats(args: &StatsArgs) -> Result<()> {
     let handle = rt.get(&args.vm)?;
     let info = handle.info();
     let health = handle.health().await;
-    let bm = handle.metrics();
     println!("ID:             {}", info.id);
     println!("Name:           {}", info.name.as_deref().unwrap_or("-"));
     println!("Status:         {:?}", info.status);
     println!("Health:         {health:?}");
     println!("PID:            {}", info.pid);
-    println!("Boot time:      {} ms", bm.boot_duration_ms());
-    println!("Exec count:     {}", bm.exec_count());
-    println!("Last exec:      {} ms", bm.last_exec_duration_ms());
     Ok(())
 }
 

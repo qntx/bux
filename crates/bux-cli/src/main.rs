@@ -78,7 +78,7 @@ enum Command {
     /// Restart a stopped or running VM.
     Restart(vm::RestartArgs),
 
-    /// Display real-time resource statistics for a running VM.
+    /// Display VM identity, status, and health.
     Stats(vm::StatsArgs),
 
     /// Manage VM snapshots.
