@@ -20,5 +20,8 @@ tar = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "io-util", "fs", "time", "sync", "signal"] }
 tokio-vsock = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true

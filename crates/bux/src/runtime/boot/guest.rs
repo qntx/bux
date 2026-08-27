@@ -92,6 +92,7 @@ mod tests {
     use super::*;
     use crate::disk::DiskFormat;
     use crate::options::NetworkSpec;
+    use crate::secrets::{LiveSecrets, Secret};
     use crate::state::VirtioFs;
     use bux_proto::GUEST_BOOT_CONFIG_ENV;
 
@@ -111,6 +112,29 @@ mod tests {
             .expect("boot env prefix");
         let boot: GuestBootConfig = serde_json::from_str(json).unwrap();
         assert!(boot.volumes.is_empty());
+    }
+
+    #[test]
+    fn guest_boot_env_roundtrips_mitm_ca_pem() {
+        let live = LiveSecrets::mint(vec![Secret::new("k", ["h"], "v")]).unwrap();
+        let mut cfg = VmConfig {
+            network: NetworkSpec::default(),
+            ..VmConfig::default()
+        };
+        inject_guest_boot_env(&mut cfg, "abc", Some(live.ca_cert_pem.clone())).unwrap();
+        let env = cfg.env.expect("boot env");
+        assert_eq!(env.len(), 1);
+        let assignment = env.first().expect("boot env");
+        assert!(assignment.starts_with(&format!("{GUEST_BOOT_CONFIG_ENV}=")));
+        let json = assignment
+            .strip_prefix(&format!("{GUEST_BOOT_CONFIG_ENV}="))
+            .expect("boot env prefix");
+        let boot: GuestBootConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(boot.mitm_ca_pem.as_deref(), Some(live.ca_cert_pem.as_str()));
+        assert!(!json.contains("PRIVATE KEY"));
+        let dbg = format!("{live:?}");
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(!dbg.contains(&live.ca_key_pem));
     }
 
     #[test]

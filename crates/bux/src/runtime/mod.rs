@@ -911,6 +911,37 @@ mod tests {
     }
 
     #[test]
+    fn abort_unready_keeps_stderr_drops_json_and_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let id = "abortunready001";
+        insert_cfg(
+            &rt,
+            id,
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig {
+                auto_remove: false,
+                ..VmConfig::default()
+            },
+        );
+        let sock = rt.socks_dir.join(format!("{id}.sock"));
+        let stderr = sock.with_extension("stderr");
+        let json = sock.with_extension("json");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        fs::write(&stderr, b"shim-and-guest-log").unwrap();
+        fs::write(&json, b"{\"secrets\":true}").unwrap();
+
+        rt.get(id).unwrap().abort_unready();
+
+        assert!(stderr.exists(), "create_or_dump needs socks/*.stderr");
+        assert_eq!(fs::read(&stderr).unwrap(), b"shim-and-guest-log");
+        assert!(!json.exists(), "secrets JSON must not linger on abort");
+        assert!(!sock.exists());
+        assert!(rt.db.get_by_id_prefix(id).is_err());
+    }
+
+    #[test]
     fn mark_stopped_non_auto_remove_unlinks_vsock_sock_keeps_stderr() {
         let dir = tempfile::tempdir().unwrap();
         let rt = Runtime::open(dir.path()).unwrap();

@@ -300,6 +300,7 @@ dependencies = [
  "rtnetlink",
  "serde_json",
  "tar",
+ "tempfile",
  "tokio",
  "tokio-vsock",
 ]

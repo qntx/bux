@@ -29,7 +29,7 @@ pub fn uptime_ms() -> u64 {
 ///
 /// # Errors
 ///
-/// Returns an error if boot, network, CA, virtiofs, reaper start, or vsock listen fails.
+/// Returns an error if boot, network, virtiofs, reaper start, or vsock listen fails.
 pub async fn run() -> io::Result<()> {
     BOOT_T0.set(Instant::now()).ok();
     eprintln!("[bux-guest] T+0ms: starting");
@@ -69,8 +69,12 @@ pub async fn run() -> io::Result<()> {
     }
 
     if let Some(ref pem) = boot.mitm_ca_pem {
-        ca_trust::install_mitm_ca(pem)?;
-        eprintln!("[bux-guest] T+{}ms: MITM CA installed", uptime_ms());
+        // CA writes are fail-open so secrets create can become ready.
+        if let Err(e) = ca_trust::install_mitm_ca(pem) {
+            eprintln!("[bux-guest] MITM CA install failed: {e}");
+        } else {
+            eprintln!("[bux-guest] T+{}ms: MITM CA installed", uptime_ms());
+        }
     }
 
     mounts::mount_virtiofs_volumes(&boot.volumes)?;

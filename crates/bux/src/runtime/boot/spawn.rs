@@ -15,7 +15,9 @@ use tracing::info;
 
 use super::super::{Runtime, Vm};
 use super::guest::{inject_guest_boot_env, prepare_managed_config};
-use super::unix::{clean_vm_files, prepare_virtio_net, reject_long_unix_path, unlink_unix_socket};
+use super::unix::{
+    clean_unready_files, prepare_virtio_net, reject_long_unix_path, unlink_unix_socket,
+};
 use crate::Result;
 use crate::disk::DiskFormat;
 use crate::secrets::{LiveSecrets, Secret};
@@ -61,7 +63,7 @@ fn abort_partial_spawn(rt: &Runtime, id: &str, socket: &Path, pid: Option<i32>) 
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(id);
-    clean_vm_files(socket);
+    clean_unready_files(socket);
     drop(rt.volumes().unlink_vm(id));
     drop(rt.disk.remove_vm_disk(id));
     drop(rt.db.delete(id));

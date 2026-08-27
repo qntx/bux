@@ -14,8 +14,9 @@ use tracing::info;
 
 use super::HealthStatus;
 use super::boot::{
-    clean_net_sock, clean_vm_files, clean_vsock_sock, inject_guest_boot_env, is_pid_alive,
-    prepare_restart_config, prepare_virtio_net, shim_death_message, spawn_shim, wait_for_exit,
+    agent_not_ready_message, clean_net_sock, clean_unready_files, clean_vm_files, clean_vsock_sock,
+    inject_guest_boot_env, is_pid_alive, prepare_restart_config, prepare_virtio_net,
+    shim_death_message, spawn_shim, wait_for_exit,
 };
 use crate::Result;
 use crate::client::{Client, ExecHandle, ExecOutput, PongInfo};
@@ -193,7 +194,7 @@ impl Vm {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.state.id);
-        clean_vm_files(&self.state.socket);
+        clean_unready_files(&self.state.socket);
         drop(self.volumes.unlink_vm(&self.state.id));
         drop(self.disk.remove_vm_disk(&self.state.id));
         drop(self.db.delete(&self.state.id));
@@ -673,7 +674,7 @@ impl Vm {
             }
         })
         .await
-        .map_err(|_| crate::Error::GuestUnavailable("guest agent did not become ready".into()))?;
+        .map_err(|_| crate::Error::GuestUnavailable(agent_not_ready_message(pid, &exit_file)))?;
 
         if result.is_ok() {
             let boot_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
