@@ -1,7 +1,8 @@
 //! OCI image management for the bux micro-VM sandbox.
 //!
-//! Pulls, caches, and extracts OCI container images for use as rootfs
-//! directories with libkrun micro-VMs. Powered by [`oci_client`].
+//! Pulls, caches, and extracts OCI container images to a directory. The
+//! managed Runtime converts that directory into an ext4 base plus QCOW2
+//! overlay (`DiskManager::create_managed_base`). Powered by [`oci_client`].
 //!
 //! # Architecture
 //!
