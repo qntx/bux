@@ -230,6 +230,7 @@ pub(crate) fn copy_in_parent_under_dest(canonical_dest: &Path, entry: &Path) -> 
     Ok(())
 }
 
+/// PermissionDenied constructor for the fail-closed parent-under-dest check.
 fn copy_in_traversal_blocked(entry: &Path) -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
