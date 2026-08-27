@@ -53,8 +53,6 @@ pub(crate) fn shim_death_message(pid: i32, exit_file: &Path) -> String {
 }
 
 /// Timeout path: ready wait expired while the jail parent is still alive.
-///
-/// Must not be the bare `guest agent did not become ready` — include pid and stderr.
 pub(crate) fn agent_not_ready_message(pid: i32, exit_file: &Path) -> String {
     let hint = stderr_tail(&exit_file.with_extension("stderr"), 5);
     format!("guest agent did not become ready (pid {pid}){hint}")
