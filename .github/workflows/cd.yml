@@ -24,8 +24,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with: { targets: "${{ matrix.guest_target }}" }
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          targets: "${{ matrix.guest_target }}"
 
       - name: Install musl toolchain
         run: |
@@ -40,6 +42,38 @@ jobs:
           cargo build --release --target "${{ matrix.guest_target }}" -p bux-guest
           cp "target/${{ matrix.guest_target }}/release/bux-guest" "bux-guest-${{ matrix.guest_target }}"
           file "bux-guest-${{ matrix.guest_target }}"
+          arch="${{ matrix.guest_target }}"
+          arch="${arch%%-*}"
+          python3 - "bux-guest-${{ matrix.guest_target }}" "${arch}" <<'PY'
+          import struct, sys
+          path, arch = sys.argv[1], sys.argv[2]
+          expected = {"x86_64": 0x3E, "aarch64": 0xB7}.get(arch)
+          if expected is None:
+              sys.exit(1)
+          try:
+              data = open(path, "rb").read()
+          except OSError:
+              sys.exit(1)
+          if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+              sys.exit(1)
+          machine = struct.unpack_from("<H", data, 18)[0]
+          if machine != expected:
+              sys.exit(1)
+          e_phoff = struct.unpack_from("<Q", data, 32)[0]
+          e_phentsize = struct.unpack_from("<H", data, 54)[0]
+          e_phnum = struct.unpack_from("<H", data, 56)[0]
+          if e_phoff == 0 or e_phentsize == 0 or e_phnum == 0:
+              sys.exit(0)
+          for i in range(e_phnum):
+              off = e_phoff + i * e_phentsize
+              end = off + 4
+              if end > len(data):
+                  break
+              p_type = struct.unpack_from("<I", data, off)[0]
+              if p_type == 3:
+                  sys.exit(1)
+          sys.exit(0)
+          PY
 
       - uses: actions/upload-artifact@v7
         with:
@@ -66,8 +100,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with: { targets: "${{ matrix.target }}" }
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          targets: "${{ matrix.target }}"
       - uses: Swatinem/rust-cache@v2
         with: { key: "${{ matrix.target }}" }
       - uses: actions/download-artifact@v8
