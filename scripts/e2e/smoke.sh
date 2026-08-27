@@ -220,7 +220,7 @@ guest_wget_probe() {
 
 require_wget_ok() {
   local status
-  status="$(retry_until_needle WGET_OK 4 0.5 guest_wget_probe "$1" "$2")" || {
+  status="$(retry_until_needle WGET_OK "${WGET_OK_DEADLINE_SECS}" "${WGET_OK_SLEEP_SECS}" guest_wget_probe "$1" "$2")" || {
     echo "$3: expected wget success, got ${status:-empty}"
     return 1
   }
