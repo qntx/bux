@@ -13,8 +13,8 @@ pub(super) use spawn::ShimSpawnResult;
 pub(crate) use spawn::spawn_config;
 pub(super) use spawn::spawn_shim;
 pub(super) use unix::{
-    clean_net_sock, clean_vm_files, is_pid_alive, prepare_virtio_net, shim_death_message,
-    wait_for_exit,
+    clean_net_sock, clean_vm_files, clean_vsock_sock, is_pid_alive, prepare_virtio_net,
+    shim_death_message, wait_for_exit,
 };
 
 use std::io;

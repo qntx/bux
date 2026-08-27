@@ -15,7 +15,7 @@ use tracing::info;
 
 use super::super::{Runtime, Vm};
 use super::guest::{inject_guest_boot_env, prepare_managed_config};
-use super::unix::{clean_vm_files, prepare_virtio_net, reject_long_unix_path};
+use super::unix::{clean_vm_files, prepare_virtio_net, reject_long_unix_path, unlink_unix_socket};
 use crate::Result;
 use crate::disk::DiskFormat;
 use crate::secrets::{LiveSecrets, Secret};
@@ -325,6 +325,13 @@ pub(crate) fn spawn_shim(
     } else {
         Some(Box::new(bux_jail::NoopSandbox::default()))
     };
+
+    // leftover listen inode makes krun add_vsock_port2 EEXIST
+    for vs in &config.vsock_ports {
+        if vs.listen {
+            unlink_unix_socket(Path::new(&vs.path))?;
+        }
+    }
 
     let jail_config = JailConfig {
         rootfs: config.rootfs.as_deref().map(PathBuf::from),

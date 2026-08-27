@@ -1,6 +1,7 @@
 //! Unix sockets, shim PID, and virtio-net JSON.
 
 use std::fs;
+use std::io;
 use std::path::Path;
 use std::time::Duration;
 
@@ -49,9 +50,25 @@ pub(crate) fn shim_death_message(pid: i32, exit_file: &Path) -> String {
     format!("VM process (pid {pid}) died before ready: {detail}{stderr_hint}")
 }
 
+/// Unlink a Unix socket path. `NotFound` is success (already gone).
+pub(crate) fn unlink_unix_socket(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Best-effort unlink of the vsock listen path (`{id}.sock`).
+///
+/// Leftover inode makes the next `krun_add_vsock_port2` bind EEXIST (-17).
+pub(crate) fn clean_vsock_sock(socket: &Path) {
+    drop(unlink_unix_socket(socket));
+}
+
 /// Removes transient files associated with a VM socket path.
 pub(crate) fn clean_vm_files(socket: &Path) {
-    drop(fs::remove_file(socket));
+    clean_vsock_sock(socket);
     for ext in ["exit", "json", "stderr"] {
         drop(fs::remove_file(socket.with_extension(ext)));
     }
@@ -105,9 +122,7 @@ pub(crate) fn prepare_virtio_net(
 
     let socket_path = socks_dir.join(format!("{id}.net.sock"));
     reject_long_unix_path(&socket_path)?;
-    if socket_path.exists() {
-        fs::remove_file(&socket_path)?;
-    }
+    unlink_unix_socket(&socket_path)?;
 
     let network = ShimNetwork {
         socket_path,
@@ -196,5 +211,43 @@ mod tests {
         assert_eq!(net.connection, ShimNetConn::UnixDgram);
         #[cfg(not(target_os = "macos"))]
         assert_eq!(net.connection, ShimNetConn::UnixStream);
+    }
+
+    #[test]
+    fn clean_vsock_sock_unlinks_unix_socket_and_keeps_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("id.sock");
+        let stderr = sock.with_extension("stderr");
+        let json = sock.with_extension("json");
+        let exit = sock.with_extension("exit");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        fs::write(&stderr, b"keep-me").unwrap();
+        fs::write(&json, b"{}").unwrap();
+        fs::write(&exit, b"{}").unwrap();
+
+        clean_vsock_sock(&sock);
+
+        assert!(
+            !sock.exists(),
+            "non-auto_remove stop must unlink vsock listen path"
+        );
+        assert!(stderr.exists(), "bux logs needs id.stderr after stop");
+        assert!(json.exists());
+        assert!(exit.exists());
+    }
+
+    #[test]
+    fn unlink_unix_socket_not_found_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        unlink_unix_socket(&dir.path().join("missing.sock")).unwrap();
+    }
+
+    #[test]
+    fn unlink_unix_socket_unlinks_listen_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("listen.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        unlink_unix_socket(&sock).unwrap();
+        assert!(!sock.exists());
     }
 }

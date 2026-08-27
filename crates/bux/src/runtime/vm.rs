@@ -14,8 +14,8 @@ use tracing::info;
 
 use super::HealthStatus;
 use super::boot::{
-    clean_net_sock, clean_vm_files, inject_guest_boot_env, is_pid_alive, prepare_restart_config,
-    prepare_virtio_net, shim_death_message, spawn_shim, wait_for_exit,
+    clean_net_sock, clean_vm_files, clean_vsock_sock, inject_guest_boot_env, is_pid_alive,
+    prepare_restart_config, prepare_virtio_net, shim_death_message, spawn_shim, wait_for_exit,
 };
 use crate::Result;
 use crate::client::{Client, ExecHandle, ExecOutput, PongInfo};
@@ -783,6 +783,7 @@ impl Vm {
     /// `update_status(Stopped)` covers a pid row that already landed.
     fn revert_failed_start(&mut self, pid: i32) {
         signal::kill(Pid::from_raw(pid), Signal::SIGKILL).ok();
+        clean_vsock_sock(&self.state.socket);
         clean_net_sock(&self.state.socket);
         self.state.status = Status::Stopped;
         drop(self.db.update_status(&self.state.id, Status::Stopped));
@@ -792,6 +793,7 @@ impl Vm {
     /// deletes the VM record, socket, and disk image.
     fn mark_stopped(&mut self) -> Result<()> {
         self.state.status = Status::Stopped;
+        clean_vsock_sock(&self.state.socket);
         clean_net_sock(&self.state.socket);
 
         let uptime_ms = u64::try_from(self.spawned_at.elapsed().as_millis()).unwrap_or(u64::MAX);

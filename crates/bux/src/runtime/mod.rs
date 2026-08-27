@@ -911,6 +911,37 @@ mod tests {
     }
 
     #[test]
+    fn mark_stopped_non_auto_remove_unlinks_vsock_sock_keeps_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let id = "stopvsock000001";
+        insert_cfg(
+            &rt,
+            id,
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig {
+                auto_remove: false,
+                ..VmConfig::default()
+            },
+        );
+        let sock = rt.socks_dir.join(format!("{id}.sock"));
+        let stderr = sock.with_extension("stderr");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        fs::write(&stderr, b"shim-log").unwrap();
+
+        rt.get(id).unwrap().kill().unwrap();
+
+        assert!(
+            !sock.exists(),
+            "#109: non-auto_remove stop must unlink {id}.sock"
+        );
+        assert!(stderr.exists(), "bux logs after stop");
+        let row = rt.db.get_by_id_prefix(id).unwrap();
+        assert_eq!(row.status, Status::Stopped);
+    }
+
+    #[test]
     fn list_auto_remove_does_not_delete_name_colliding_with_id() {
         let dir = tempfile::tempdir().unwrap();
         let rt = Runtime::open(dir.path()).unwrap();
