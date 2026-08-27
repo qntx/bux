@@ -53,61 +53,40 @@ pub fn audit_isolation(caps: &HostCapabilities) -> Vec<String> {
     if !caps.virtualization {
         warnings.push("no hardware virtualization detected — VMs will not run".to_owned());
     }
-    if !caps.namespaces {
-        warnings.push(
-            "no namespace isolation (bubblewrap not found) — shim runs without namespaces"
-                .to_owned(),
-        );
+
+    #[cfg(target_os = "linux")]
+    {
+        if !caps.namespaces {
+            warnings.push(
+                "no namespace isolation (bubblewrap not found) — shim runs without namespaces"
+                    .to_owned(),
+            );
+        }
+        if !caps.seccomp {
+            warnings
+                .push("seccomp BPF not available — shim runs without syscall filtering".to_owned());
+        }
+        if !caps.mandatory_access_control {
+            warnings.push(
+                "no MAC (AppArmor/SELinux/Seatbelt) — no mandatory access control".to_owned(),
+            );
+        }
+        if !caps.landlock {
+            warnings.push(
+                "Landlock LSM not available — filesystem restrictions degraded unless fail-closed"
+                    .to_owned(),
+            );
+        }
     }
-    if !caps.seccomp {
-        warnings.push("seccomp BPF not available — shim runs without syscall filtering".to_owned());
-    }
-    if !caps.mandatory_access_control {
-        warnings
-            .push("no MAC (AppArmor/SELinux/Seatbelt) — no mandatory access control".to_owned());
-    }
-    if !caps.landlock {
-        warnings.push(
-            "Landlock LSM not available — filesystem restrictions degraded unless fail-closed"
-                .to_owned(),
-        );
+
+    #[cfg(target_os = "macos")]
+    {
+        if !caps.mandatory_access_control {
+            warnings.push("sandbox-exec not found — no mandatory access control".to_owned());
+        }
     }
 
     warnings
-}
-
-/// Checks if the guest binary at `path` is a valid static ELF for the host arch.
-///
-/// Returns `Ok(())` if the binary passes all checks, or an error describing
-/// the validation failure.
-///
-/// # Errors
-///
-/// Returns an error if the binary is missing, too small, or not a valid ELF.
-pub fn check_guest_binary(path: &Path) -> std::io::Result<()> {
-    use std::io::{self, Read};
-
-    let mut f = std::fs::File::open(path).map_err(|e| {
-        if e.kind() == io::ErrorKind::NotFound {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("guest binary not found: {}", path.display()),
-            )
-        } else {
-            e
-        }
-    })?;
-
-    let mut magic = [0u8; 4];
-    let n = f.read(&mut magic)?;
-    if n < 4 || magic != *b"\x7fELF" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "guest binary is not a valid ELF file",
-        ));
-    }
-
-    Ok(())
 }
 
 /// Checks whether hardware virtualization support is available on this host.
@@ -207,7 +186,7 @@ fn check_landlock() -> bool {
 }
 
 /// Checks if a binary is available in $PATH.
-#[allow(dead_code, reason = "used conditionally on Linux")]
+#[allow(dead_code, reason = "used from cfg-gated PATH probes")]
 fn which(name: &str) -> bool {
     std::env::var("PATH")
         .unwrap_or_default()
@@ -234,7 +213,7 @@ mod tests {
     #[test]
     fn audit_reports_missing_features() {
         let caps = HostCapabilities {
-            virtualization: true,
+            virtualization: false,
             namespaces: false,
             seccomp: false,
             mandatory_access_control: false,
@@ -242,14 +221,21 @@ mod tests {
             landlock: false,
         };
         let warnings = audit_isolation(&caps);
-        assert!(warnings.len() >= 4);
-        assert!(warnings.iter().any(|w| w.contains("namespace")));
-        assert!(warnings.iter().any(|w| w.contains("Landlock")));
-    }
 
-    #[test]
-    fn guest_binary_check_rejects_missing() {
-        let result = check_guest_binary(Path::new("/nonexistent/path"));
-        assert!(result.is_err());
+        #[cfg(target_os = "linux")]
+        {
+            assert!(warnings.len() >= 4);
+            assert!(warnings.iter().any(|w| w.contains("namespace")));
+            assert!(warnings.iter().any(|w| w.contains("Landlock")));
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            assert!(warnings.iter().any(|w| w.contains("virtualization")));
+            assert!(warnings.iter().any(|w| w.contains("sandbox-exec")));
+            assert!(!warnings.iter().any(|w| w.contains("namespace")));
+            assert!(!warnings.iter().any(|w| w.contains("Landlock")));
+            assert!(!warnings.iter().any(|w| w.contains("seccomp")));
+        }
     }
 }
