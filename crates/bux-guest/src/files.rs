@@ -212,6 +212,13 @@ pub(crate) fn copy_in_parent_under_dest(canonical_dest: &Path, entry: &Path) -> 
     {
         return Err(copy_in_traversal_blocked(entry));
     }
+    // append_dir_all(".", src) emits `./`; join drops CurDir so parent() is dest's parent.
+    if !entry
+        .components()
+        .any(|c| matches!(c, std::path::Component::Normal(_)))
+    {
+        return Ok(());
+    }
     let target = canonical_dest.join(entry);
     let parent = target.parent().unwrap_or(canonical_dest);
     let resolved = parent
@@ -283,6 +290,8 @@ mod copy_in_parent_tests {
     fn allows_direct_child() {
         with_canonical_dest(|dest| {
             copy_in_parent_under_dest(dest, Path::new("ok.txt")).expect("direct child under dest");
+            copy_in_parent_under_dest(dest, Path::new(".")).expect("dot archive member");
+            copy_in_parent_under_dest(dest, Path::new("./")).expect("dot-slash archive member");
         });
     }
 }
