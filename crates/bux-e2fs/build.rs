@@ -11,7 +11,7 @@
 //!   local development.
 //!
 //! - `BUX_E2FS_VERSION` — Override the e2fsprogs release version to download.
-//!   Defaults to the crate version from `Cargo.toml`.
+//!   Defaults to `E2FSPROGS_VERSION`.
 //!
 //! - `BUX_UPDATE_BINDINGS` — When set alongside the `regenerate` feature, the
 //!   freshly generated `bindings.rs` is copied back to `src/bindings.rs` so it
@@ -31,6 +31,9 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Pinned e2fsprogs version — keep in sync with `.github/workflows/e2fs-build.yml`.
+const E2FSPROGS_VERSION: &str = "1.47.4";
 
 /// GitHub repository for downloading pre-built library releases.
 const GITHUB_REPO: &str = "qntx/bux";
@@ -212,8 +215,7 @@ fn obtain_libraries(target: &str, out_dir: &Path) -> PathBuf {
         eprintln!("bux-e2fs: BUX_E2FS_DIR set but libs not found, downloading");
     }
 
-    let version = env::var("BUX_E2FS_VERSION")
-        .unwrap_or_else(|_| env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION not set"));
+    let version = env::var("BUX_E2FS_VERSION").unwrap_or_else(|_| E2FSPROGS_VERSION.to_owned());
     let lib_dir = out_dir.join("e2fs").join("lib");
 
     if !lib_dir.join("libext2fs.a").exists() {

@@ -9,7 +9,7 @@
 //!   binary. When set, skips downloading. Primary flow for local development.
 //!
 //! - `BUX_BWRAP_VERSION` — Override the bubblewrap release version to download.
-//!   Defaults to the crate version from `Cargo.toml`.
+//!   Defaults to `BUBBLEWRAP_VERSION`.
 
 // Build scripts legitimately use stderr for diagnostics, expect/panic for
 // unrecoverable failures, and have internal-only helpers.
@@ -28,6 +28,9 @@ use std::path::{Path, PathBuf};
 
 /// GitHub repository for downloading pre-built bwrap releases.
 const GITHUB_REPO: &str = "qntx/bux";
+
+/// Pinned bubblewrap version — keep in sync with `.github/workflows/bwrap-build.yml`.
+const BUBBLEWRAP_VERSION: &str = "0.12.0";
 
 fn main() {
     println!("cargo:rerun-if-env-changed=BUX_BWRAP_DIR");
@@ -71,23 +74,19 @@ fn obtain_binary(target: &str, out_dir: &Path) -> PathBuf {
         eprintln!("bux-bwrap: BUX_BWRAP_DIR set but bwrap not found, downloading");
     }
 
-    let version = env::var("BUX_BWRAP_VERSION")
-        .unwrap_or_else(|_| env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION not set"));
+    let version = env::var("BUX_BWRAP_VERSION");
+    let version = version.as_deref().unwrap_or(BUBBLEWRAP_VERSION);
     let bin_dir = out_dir.join("bwrap");
     let bwrap_path = bin_dir.join("bwrap");
 
-    if !bwrap_path.is_file() && !download_binary(&version, target, &bin_dir) {
-        // No pre-built release available yet — emit a sentinel path.
-        // path() will return None at runtime since this file won't exist.
-        return PathBuf::from("/nonexistent");
+    if !bwrap_path.is_file() {
+        download_binary(version, target, &bin_dir);
     }
     bwrap_path
 }
 
 /// Downloads the pre-built bwrap binary from GitHub Releases.
-///
-/// Returns `true` on success, `false` if the release is not available yet.
-fn download_binary(version: &str, target: &str, dest: &Path) -> bool {
+fn download_binary(version: &str, target: &str, dest: &Path) {
     let url = format!(
         "https://github.com/{GITHUB_REPO}/releases/download/bwrap-v{version}/bux-bwrap-{target}.tar.gz"
     );
@@ -95,31 +94,24 @@ fn download_binary(version: &str, target: &str, dest: &Path) -> bool {
 
     fs::create_dir_all(dest).expect("Failed to create bwrap dir");
 
-    let resp = match ureq::get(&url).call() {
-        Ok(r) => r,
-        Err(e) => {
-            println!("cargo:warning=bux-bwrap: download failed ({e}), bwrap will be unavailable");
-            return false;
-        }
-    };
+    let resp = ureq::get(&url)
+        .call()
+        .unwrap_or_else(|e| panic!("Failed to download bwrap: {e}"));
 
     tar::Archive::new(flate2::read::GzDecoder::new(resp.into_body().into_reader()))
         .unpack(dest)
         .expect("Failed to extract bwrap archive");
 
     let bwrap = dest.join("bwrap");
-    if !bwrap.is_file() {
-        println!("cargo:warning=bux-bwrap: binary not found in archive");
-        return false;
-    }
+    assert!(
+        bwrap.is_file(),
+        "bwrap not found after extraction. Check GitHub Release bwrap-v{version}."
+    );
 
-    // Ensure executable permission on Unix.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&bwrap, fs::Permissions::from_mode(0o755))
             .expect("Failed to set bwrap permissions");
     }
-
-    true
 }

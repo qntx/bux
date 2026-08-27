@@ -327,6 +327,22 @@ create_or_dump --name "${NAME}" "${IMAGE}"
 echo "==> exec echo"
 bux exec "${NAME}" -- echo e2e-ok
 
+echo "==> exec exit codes"
+set +e
+bux exec "${NAME}" -- true
+true_code=$?
+bux exec "${NAME}" -- sh -c 'exit 42'
+exit42_code=$?
+bux exec -t "${NAME}" -- true
+pty_true_code=$?
+bux exec -t "${NAME}" -- sh -c 'exit 42'
+pty_exit42_code=$?
+set -e
+test "${true_code}" -eq 0
+test "${exit42_code}" -eq 42
+test "${pty_true_code}" -eq 0
+test "${pty_exit42_code}" -eq 42
+
 echo "==> egress (unrestricted)"
 require_wget_ok "${NAME}" 10 "egress"
 guest_wget "${NAME}" 10 >/tmp/bux-e2e-egress.out

@@ -66,7 +66,7 @@ create_from_dir(
 | Variable | Description |
 | --- | --- |
 | `BUX_E2FS_DIR` | Path to a local directory containing pre-built static libraries. Skips downloading. |
-| `BUX_E2FS_VERSION` | Override the e2fsprogs release version (default: crate version). |
+| `BUX_E2FS_VERSION` | Override the e2fsprogs release version (default: 1.47.4). |
 | `BUX_UPDATE_BINDINGS` | Copy generated bindings back to `src/bindings.rs` (with `regenerate` feature). |
 
 ## Supported platforms

@@ -295,6 +295,7 @@ impl Filesystem {
                     sys::EXT2_ROOT_INO,
                     c_host.as_ptr(),
                     c_guest.as_ptr(),
+                    0,
                     sys::EXT2_ROOT_INO,
                 ),
             )
@@ -315,6 +316,7 @@ impl Filesystem {
                     self.inner,
                     sys::EXT2_ROOT_INO,
                     c_name.as_ptr(),
+                    0,
                     sys::EXT2_ROOT_INO,
                 ),
             )
