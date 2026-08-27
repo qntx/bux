@@ -24,5 +24,8 @@ serde_json.workspace = true
 tar.workspace = true
 tokio = { workspace = true, features = ["io-std"] }
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true

@@ -203,6 +203,14 @@ OCI (`bux pull` / `bux create IMAGE`).
 The Layer 1 record above is that green local HVF run. Host CI
 (`BUX_E2E_FULL=0`) is not that proof.
 
+Items 11–15 are not in the `42f02b0` Layer 1 row.
+
+11. copy: host↔guest file round-trip and directory `copy_in`
+12. `bux create --allow-net example.com --allow-net www.example.com` then wget example.com succeeds
+13. snapshot create / list / delete
+14. recover: dead shim inspect JSON `"Stopped"`, then `rm` without `-f`
+15. named-vol dir: `bux volume create` then bind `${BUX_HOME}/volumes/${NV}:/data`
+
 Schema mismatches require `bux system reset` (or wiping `$BUX_HOME`).
 
 ## Lints

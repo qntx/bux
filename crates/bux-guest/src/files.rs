@@ -103,16 +103,7 @@ pub async fn handle_copy_in(
         for raw_entry in archive.entries()? {
             let mut entry = raw_entry?;
             let path = entry.path()?.into_owned();
-            let target = canonical_dest.join(&path);
-            // Resolve symlinks in prefix only, not the final component.
-            if let Ok(resolved) = target.parent().unwrap_or(&canonical_dest).canonicalize()
-                && !resolved.starts_with(&canonical_dest)
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    format!("path traversal blocked: {}", path.display()),
-                ));
-            }
+            copy_in_parent_under_dest(&canonical_dest, &path)?;
             entry.unpack_in(&canonical_dest)?;
         }
         Ok(())
@@ -209,4 +200,89 @@ async fn recv_upload_to_file(
 fn temp_file_path(tag: &str) -> std::path::PathBuf {
     let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
     Path::new("/tmp").join(format!("bux-{tag}-{}-{seq}", std::process::id()))
+}
+
+/// Resolve the parent only: the leaf is created by unpack and may not exist.
+/// `canonicalize` failure is deny: a missing prefix must not skip the check.
+pub(crate) fn copy_in_parent_under_dest(canonical_dest: &Path, entry: &Path) -> io::Result<()> {
+    if entry.is_absolute()
+        || entry
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(copy_in_traversal_blocked(entry));
+    }
+    let target = canonical_dest.join(entry);
+    let parent = target.parent().unwrap_or(canonical_dest);
+    let resolved = parent
+        .canonicalize()
+        .map_err(|_| copy_in_traversal_blocked(entry))?;
+    if !resolved.starts_with(canonical_dest) {
+        return Err(copy_in_traversal_blocked(entry));
+    }
+    Ok(())
+}
+
+fn copy_in_traversal_blocked(entry: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!("path traversal blocked: {}", entry.display()),
+    )
+}
+
+#[cfg(test)]
+mod copy_in_parent_tests {
+    use super::*;
+
+    fn with_canonical_dest(f: impl FnOnce(&Path)) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path().canonicalize().expect("canonicalize dest");
+        f(&dest);
+    }
+
+    #[test]
+    fn rejects_parent_dir_component() {
+        with_canonical_dest(|dest| {
+            let err = copy_in_parent_under_dest(dest, Path::new("../outside.txt"))
+                .expect_err(".. must fail closed");
+            assert_eq!(
+                err.kind(),
+                io::ErrorKind::PermissionDenied,
+                "expected PermissionDenied for ParentDir"
+            );
+        });
+    }
+
+    #[test]
+    fn rejects_absolute_member() {
+        with_canonical_dest(|dest| {
+            let err = copy_in_parent_under_dest(dest, Path::new("/etc/passwd"))
+                .expect_err("absolute member must fail closed");
+            assert_eq!(
+                err.kind(),
+                io::ErrorKind::PermissionDenied,
+                "expected PermissionDenied for absolute member"
+            );
+        });
+    }
+
+    #[test]
+    fn rejects_canonicalize_failure() {
+        with_canonical_dest(|dest| {
+            let err = copy_in_parent_under_dest(dest, Path::new("missing/x.txt"))
+                .expect_err("missing parent canonicalize must fail closed");
+            assert_eq!(
+                err.kind(),
+                io::ErrorKind::PermissionDenied,
+                "expected PermissionDenied when canonicalize fails"
+            );
+        });
+    }
+
+    #[test]
+    fn allows_direct_child() {
+        with_canonical_dest(|dest| {
+            copy_in_parent_under_dest(dest, Path::new("ok.txt")).expect("direct child under dest");
+        });
+    }
 }

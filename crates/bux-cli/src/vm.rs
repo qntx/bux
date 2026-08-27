@@ -431,6 +431,14 @@ pub fn inspect(args: &InspectArgs) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn unpack_guest_tar(bytes: &[u8], dest: &std::path::Path) -> std::io::Result<()> {
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = tar::Archive::new(cursor);
+    archive.unpack(dest)?;
+    Ok(())
+}
+
 /// Parses `vm:path` guest reference. Returns `(vm, guest_path)`.
 #[cfg(unix)]
 fn parse_guest_ref(s: &str) -> Option<(&str, &str)> {
@@ -452,9 +460,8 @@ pub async fn cp(args: CpArgs) -> Result<()> {
             let handle = rt.get(id)?;
             let tar_data = handle.copy_out(guest_path).await?;
             std::fs::create_dir_all(dst)?;
-            let cursor = std::io::Cursor::new(tar_data);
-            let mut archive = tar::Archive::new(cursor);
-            archive.unpack(dst)?;
+            // unpack → Entry::unpack_in skips ParentDir (workspace tar 0.4.46).
+            unpack_guest_tar(&tar_data, std::path::Path::new(dst))?;
         }
         // host → guest
         (None, Some((id, guest_path))) => {
@@ -689,4 +696,45 @@ unix_only_stub! {
     restart(args: RestartArgs);
     stats(args: StatsArgs);
     clone_box(args: CloneArgs);
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod unpack_guest_tar_tests {
+    use super::unpack_guest_tar;
+
+    #[test]
+    fn unpack_guest_tar_skips_parent_dir_member() {
+        const NAME: &[u8] = b"../outside.txt\0";
+        let dest_dir = tempfile::tempdir().expect("tempdir");
+        let dest = dest_dir.path();
+        let outside = dest.parent().expect("dest parent").join("outside.txt");
+
+        let mut buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut buf);
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_size(1);
+            header.set_mode(0o644);
+            // set_path rejects `..`; write the ustar name field so unpack_in sees ParentDir.
+            header
+                .as_old_mut()
+                .name
+                .get_mut(..NAME.len())
+                .expect("ustar name field fits ../outside.txt")
+                .copy_from_slice(NAME);
+            header.set_cksum();
+            builder
+                .append(&header, b"x".as_slice())
+                .expect("append ../outside.txt");
+            builder.finish().expect("finish tar");
+        }
+
+        unpack_guest_tar(&buf, dest).expect("unpack_guest_tar");
+        assert!(
+            !outside.exists(),
+            "ParentDir member must not land at dest.parent()/outside.txt"
+        );
+    }
 }

@@ -353,6 +353,22 @@ test "${exit42_code}" -eq 42
 test "${pty_true_code}" -eq 0
 test "${pty_exit42_code}" -eq 42
 
+echo "==> copy round-trip"
+printf 'cp-ok\n' > "${BUX_HOME}/cp-in.txt"
+bux cp "${BUX_HOME}/cp-in.txt" "${NAME}:/tmp/cp-in.txt"
+in_cat="$(bux exec "${NAME}" -- cat /tmp/cp-in.txt)"
+echo "${in_cat}" | grep -qx cp-ok
+bux exec "${NAME}" -- sh -c 'printf "%s\n" cp-out > /tmp/cp-out.txt'
+mkdir -p "${BUX_HOME}/cp-out"
+bux cp "${NAME}:/tmp/cp-out.txt" "${BUX_HOME}/cp-out"
+test -f "${BUX_HOME}/cp-out/cp-out.txt"
+grep -qx cp-out "${BUX_HOME}/cp-out/cp-out.txt"
+
+mkdir -p "${BUX_HOME}/cp-dir"
+printf 'dir-ok\n' > "${BUX_HOME}/cp-dir/x.txt"
+bux cp "${BUX_HOME}/cp-dir" "${NAME}:/tmp/cp-dir"
+bux exec "${NAME}" -- cat /tmp/cp-dir/x.txt | grep -qx dir-ok
+
 echo "==> egress (unrestricted)"
 require_wget_ok "${NAME}" 10 "egress"
 guest_wget "${NAME}" 10 >/tmp/bux-e2e-egress.out
@@ -370,6 +386,15 @@ if ! require_wget_fail "${DENY}" 3 "allow_net deny"; then
   exit 1
 fi
 bux rm -f "${DENY}"
+
+ALW="e2e-allow-$(date +%s)"
+echo "==> allow_net allow ${ALW}"
+create_or_dump --name "${ALW}" --allow-net example.com --allow-net www.example.com "${IMAGE}"
+if ! require_wget_ok "${ALW}" 10 "allow_net allow"; then
+  bux rm -f "${ALW}" || true
+  exit 1
+fi
+bux rm -f "${ALW}"
 
 PUB="e2e-pub-$(date +%s)"
 echo "==> D1 publish ${PUB} (-p 0:80; CLI exits; host TCP must reach guest)"
@@ -454,5 +479,45 @@ if grep -a -F "${SECRET_VAL}" "${BUX_HOME}/guest-environ.bin" >/dev/null; then
   exit 1
 fi
 bux rm -f "${SEC}"
+
+SNAP="e2e-snap-$(date +%s)"
+echo "==> snapshot create/list/rm ${SNAP}"
+create_or_dump --name "${SNAP}" "${IMAGE}"
+sid="$(bux snapshot create --name e2e-s1 "${SNAP}")"
+test -n "${sid}"
+bux snapshot ls "${SNAP}" | grep -q "${sid}"
+test -f "${BUX_HOME}/snapshots/${sid}.qcow2"
+bux snapshot rm "${sid}"
+test ! -f "${BUX_HOME}/snapshots/${sid}.qcow2"
+bux rm -f "${SNAP}"
+
+REC="e2e-rec-$(date +%s)"
+echo "==> recover dead shim ${REC}"
+create_or_dump --name "${REC}" "${IMAGE}"
+insp="$(bux inspect "${REC}")"
+rec_pid="$(printf '%s\n' "${insp}" | sed -n 's/.*"pid":[[:space:]]*\(-\{0,1\}[0-9][0-9]*\).*/\1/p' | head -n 1)"
+test -n "${rec_pid}" && test "${rec_pid}" != "0"
+kill -9 "${rec_pid}" || true
+ok=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  rec_status="$(bux inspect "${REC}")"
+  if echo "${rec_status}" | grep -E '"status":[[:space:]]*"Stopped"' >/dev/null; then
+    ok=1
+    break
+  fi
+  sleep 0.25
+done
+test "${ok}" -eq 1
+bux rm "${REC}"
+
+NVOL="e2e-nvol-$(date +%s)"
+NV="e2e-nv-$(date +%s)"
+echo "==> named volume dir ${NVOL}"
+bux volume create "${NV}"
+printf 'nv-ok\n' > "${BUX_HOME}/volumes/${NV}/marker"
+create_or_dump --name "${NVOL}" -v "${BUX_HOME}/volumes/${NV}:/data" "${IMAGE}"
+bux exec "${NVOL}" -- cat /data/marker | grep -qx nv-ok
+bux rm -f "${NVOL}"
+bux volume rm "${NV}"
 
 echo "OK (full e2e)"

@@ -274,6 +274,7 @@ dependencies = [
  "libc",
  "serde_json",
  "tar",
+ "tempfile",
  "tokio",
 ]
 
