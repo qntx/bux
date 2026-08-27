@@ -520,4 +520,14 @@ bux exec "${NVOL}" -- cat /data/marker | grep -qx nv-ok
 bux rm -f "${NVOL}"
 bux volume rm "${NV}"
 
+CSRC="e2e-csrc-$(date +%s)"
+CDST="e2e-cdst-$(date +%s)"
+echo "==> clone flatten ${CSRC} -> ${CDST}"
+create_or_dump --name "${CSRC}" "${IMAGE}"
+bux exec "${CSRC}" -- sh -c 'printf "%s\n" cloned > /clone-marker && sync'
+bux clone "${CSRC}" --name "${CDST}"
+cloned="$(bux exec "${CDST}" -- cat /clone-marker)"
+echo "${cloned}" | grep -qx cloned
+bux rm -f "${CDST}" "${CSRC}"
+
 echo "OK (full e2e)"

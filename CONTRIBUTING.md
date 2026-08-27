@@ -211,6 +211,10 @@ Items 11–15 are not in the `42f02b0` Layer 1 row.
 14. recover: dead shim inspect JSON `"Stopped"`, then `rm` without `-f`
 15. named-vol dir: `bux volume create` then bind `${BUX_HOME}/volumes/${NV}:/data`
 
+Item 16 is not in the `42f02b0` Layer 1 row.
+
+16. clone flatten: `bux clone` of an OCI VM; `/clone-marker` on the root disk (not tmpfs)
+
 Schema mismatches require `bux system reset` (or wiping `$BUX_HOME`).
 
 ## Lints
