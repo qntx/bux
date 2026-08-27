@@ -25,6 +25,7 @@ Spine:
 | D2 | Fixed in engine: `disable_implicit_vsock` + `add_vsock(0)`; **guest proof is FULL `offline-no-eth0`** |
 | D3 | Fixed in agent: virtiofs mount from `GuestBootConfig`; **guest proof is FULL volume ls** |
 | D4 | Open: FULL never recorded green |
+| D5 | Open: engine fix landed, guest proof pending |
 
 D1–D3 are complete in code. Production is a recorded green `BUX_E2E_FULL=1` on
 local HVF (Apple Silicon). Host CI (`BUX_E2E_FULL=0`) is not that proof.
