@@ -7,6 +7,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+E2E_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=wget_probe.sh
+source "${E2E_DIR}/wget_probe.sh"
+bash "${E2E_DIR}/wget_probe_test.sh"
+
 export BUX_HOME="${BUX_HOME:-$(mktemp -d /tmp/bux-e2e.XXXXXX)}"
 cleanup() {
   # Only touch the temp data dir this script created (name contains bux-e2e).
@@ -215,7 +220,10 @@ guest_wget_probe() {
 
 require_wget_ok() {
   local status
-  status="$(guest_wget_probe "$1" "$2")"
+  status="$(retry_until_needle WGET_OK 4 0.5 guest_wget_probe "$1" "$2")" || {
+    echo "$3: expected wget success, got ${status:-empty}"
+    return 1
+  }
   if [[ "${status}" != *WGET_OK* ]]; then
     echo "$3: expected wget success, got ${status:-empty}"
     return 1
