@@ -452,6 +452,21 @@ vol_ls="$(bux exec "${VOL}" -- ls /data)"
 echo "${vol_ls}" | grep -q marker
 bux rm -f "${VOL}"
 
+# :ro is engine-enforced (krun_add_virtiofs3), not a guest remount.
+RO="e2e-vol-ro-$(date +%s)"
+RO_HOST="${BUX_HOME}/vol-ro-src"
+mkdir -p "${RO_HOST}"
+printf 'ro-ok\n' > "${RO_HOST}/marker"
+echo "==> volume :ro ${RO} (${RO_HOST}:/data:ro)"
+create_or_dump --name "${RO}" -v "${RO_HOST}:/data:ro" "${IMAGE}"
+bux exec "${RO}" -- cat /data/marker | grep -qx ro-ok
+if bux exec "${RO}" -- touch /data/should-fail; then
+  echo "volume :ro failed: guest touch succeeded"
+  bux rm -f "${RO}" || true
+  exit 1
+fi
+bux rm -f "${RO}"
+
 # stop / restart / rm of a detach=true VM: each CLI exit must leave the VM as designed.
 LIFE="e2e-life-$(date +%s)"
 echo "==> detach lifecycle ${LIFE} (stop/restart/rm)"
