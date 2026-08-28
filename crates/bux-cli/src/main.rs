@@ -191,6 +191,18 @@ enum SnapshotAction {
         /// Snapshot ID.
         id: String,
     },
+    /// Restore a snapshot as a new VM (flatten overlay; copies `vcpus`, ram, network, `auto_remove`).
+    ///
+    /// The restored VM always boots detached, matching `bux clone`. Restore
+    /// requires the source VM row: `bux snapshot restore` after `bux rm` of the
+    /// source is `NotFound` (`ON DELETE CASCADE`).
+    Restore {
+        /// Snapshot ID.
+        id: String,
+        /// Optional name for the restored VM.
+        #[arg(long)]
+        name: Option<String>,
+    },
 }
 
 /// Subcommands for `bux disk`.
@@ -299,6 +311,10 @@ async fn snapshot_cmd(action: SnapshotAction) -> Result<()> {
         SnapshotAction::Rm { id } => {
             rt.delete_snapshot(&id)?;
             println!("{id}");
+        }
+        SnapshotAction::Restore { id, name } => {
+            let handle = rt.restore(&id, name).await?;
+            println!("{}", handle.info().id);
         }
     }
     Ok(())

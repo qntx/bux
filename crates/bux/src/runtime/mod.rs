@@ -417,6 +417,43 @@ impl Runtime {
         Ok(handle)
     }
 
+    /// Restore a VM from a snapshot: flatten the snapshot overlay into a new
+    /// base, then boot a detached VM (same disk recipe as [`Self::clone`]).
+    ///
+    /// Copied from the source VM: overlay contents (via the snapshot file),
+    /// `vcpus`, `ram_mib`, `network`, and `auto_remove`. Always `detach: true`.
+    ///
+    /// Not copied: ports, volumes, secrets, security, command, env, workdir,
+    /// user, auto-stop/delete, ready timeout, or name (unless `name` is passed).
+    ///
+    /// Requires the source VM row. After [`Self::remove`] of the source,
+    /// snapshot rows are dropped (`ON DELETE CASCADE`) and this returns
+    /// [`crate::Error::NotFound`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot or source VM is missing, the snapshot
+    /// disk file is gone, flatten fails, or create fails.
+    pub async fn restore(&self, snapshot_id: &str, name: Option<String>) -> Result<Vm> {
+        let opts = self.restore_prepare(snapshot_id, name)?;
+        let handle = self.create(opts).await?;
+        info!(snapshot_id, restore_id = %handle.stored().id, "VM restored from snapshot");
+        Ok(handle)
+    }
+
+    /// Lookup + flatten snapshot overlay into `bases/restore-{id}.qcow2` + clone-shaped options.
+    fn restore_prepare(&self, snapshot_id: &str, name: Option<String>) -> Result<VmOptions> {
+        let snap = self.db.get_snapshot(snapshot_id)?;
+        let snap_disk = Path::new(&snap.disk_path);
+        if !snap_disk.is_file() {
+            return Err(crate::Error::NotFound(format!(
+                "snapshot disk missing: {snapshot_id}"
+            )));
+        }
+        let source = self.get(&snap.vm_id)?;
+        restore_vm_options(&self.disk, snap_disk, &source.stored().config, name)
+    }
+
     /// Create and start a managed VM from product [`VmOptions`].
     ///
     /// Pipeline: validate → resolve image → base disk → network → shim → wait ready.
@@ -567,7 +604,21 @@ impl Runtime {
     }
 }
 
-/// Create-options for a disk-clone: copy `vcpus`/`ram_mib`/`network`/`auto_remove`; always detach.
+/// Flatten a snapshot overlay into `bases/restore-{id}.qcow2` and build clone-shaped create options.
+fn restore_vm_options(
+    disk: &DiskManager,
+    snap_disk: &Path,
+    config: &VmConfig,
+    name: Option<String>,
+) -> Result<VmOptions> {
+    let restore_id = crate::state::gen_id();
+    let dest = disk.bases_dir().join(format!("restore-{restore_id}.qcow2"));
+    bux_qcow2::flatten(snap_disk, &dest)?;
+    Ok(clone_vm_options(config, name, dest))
+}
+
+/// Create-options for a disk-clone or snapshot-restore: copy
+/// `vcpus`/`ram_mib`/`network`/`auto_remove`; always detach.
 #[must_use]
 fn clone_vm_options(config: &VmConfig, name: Option<String>, clone_base: PathBuf) -> VmOptions {
     let mut opts = VmOptions::from_image(ImageRef::BaseDisk(clone_base))
@@ -763,6 +814,119 @@ mod tests {
             matches!(&opts.image, ImageRef::BaseDisk(p) if p == Path::new("/tmp/clone.qcow2")),
             "clone image must be the flattened base"
         );
+    }
+
+    #[test]
+    fn restore_after_rm_source_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let vm_id = "srcsnap000001";
+        insert_cfg(
+            &rt,
+            vm_id,
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig::default(),
+        );
+        let snap_path = dir.path().join("snapshots").join("snap1.qcow2");
+        fs::write(&snap_path, b"overlay").unwrap();
+        rt.db
+            .insert_snapshot(&crate::state::SnapshotRow {
+                id: "snap1".into(),
+                vm_id: vm_id.into(),
+                name: Some("s".into()),
+                disk_path: snap_path.to_string_lossy().into_owned(),
+                disk_bytes: 1,
+                created_at: SystemTime::now(),
+            })
+            .unwrap();
+        rt.remove(vm_id).unwrap();
+        let err = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(rt.restore("snap1", None))
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::Error::NotFound(_)),
+            "CASCADE drops snapshot rows: {err}"
+        );
+    }
+
+    #[test]
+    fn restore_flatten_uses_snapshot_overlay_not_live_vm_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let vm_id = "srcsnap000002";
+
+        let live_raw = rt.disk.bases_dir().join("live.raw");
+        fs::write(&live_raw, vec![0xAA; 8192]).unwrap();
+        rt.disk
+            .create_overlay(&live_raw, crate::disk::DiskFormat::Raw, vm_id)
+            .unwrap();
+
+        let snap_raw = rt.disk.bases_dir().join("snap.raw");
+        fs::write(&snap_raw, vec![0xBB; 4096]).unwrap();
+        let snap_ovl = rt
+            .disk
+            .create_overlay(&snap_raw, crate::disk::DiskFormat::Raw, "snap-src")
+            .unwrap();
+        let snap_path = dir.path().join("snapshots").join("snap1.qcow2");
+        fs::copy(&snap_ovl, &snap_path).unwrap();
+
+        insert_cfg(
+            &rt,
+            vm_id,
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig {
+                vcpus: 2,
+                ram_mib: 512,
+                auto_remove: true,
+                network: NetworkSpec::Disabled,
+                ..VmConfig::default()
+            },
+        );
+        rt.db
+            .insert_snapshot(&crate::state::SnapshotRow {
+                id: "snap1".into(),
+                vm_id: vm_id.into(),
+                name: Some("s".into()),
+                disk_path: snap_path.to_string_lossy().into_owned(),
+                disk_bytes: 4096,
+                created_at: SystemTime::now(),
+            })
+            .unwrap();
+
+        let opts = rt.restore_prepare("snap1", Some("n".into())).unwrap();
+        assert!(opts.detach);
+        assert_eq!(opts.vcpus, 2);
+        assert_eq!(opts.ram_mib, 512);
+        assert!(opts.auto_remove);
+        assert_eq!(opts.name.as_deref(), Some("n"));
+        assert_eq!(opts.network, NetworkSpec::Disabled);
+        assert!(
+            matches!(&opts.image, ImageRef::BaseDisk(p) if {
+                p.starts_with(rt.disk.bases_dir())
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("restore-"))
+                    && p.extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("qcow2"))
+            }),
+            "restore image must be ImageRef::BaseDisk of bases/restore-{{id}}.qcow2"
+        );
+        if let ImageRef::BaseDisk(dest) = &opts.image {
+            let hdr = bux_qcow2::read_header(dest).unwrap();
+            assert_eq!(
+                hdr.virtual_size, 4096,
+                "flatten source must be the snapshot overlay (4096), not the live VM disk (8192)"
+            );
+            assert!(
+                hdr.backing_file.is_none(),
+                "flattened restore base must be standalone"
+            );
+        }
     }
 
     #[test]

@@ -224,6 +224,12 @@ Operator FULL 2026-08-28 on `04fca66945fe24fc16fda5aff113c8e4782cbc68`
 (capture binary `./target/debug/bux`, `$BUX_HOME=/Users/xu/bux-full-hvf-clone`)
 exited 0 including clone flatten (`SMOKE_EXIT=0`, `OK (full e2e)`).
 
+Item 17 is not in the Layer 1 or clone FULL rows.
+
+17. snapshot restore flatten: write `/restore-marker` → `bux snapshot create` →
+    `bux snapshot restore` → `exec` cat marker; source still listed; `rm`
+    restore; `rm` source drops snapshot rows (`ON DELETE CASCADE`)
+
 Schema mismatches require `bux system reset` (or wiping `$BUX_HOME`).
 
 ## Lints

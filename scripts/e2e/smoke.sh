@@ -181,6 +181,7 @@ echo "==> help for new commands"
 bux create --help >/dev/null
 bux logs --help >/dev/null
 bux run --help | grep -q secret
+bux snapshot restore --help >/dev/null
 bux system reset --help >/dev/null
 
 if [[ "${BUX_E2E_FULL:-}" != "1" ]]; then
@@ -584,5 +585,23 @@ bux clone "${CSRC}" --name "${CDST}"
 cloned="$(bux exec "${CDST}" -- cat /clone-marker)"
 echo "${cloned}" | grep -qx cloned
 bux rm -f "${CDST}" "${CSRC}"
+
+RSRC="e2e-rsrc-$(date +%s)"
+RDST="e2e-rdst-$(date +%s)"
+echo "==> snapshot restore flatten ${RSRC} -> ${RDST}"
+create_or_dump --name "${RSRC}" "${IMAGE}"
+bux exec "${RSRC}" -- sh -c 'printf "%s\n" restored > /restore-marker && sync'
+rsid="$(bux snapshot create --name e2e-restore "${RSRC}")"
+test -n "${rsid}"
+bux snapshot restore "${rsid}" --name "${RDST}"
+restored="$(bux exec "${RDST}" -- cat /restore-marker)"
+echo "${restored}" | grep -qx restored
+bux inspect "${RSRC}" >/dev/null
+bux rm -f "${RDST}"
+bux rm -f "${RSRC}"
+if bux snapshot restore "${rsid}" --name e2e-restore-gone; then
+  echo "restore after rm source should be NotFound"
+  exit 1
+fi
 
 echo "OK (full e2e)"
