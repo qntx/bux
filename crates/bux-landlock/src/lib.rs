@@ -26,7 +26,7 @@
 //!
 //! Landlock is a best-effort defence-in-depth layer, so "kernel does
 //! not support Landlock" is signalled by `Ok(None)`, not an error.
-//! Callers log a warning and continue without Landlock.
+//! Product callers fail-close (`map_jail_error` → `SecurityUnavailable`).
 //!
 //! # Example — parent/child split
 //!

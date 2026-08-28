@@ -65,6 +65,13 @@ pub enum AuditEventKind {
         /// Snapshot identifier.
         snapshot_id: String,
     },
+    /// A VM was restored from a snapshot.
+    SnapshotRestored {
+        /// VM identifier.
+        vm_id: String,
+        /// Snapshot identifier.
+        snapshot_id: String,
+    },
     /// A file was copied into or out of a VM.
     FileCopied {
         /// VM identifier.
@@ -326,6 +333,21 @@ mod tests {
                 direction: CopyDirection::In,
                 ref path,
             } if vm_id == "vm1" && path == "/tmp/x"
+        ));
+    }
+
+    #[test]
+    fn snapshot_restored_variant_round_trip() {
+        let event = AuditEvent::now(AuditEventKind::SnapshotRestored {
+            vm_id: "vm1".into(),
+            snapshot_id: "snap1".into(),
+        });
+        assert!(matches!(
+            event.kind,
+            AuditEventKind::SnapshotRestored {
+                ref vm_id,
+                ref snapshot_id,
+            } if vm_id == "vm1" && snapshot_id == "snap1"
         ));
     }
 

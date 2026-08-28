@@ -20,8 +20,8 @@ and FULL procedure: [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 | `wait` | Block until VMs stop |
 | `prune` | Remove all stopped VMs |
 | `rename` / `restart` | Rename; restart a stopped or running VM |
-| `stats` | VM identity, status, and health |
-| `snapshot create` / `list` / `rm` | Disk overlay snapshots |
+| `stats` | VM identity, status, and health; `--runtime` dumps `RuntimeMetrics` |
+| `snapshot create` / `list` / `rm` / `restore` | Disk overlay snapshots |
 | `clone` | Disk-clone (overlay flatten); always boots detached |
 | `export` | Export a VM disk as standalone QCOW2 |
 | `pull` / `images` / `rmi` | OCI images |

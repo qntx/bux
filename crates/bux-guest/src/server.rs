@@ -16,6 +16,13 @@ use crate::mounts;
 use crate::network;
 use crate::reaper::Reaper;
 
+/// Contiguous ELF bytes so pin scripts can reject leftover v9 guests.
+const ELF_PROTOCOL_STAMP: &str = "bux-guest-protocol-v10";
+const _: () = assert!(
+    PROTOCOL_VERSION == 10,
+    "ELF_PROTOCOL_STAMP must match PROTOCOL_VERSION"
+);
+
 /// Boot timestamp, set once at agent startup.
 pub static BOOT_T0: OnceLock<Instant> = OnceLock::new();
 
@@ -32,7 +39,7 @@ pub fn uptime_ms() -> u64 {
 /// Returns an error if boot, network, MITM CA install, virtiofs, reaper start, or vsock listen fails.
 pub async fn run() -> io::Result<()> {
     BOOT_T0.set(Instant::now()).ok();
-    eprintln!("[bux-guest] T+0ms: starting");
+    eprintln!("[bux-guest] T+0ms: starting {ELF_PROTOCOL_STAMP}");
 
     mounts::mount_essential_tmpfs();
     eprintln!("[bux-guest] T+{}ms: tmpfs mounted", uptime_ms());
@@ -119,7 +126,7 @@ async fn session(stream: tokio_vsock::VsockStream, reaper: Reaper) -> io::Result
         Hello::Control { version } => {
             if version != PROTOCOL_VERSION {
                 let err = bux_proto::ErrorInfo::version_mismatch(format!(
-                    "host protocol v{version}, guest protocol v{PROTOCOL_VERSION}"
+                    "host protocol v{version}, guest protocol v{PROTOCOL_VERSION} ({ELF_PROTOCOL_STAMP})"
                 ));
                 bux_proto::send(&mut w, &HelloAck::Error(err)).await?;
                 return w.flush().await;
