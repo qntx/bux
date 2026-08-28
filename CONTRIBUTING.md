@@ -13,9 +13,7 @@ Requires a working C toolchain for libkrun / e2fs / qcow2 native deps, and Go fo
 ## Native libraries
 
 Prebuilt libkrun, e2fsprogs, and (Linux) bubblewrap download from GitHub
-Releases tagged `krun-v{LIBKRUN_VERSION}` (not crate versions). Pins,
-compile-from-cold, bindgen, and the tag-PR-SHA-then-merge loop:
-[`docs/native-deps.md`](docs/native-deps.md).
+Releases tagged `krun-v{LIBKRUN_VERSION}` (not crate versions).
 
 ## Capture environment
 
@@ -91,9 +89,6 @@ bux system info --format json
 - Managed network: gvproxy virtio-net in the `bux-shim` process (`bux-shim-bin`); no TSI `set_port_map`.
 - Guest agent: postcard protocol v9; Phase A process identity only.
 - Schema: SQLite `user_version` 5 — **no migrations**; wipe `BUX_HOME` on mismatch.
-
-Current architecture: `docs/bux-redesign.md`. Production-ready 1.0 bar:
-`docs/1.0-release-bar.md` (crate version for that increment: 0.8.0).
 
 ## Tests
 

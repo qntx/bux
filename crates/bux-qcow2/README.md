@@ -36,5 +36,4 @@ assert_eq!(hdr.virtual_size, 1 << 30);
 # Ok::<_, bux_qcow2::Error>(())
 ```
 
-Used by the `bux` Runtime for overlay create/flatten. Architecture:
-[`docs/bux-redesign.md`](../../docs/bux-redesign.md).
+Used by the `bux` Runtime for overlay create/flatten.

@@ -3,9 +3,7 @@
 CLI client of the `bux` `Runtime` / `Vm` / `VmOptions` API. Binary name: `bux`.
 
 Build: `cargo build -p bux-cli -p bux-shim-bin`. Capture env, tarball layout,
-and FULL procedure: [`CONTRIBUTING.md`](../../CONTRIBUTING.md). Architecture:
-[`docs/bux-redesign.md`](../../docs/bux-redesign.md). Production-ready 1.0 bar:
-[`docs/1.0-release-bar.md`](../../docs/1.0-release-bar.md).
+and FULL procedure: [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## Commands
 

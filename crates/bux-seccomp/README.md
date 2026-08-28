@@ -28,4 +28,4 @@ bux_seccomp::install_default()?;
 # fn main() {}
 ```
 
-Used by `bux-shim` / `bux-shim-bin`. Architecture: [`docs/bux-redesign.md`](../../docs/bux-redesign.md).
+Used by `bux-shim` / `bux-shim-bin`.
