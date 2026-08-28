@@ -34,7 +34,7 @@ use crate::volumes::VolumeManager;
 use boot::{clean_vm_files, is_pid_alive};
 use bux_oci::RegistryAuth;
 
-pub use vm::{Vm, VmInfo};
+pub use vm::{EgressClass, Vm, VmInfo};
 
 /// How to open a [`Runtime`]. [`Runtime::open`] is this with defaults.
 #[derive(Debug, Clone)]

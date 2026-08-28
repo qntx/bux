@@ -22,9 +22,37 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
+/// Tracing filter for `--log-level`. `RUST_LOG` is used when this flag is absent.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl LogLevel {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "bux", version, about = "Micro-VM sandbox powered by libkrun")]
 struct Cli {
+    /// Tracing log level. Default `warn` when unset and `RUST_LOG` is absent.
+    ///
+    /// Overrides `RUST_LOG` when passed.
+    #[arg(long, global = true, value_enum)]
+    log_level: Option<LogLevel>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -237,10 +265,26 @@ pub(crate) enum OutputFormat {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    if let Err(e) = Cli::parse().dispatch().await {
+    let cli = Cli::parse();
+    init_tracing(cli.log_level);
+    if let Err(e) = cli.dispatch().await {
         eprintln!("bux: {e:#}");
         std::process::exit(1);
     }
+}
+
+fn init_tracing(log_level: Option<LogLevel>) {
+    let filter = log_level.map_or_else(
+        || {
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"))
+        },
+        |level| tracing_subscriber::EnvFilter::new(level.as_str()),
+    );
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
 }
 
 impl Cli {
@@ -519,4 +563,44 @@ fn human_size(bytes: u64) -> String {
         size /= 1024.0;
     }
     format!("{size:.1} TB")
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic, reason = "tests")]
+mod log_level_tests {
+    use super::*;
+
+    fn parse(argv: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("bux").chain(argv.iter().copied()))
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn default_is_unset() {
+        let cli = parse(&["images"]);
+        assert!(cli.log_level.is_none());
+    }
+
+    #[test]
+    fn before_subcommand() {
+        let cli = parse(&["--log-level", "debug", "images"]);
+        assert!(matches!(cli.log_level, Some(LogLevel::Debug)));
+    }
+
+    #[test]
+    fn after_subcommand_via_global() {
+        let cli = parse(&["images", "--log-level", "trace"]);
+        assert!(matches!(cli.log_level, Some(LogLevel::Trace)));
+    }
+
+    #[test]
+    fn rejects_invalid_level() {
+        assert!(Cli::try_parse_from(["bux", "--log-level", "verbose", "images"]).is_err());
+    }
+
+    #[test]
+    fn top_level_help_lists_log_level() {
+        let help = Cli::command().render_help().to_string();
+        assert!(help.contains("--log-level"), "{help}");
+    }
 }
