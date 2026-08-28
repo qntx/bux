@@ -105,12 +105,17 @@ cargo test -p bux-proto --lib
 # Full VM e2e — documented **manual** gate on local HVF (Apple Silicon).
 # Never set BUX_E2E_FULL=1 on GitHub-hosted runners.
 BUX_E2E_FULL=1 ./scripts/e2e/smoke.sh
+# Load / chaos — same FULL pin as smoke (cli+shim, guest ELF). Manual HVF/KVM.
+# GitHub-hosted CI does not run these; e2e-host.yml stays BUX_E2E_FULL=0.
+BUX_E2E_FULL=1 ./scripts/e2e/load.sh
+BUX_E2E_FULL=1 ./scripts/e2e/chaos.sh
 ```
 
 `.github/workflows/e2e-host.yml` forces `BUX_E2E_FULL=0` on `ubuntu-latest` and
 `macos-latest`. Host-only is not production proof. `BUX_E2E_FULL=1` is not a CI
 job. GitHub-hosted runners must not set `BUX_E2E_FULL=1`. Self-hosted runners
-can take it later without redesign.
+can take it later without redesign. `load.sh` and `chaos.sh` are the same
+manual gate, not GitHub-hosted jobs.
 
 The first green FULL is recorded below on **local HVF (Apple Silicon)**.
 Host CI (`BUX_E2E_FULL=0`) is not that proof. KVM later without redesign.
@@ -229,6 +234,21 @@ Item 17 is not in the Layer 1 or clone FULL rows.
 17. snapshot restore flatten: write `/restore-marker` → `bux snapshot create` →
     `bux snapshot restore` → `exec` cat marker; source still listed; `rm`
     restore; `rm` source drops snapshot rows (`ON DELETE CASCADE`)
+
+`scripts/e2e/load.sh` (`BUX_E2E_FULL=1`, dedicated `$BUX_HOME`):
+
+- `bux create` 8 detached alpine VMs (default 512 MiB each); all `bux ps` Running
+- 16 concurrent `bux exec <one-vm> -- echo ok`; all exit 0
+- `bux rm -f` all 8; `bux ps -q` empty; no leftover `$BUX_HOME/disks/vms/*.qcow2`
+- If the host cannot allocate 8×512 MiB, the script exits with a message (no
+  OOM flake)
+
+`scripts/e2e/chaos.sh` (`BUX_E2E_FULL=1`):
+
+- create → `kill -9` shim PID → `inspect` JSON `"Stopped"` within 5s → `bux rm`
+  without `-f`
+- no leftover overlay `$BUX_HOME/disks/vms/{id}.qcow2` for that id
+- no `ulimit` disk-full test
 
 Schema mismatches require `bux system reset` (or wiping `$BUX_HOME`).
 
