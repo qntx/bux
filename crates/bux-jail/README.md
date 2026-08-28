@@ -1,7 +1,7 @@
 # bux-jail
 
 Process isolation for the `bux-shim` child process (`bux-bwrap`,
-`bux-seccomp`).
+`bux-landlock`).
 
 ## Scope
 
