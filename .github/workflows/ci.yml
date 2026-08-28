@@ -6,14 +6,17 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
-  # SHA is qntx/workflows main at 2026-08-28 (cb94c5b5b8b4c22587840a7db6d2db503c17369c).
-  # That revision's ci-rust.yml runs fmt/clippy/build/`cargo test --workspace --verbose --all-features` on ubuntu-latest only.
   ci:
-    uses: qntx/workflows/.github/workflows/ci-rust.yml@cb94c5b5b8b4c22587840a7db6d2db503c17369c
+    uses: qntx/workflows/.github/workflows/ci-rust.yml@v2
+    permissions:
+      contents: read
     with:
       submodules: true
-      toolchain: "1.97.1"
+      rust-version: "1.97.1"
 
   deny:
     runs-on: ubuntu-latest
@@ -35,7 +38,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.97.1
+          rust-version: 1.97.1
       - uses: actions/setup-go@v5
         with:
           go-version-file: crates/bux-gvproxy/gvproxy-bridge/go.mod
