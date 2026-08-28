@@ -2,9 +2,9 @@
 # Load e2e: 8 detached alpine VMs, 16 concurrent exec on one.
 # Requires BUX_E2E_FULL=1 (same pin as smoke.sh). GitHub-hosted CI keeps FULL=0.
 #
-# Pass: all 8 Running; 16 parallel `bux exec -- echo ok` exit 0; `bux rm -f`
-# then `bux ps -q` empty and no leftover $BUX_HOME/disks/vms/*.qcow2.
-# RAM: default 512 MiB × 8; fail with a message if the host cannot allocate.
+# Pass: all 8 Running; 16 concurrent exec_output on one Runtime (R8 example);
+# `bux rm -f` then `bux ps -q` empty and no leftover $BUX_HOME/disks/vms/*.qcow2.
+# RAM: 8 × 512 MiB guests plus host overhead; fail closed if the host cannot allocate.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -23,9 +23,9 @@ trap e2e_cleanup_bux_home EXIT
 
 echo "==> BUX_HOME=${BUX_HOME}"
 
-# Fail closed if the host cannot back 8 × 512 MiB guests (do not OOM-flake).
+# Guest RAM plus a 1 GiB host reserve so the gate fires before OOM.
 require_ram_8x512() {
-  local need_mib=$((8 * 512))
+  local need_mib=$((8 * 512 + 1024))
   local measured_mib="" kind=""
   case "$(uname -s)" in
     Linux)
@@ -33,8 +33,16 @@ require_ram_8x512() {
       kind=MemAvailable
       ;;
     Darwin)
-      measured_mib="$(($(sysctl -n hw.memsize) / 1024 / 1024))"
-      kind=hw.memsize
+      measured_mib="$(
+        vm_stat | awk -v page="$(pagesize)" '
+          /^Pages free:/ { gsub(/\./, "", $NF); free = $NF }
+          /^Pages inactive:/ { gsub(/\./, "", $NF); inactive = $NF }
+          /^Pages speculative:/ { gsub(/\./, "", $NF); spec = $NF }
+          /^Pages purgeable:/ { gsub(/\./, "", $NF); purg = $NF }
+          END { print int((free + inactive + spec + purg) * page / 1024 / 1024) }
+        '
+      )"
+      kind=vm_stat
       ;;
     *)
       echo "load: unknown OS; cannot check RAM for 8×512 MiB VMs" >&2
@@ -46,10 +54,10 @@ require_ram_8x512() {
     exit 1
   fi
   if [[ "${measured_mib}" -lt "${need_mib}" ]]; then
-    echo "load: host cannot allocate 8×512 MiB (${kind} ${measured_mib} MiB < ${need_mib} MiB)" >&2
+    echo "load: host cannot allocate 8×512 MiB plus overhead (${kind} ${measured_mib} MiB < ${need_mib} MiB)" >&2
     exit 1
   fi
-  echo "==> RAM ${kind}=${measured_mib} MiB (need ${need_mib} MiB for 8×512)"
+  echo "==> RAM ${kind}=${measured_mib} MiB (need ${need_mib} MiB for 8×512 plus overhead)"
 }
 
 pin_full_binaries
@@ -87,23 +95,9 @@ for name in "${names[@]}"; do
 done
 
 one="${names[0]}"
-echo "==> 16 concurrent exec ${one} -- echo ok"
-pids=()
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
-  bux exec "${one}" -- echo ok >/dev/null &
-  pids+=("$!")
-done
-fail=0
-for pid in "${pids[@]}"; do
-  if ! wait "${pid}"; then
-    echo "load: concurrent exec pid ${pid} failed" >&2
-    fail=1
-  fi
-done
-if [[ "${fail}" -ne 0 ]]; then
-  echo "load: not all 16 concurrent execs exited 0" >&2
-  exit 1
-fi
+echo "==> 16 concurrent exec_output ${one} (one Runtime; R8)"
+cargo build -p bux --example concurrent_exec --manifest-path "${ROOT}/Cargo.toml"
+"${ROOT}/target/debug/examples/concurrent_exec" "${one}"
 
 echo "==> rm -f all 8"
 bux rm -f "${names[@]}"

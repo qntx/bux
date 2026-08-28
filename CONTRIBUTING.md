@@ -238,10 +238,12 @@ Item 17 is not in the Layer 1 or clone FULL rows.
 `scripts/e2e/load.sh` (`BUX_E2E_FULL=1`, dedicated `$BUX_HOME`):
 
 - `bux create` 8 detached alpine VMs (default 512 MiB each); all `bux ps` Running
-- 16 concurrent `bux exec <one-vm> -- echo ok`; all exit 0
+- 16 concurrent `Vm::exec_output(echo ok)` on **one** `Runtime`
+  (`crates/bux/examples/concurrent_exec.rs`); all exit 0. Not 16 `bux exec`
+  CLI processes (R5 exclusive `bux.lock`)
 - `bux rm -f` all 8; `bux ps -q` empty; no leftover `$BUX_HOME/disks/vms/*.qcow2`
-- If the host cannot allocate 8×512 MiB, the script exits with a message (no
-  OOM flake)
+- If available RAM is below 8×512 MiB plus per-VM/host overhead, the script
+  exits with a message (no OOM flake)
 
 `scripts/e2e/chaos.sh` (`BUX_E2E_FULL=1`):
 
