@@ -353,9 +353,19 @@ mod tests {
     #[tokio::test]
     async fn roundtrip_control() {
         let (mut c, mut s) = tokio::io::duplex(1024);
-        send(&mut c, &ControlReq::Ping).await.unwrap();
-        let msg: ControlReq = recv(&mut s).await.unwrap();
-        assert!(matches!(msg, ControlReq::Ping));
+        for req in [
+            ControlReq::Ping,
+            ControlReq::Shutdown,
+            ControlReq::Quiesce,
+            ControlReq::Thaw,
+        ] {
+            send(&mut c, &req).await.unwrap();
+            let msg: ControlReq = recv(&mut s).await.unwrap();
+            assert_eq!(
+                postcard::to_allocvec(&msg).unwrap(),
+                postcard::to_allocvec(&req).unwrap()
+            );
+        }
 
         send(
             &mut s,
@@ -374,6 +384,28 @@ mod tests {
                 ..
             }
         ));
+
+        send(&mut s, &ControlResp::ShutdownOk).await.unwrap();
+        let resp: ControlResp = recv(&mut c).await.unwrap();
+        assert!(matches!(resp, ControlResp::ShutdownOk));
+
+        send(&mut s, &ControlResp::QuiesceOk { frozen_count: 2 })
+            .await
+            .unwrap();
+        let resp: ControlResp = recv(&mut c).await.unwrap();
+        assert!(matches!(resp, ControlResp::QuiesceOk { frozen_count: 2 }));
+
+        send(&mut s, &ControlResp::ThawOk { thawed_count: 2 })
+            .await
+            .unwrap();
+        let resp: ControlResp = recv(&mut c).await.unwrap();
+        assert!(matches!(resp, ControlResp::ThawOk { thawed_count: 2 }));
+
+        send(&mut s, &ControlResp::Error(ErrorInfo::internal("boom")))
+            .await
+            .unwrap();
+        let resp: ControlResp = recv(&mut c).await.unwrap();
+        assert!(matches!(resp, ControlResp::Error(_)));
     }
 
     #[tokio::test]

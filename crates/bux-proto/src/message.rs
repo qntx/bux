@@ -18,7 +18,8 @@ use serde::{Deserialize, Serialize};
 /// - v7: [`ExecStart::user`] optional name-based user for guest `/etc/passwd` resolution.
 /// - v8: in-container exec (removed).
 /// - v9: Phase A only — dropped `in_container` and ping `workload_isolation`.
-pub const PROTOCOL_VERSION: u32 = 9;
+/// - v10: dropped unimplemented Metrics/HealthCheck/PrepareSnapshot control variants.
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Default chunk size for streaming transfers (1 MiB).
 pub const STREAM_CHUNK_SIZE: usize = 1 << 20;
@@ -89,11 +90,6 @@ pub enum HelloAck {
 }
 
 /// Host → guest on a control connection.
-///
-/// [`Self::Metrics`], [`Self::HealthCheck`], and [`Self::PrepareSnapshot`] are
-/// unimplemented. The host never sends them. The guest closes the control
-/// connection on unknown variants (`unsupported control request`) and does not
-/// send [`ControlResp::Error`].
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum ControlReq {
@@ -105,20 +101,9 @@ pub enum ControlReq {
     Quiesce,
     /// Thaw previously frozen filesystems (`FITHAW`).
     Thaw,
-    /// Unimplemented. Host never sends this; guest tears down the control connection.
-    Metrics,
-    /// Unimplemented. Host never sends this; guest tears down the control connection.
-    HealthCheck,
-    /// Unimplemented. Host never sends this; guest tears down the control connection.
-    PrepareSnapshot,
 }
 
 /// Guest → host on a control connection.
-///
-/// [`Self::MetricsData`], [`Self::HealthOk`], and [`Self::SnapshotPrepared`] are
-/// unimplemented. The guest never sends them: unknown [`ControlReq`] variants
-/// tear down the control connection instead of producing these replies or
-/// [`Self::Error`].
 #[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ControlResp {
@@ -141,24 +126,6 @@ pub enum ControlResp {
         /// Number of filesystems thawed.
         thawed_count: u32,
     },
-    /// Unimplemented reply to [`ControlReq::Metrics`]. Guest never sends this.
-    MetricsData {
-        /// CPU usage as a percentage (0.0–100.0+).
-        cpu_percent: f32,
-        /// RSS memory usage in bytes.
-        memory_bytes: u64,
-        /// Total disk read bytes since boot.
-        disk_read_bytes: u64,
-        /// Total disk write bytes since boot.
-        disk_write_bytes: u64,
-    },
-    /// Unimplemented reply to [`ControlReq::HealthCheck`]. Guest never sends this.
-    HealthOk {
-        /// Number of checks that passed.
-        checks_passed: u32,
-    },
-    /// Unimplemented reply to [`ControlReq::PrepareSnapshot`]. Guest never sends this.
-    SnapshotPrepared,
     /// Control request failed.
     Error(ErrorInfo),
 }
@@ -446,4 +413,53 @@ pub enum ErrorCode {
     LimitExceeded,
     /// Internal guest agent error.
     Internal,
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "tests")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_version_is_10() {
+        assert_eq!(PROTOCOL_VERSION, 10);
+    }
+
+    #[test]
+    fn control_req_postcard_indices_stay_0_to_3() {
+        assert_eq!(postcard::to_allocvec(&ControlReq::Ping).unwrap(), [0]);
+        assert_eq!(postcard::to_allocvec(&ControlReq::Shutdown).unwrap(), [1]);
+        assert_eq!(postcard::to_allocvec(&ControlReq::Quiesce).unwrap(), [2]);
+        assert_eq!(postcard::to_allocvec(&ControlReq::Thaw).unwrap(), [3]);
+    }
+
+    #[test]
+    fn control_req_unknown_index_fails_decode() {
+        // Unknown wire variants fail decode; they never reach a match arm.
+        assert!(postcard::from_bytes::<ControlReq>(&[4]).is_err());
+    }
+
+    fn discriminant(msg: &impl Serialize) -> u8 {
+        postcard::to_allocvec(msg)
+            .unwrap()
+            .first()
+            .copied()
+            .unwrap()
+    }
+
+    #[test]
+    fn control_resp_remaining_postcard_indices() {
+        let pong = ControlResp::Pong {
+            version: String::new(),
+            uptime_ms: 0,
+        };
+        assert_eq!(discriminant(&pong), 0);
+        assert_eq!(discriminant(&ControlResp::ShutdownOk), 1);
+        assert_eq!(discriminant(&ControlResp::QuiesceOk { frozen_count: 0 }), 2);
+        assert_eq!(discriminant(&ControlResp::ThawOk { thawed_count: 0 }), 3);
+        assert_eq!(
+            discriminant(&ControlResp::Error(ErrorInfo::internal(""))),
+            4
+        );
+    }
 }
