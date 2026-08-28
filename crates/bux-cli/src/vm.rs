@@ -599,8 +599,13 @@ pub struct RestartArgs {
 /// Arguments for `bux stats`.
 #[derive(clap::Args)]
 pub struct StatsArgs {
+    /// Dump process-local `RuntimeMetrics` as JSON (opens the runtime; Busy if locked).
+    #[arg(long, conflicts_with = "vm")]
+    pub runtime: bool,
+
     /// VM ID or name.
-    pub vm: String,
+    #[arg(required_unless_present = "runtime")]
+    pub vm: Option<String>,
 }
 
 /// Arguments for `bux clone`.
@@ -639,17 +644,39 @@ pub async fn restart(args: RestartArgs) -> Result<()> {
     Ok(())
 }
 
+/// JSON object whose keys are exactly the [`bux::RuntimeMetrics`] getter names.
+#[cfg(unix)]
+fn runtime_metrics_json(m: &bux::RuntimeMetrics) -> Result<String> {
+    let obj = serde_json::json!({
+        "vms_created_total": m.vms_created_total(),
+        "num_running_vms": m.num_running_vms(),
+        "vms_failed_total": m.vms_failed_total(),
+        "total_uptime_ms": m.total_uptime_ms(),
+        "disk_bytes_used": m.disk_bytes_used(),
+    });
+    Ok(serde_json::to_string_pretty(&obj)?)
+}
+
 #[cfg(unix)]
 pub async fn stats(args: &StatsArgs) -> Result<()> {
+    if args.runtime {
+        let rt = open_runtime()?;
+        println!("{}", runtime_metrics_json(rt.metrics())?);
+        return Ok(());
+    }
+    let vm = args.vm.as_deref().context("VM ID or name required")?;
     let rt = open_runtime()?;
-    let handle = rt.get(&args.vm)?;
+    let handle = rt.get(vm)?;
     let info = handle.info();
     let health = handle.health().await;
+    let metrics = handle.metrics();
     println!("ID:             {}", info.id);
     println!("Name:           {}", info.name.as_deref().unwrap_or("-"));
     println!("Status:         {:?}", info.status);
     println!("Health:         {health:?}");
     println!("PID:            {}", info.pid);
+    println!("boot_duration_ms: {}", metrics.boot_duration_ms());
+    println!("exec_count:     {}", metrics.exec_count());
     Ok(())
 }
 
@@ -785,5 +812,35 @@ mod unpack_guest_tar_tests {
             }
         }
         assert!(saw_x, "packed dir must contain x.txt");
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod stats_tests {
+    use super::runtime_metrics_json;
+
+    const RUNTIME_METRIC_KEYS: [&str; 5] = [
+        "vms_created_total",
+        "num_running_vms",
+        "vms_failed_total",
+        "total_uptime_ms",
+        "disk_bytes_used",
+    ];
+
+    #[test]
+    fn runtime_metrics_json_keys_match_getters() {
+        let m = bux::RuntimeMetrics::new();
+        let v: serde_json::Value =
+            serde_json::from_str(&runtime_metrics_json(&m).expect("json")).expect("parse");
+        let obj = v.as_object().expect("object");
+        assert_eq!(
+            obj.len(),
+            RUNTIME_METRIC_KEYS.len(),
+            "runtime JSON must be getter keys only: {obj:?}"
+        );
+        for key in RUNTIME_METRIC_KEYS {
+            assert_eq!(obj[key].as_i64(), Some(0), "{key}");
+        }
     }
 }

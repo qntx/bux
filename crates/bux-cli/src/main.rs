@@ -106,7 +106,7 @@ enum Command {
     /// Restart a stopped or running VM.
     Restart(vm::RestartArgs),
 
-    /// Display VM identity, status, and health.
+    /// Display VM identity, status, and health; `--runtime` dumps `RuntimeMetrics`.
     Stats(vm::StatsArgs),
 
     /// Manage VM snapshots.
@@ -602,5 +602,50 @@ mod log_level_tests {
     fn top_level_help_lists_log_level() {
         let help = Cli::command().render_help().to_string();
         assert!(help.contains("--log-level"), "{help}");
+    }
+}
+
+#[cfg(test)]
+mod cli_parse_tests {
+    use super::*;
+
+    #[test]
+    fn stats_runtime_does_not_require_vm() {
+        let cli = Cli::try_parse_from(["bux", "stats", "--runtime"]).expect("parse");
+        assert!(
+            matches!(
+                cli.command,
+                Command::Stats(ref args) if args.runtime && args.vm.is_none()
+            ),
+            "expected stats --runtime without vm"
+        );
+    }
+
+    #[test]
+    fn stats_vm_does_not_set_runtime() {
+        let cli = Cli::try_parse_from(["bux", "stats", "abc"]).expect("parse");
+        assert!(
+            matches!(
+                cli.command,
+                Command::Stats(ref args) if !args.runtime && args.vm.as_deref() == Some("abc")
+            ),
+            "expected stats <id> without --runtime"
+        );
+    }
+
+    #[test]
+    fn stats_requires_vm_or_runtime() {
+        assert!(
+            Cli::try_parse_from(["bux", "stats"]).is_err(),
+            "stats with neither vm nor --runtime must fail"
+        );
+    }
+
+    #[test]
+    fn stats_runtime_conflicts_with_vm() {
+        assert!(
+            Cli::try_parse_from(["bux", "stats", "--runtime", "abc"]).is_err(),
+            "stats --runtime must not take a vm id"
+        );
     }
 }
