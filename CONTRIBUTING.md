@@ -87,7 +87,7 @@ bux system info --format json
 - Product entry: `Runtime` + `Vm` + `VmOptions` (`crates/bux`).
 - Engine boundary: product `VmConfig` → `ShimConfig` → `bux-shim` → libkrun.
 - Managed network: gvproxy virtio-net in the `bux-shim` process (`bux-shim-bin`); no TSI `set_port_map`.
-- Guest agent: postcard protocol v9; Phase A process identity only.
+- Guest agent: postcard protocol v10; Phase A process identity only.
 - Schema: SQLite `user_version` 5 — **no migrations**; wipe `BUX_HOME` on mismatch.
 
 ## Tests
@@ -116,12 +116,17 @@ The first green FULL is recorded below on **local HVF (Apple Silicon)**.
 Host CI (`BUX_E2E_FULL=0`) is not that proof. Linux KVM has **no** Layer 1
 row in this tree (procedure under **Linux KVM FULL record**).
 
+The HVF captures below (`42f02b0`, `f4ff20f`, `04fca66`) ran against pre-v10
+guests. They are **not ship proof**. Do not invent a new uname or ELF sha256
+to update this table. Linux KVM stays empty until an operator records a v10
+run.
+
 ### Layer 1 FULL record
 
 Operator FULL 2026-08-28 local HVF (smoke START 2026-08-27T19:48:37Z UTC,
 `SMOKE_EXIT=0`, `OK (full e2e)`). Capture binary `./target/debug/bux` (not
 PATH `bux`). `$BUX_HOME` was `/Users/xu/bux-full-hvf-119` (no `bux-e2e`
-substring).
+substring). **Pre-v10; not ship proof.**
 
 | Field | Value |
 | ----- | ----- |
@@ -176,18 +181,27 @@ data dir on exit). Darwin guest ELF: `scripts/e2e/fetch-guest.sh`.
 
 FULL always builds `target/debug/bux` and `target/debug/bux-shim` and ignores a
 PATH `bux`. On Darwin the script ad-hoc codesigns the shim with
-`crates/bux-shim/bux-shim.entitlements`. Darwin HVF needs that codesign plus a
-guest ELF via `BUX_GUEST_PATH` from `scripts/e2e/fetch-guest.sh` (not a cwd
-`gh run download` that leaves the ELF nested). Darwin does not compile the guest
-and does not use zig cc. Linux FULL may `cargo build -p bux-guest --target
-$ARCH-unknown-linux-musl` only when `musl-gcc` and that rustc target are already
-present; the ELF must still pass validation (64-bit LE, host guest arch
-x86_64/aarch64, no `PT_INTERP`). Missing or dynamic ELF exits before `bux
-create`. FULL needs python3 for the guest ELF validator and Go for
-`bux-shim-bin`; Darwin FULL still needs `BUX_GUEST_PATH` and `gh` authenticated
-to `qntx/bux` with `workflow` if they must dispatch; `gh release download
-guest-<sha>` is enough when that Release exists; `gh run download` is enough
-when a matching run already exists.
+`crates/bux-shim/bux-shim.entitlements`. Darwin FULL **requires**
+`BUX_GUEST_PATH` from `scripts/e2e/fetch-guest.sh` of this HEAD (not a cwd
+`gh run download` that leaves the ELF nested). There is no leftover
+`target/debug/bux-guest-*` fall-through: unset `BUX_GUEST_PATH` plus a leftover
+ELF must fail before `bux create`. Before fetch, unset `BUX_GUEST_PATH` **and**
+delete leftover `target/debug/bux-guest-*`. Darwin does not compile the guest
+and does not use zig cc.
+
+Linux FULL when `BUX_GUEST_PATH` is unset: musl-gcc build of this tree (when
+`musl-gcc` and that rustc target are already present) **or**
+`scripts/e2e/fetch-guest.sh`. Do not silently accept a leftover v9 ELF. After
+musl-build/fetch, the ELF must still contain the literal bytes
+`bux-guest-protocol-v10`. Missing stamp, missing ELF, or a dynamic ELF exits
+before `bux create`. Validation is 64-bit LE, host guest arch x86_64/aarch64,
+no `PT_INTERP`, plus that stamp.
+
+FULL needs python3 for the guest ELF validator and Go for `bux-shim-bin`;
+Darwin FULL still needs `BUX_GUEST_PATH` and `gh` authenticated to `qntx/bux`
+with `workflow` if they must dispatch; `gh release download guest-<sha>` is
+enough when that Release exists; `gh run download` is enough when a matching
+run already exists.
 
 CD `cd.yml` musl guest:
 
@@ -196,6 +210,14 @@ CD `cd.yml` musl guest:
 - GHA artifact **name**: `guest-<triple>` (never `bux-guest-*`)
 - **file** inside the artifact: `bux-guest-<triple>`
 - sibling after fetch: `target/debug/bux-guest-<triple>`
+
+After this PR and PR 1 (combined CAfile) are both on `main`:
+
+```bash
+git fetch origin
+git tag "guest-$(git rev-parse origin/main)" "$(git rev-parse origin/main)"
+git push origin "guest-$(git rev-parse origin/main)"
+```
 
 Do not vendor the ELF in git. Do not fill the FULL record above from a
 Release download.
@@ -222,13 +244,18 @@ OCI (`bux pull` / `bux create IMAGE`).
    `bind_addr=0.0.0.0`, host TCP to that port **reaches the guest**
 7. **`offline-no-eth0`:** `bux create --network=disabled`, wget fails (no TSI),
    `/sys/class/net/eth0` absent (do not also assert dummy-nic)
-8. volume: `bux create -v host:/data` then `bux exec -- ls /data`
+8. volume: `bux create -v host:/data` then `bux exec -- ls /data`; `:ro`
+   write-fail (guest can read; `touch` on the volume fails)
 9. `bux stop` / `bux restart` / `bux rm` of a `detach=true` VM (no `bux start`;
    restart must still survive CLI exit)
-10. secrets: value not in `bux.db` or guest `/proc/1/environ`
+10. secrets: value not in `bux.db` or guest `/proc/1/environ`; HTTPS MITM
+    handshake returns a **non-empty body**
 
-The Layer 1 record above is that green local HVF run. Host CI
-(`BUX_E2E_FULL=0`) is not that proof. Linux KVM FULL remains empty.
+The Layer 1 record above is that green local HVF run (**pre-v10, not ship
+proof**). Host CI (`BUX_E2E_FULL=0`) is not that proof. Linux KVM FULL remains
+empty. HEAD `smoke.sh` asserts `:ro` write-fail, HTTPS MITM non-empty body,
+clone flatten, restore flatten + CASCADE; `load.sh` / `chaos.sh` are the same
+FULL pin.
 
 Items 11–15 are not in the `42f02b0` Layer 1 row.
 
@@ -241,6 +268,7 @@ Items 11–15 are not in the `42f02b0` Layer 1 row.
 Operator FULL 2026-08-28 on `f4ff20ffaabfde6aedb30d9e2e23d5916405765f`
 (capture binary `./target/debug/bux`, `$BUX_HOME=/Users/xu/bux-full-hvf-addenda3`)
 exited 0 including items 11–15 (`SMOKE_EXIT=0`, `OK (full e2e)`).
+**Pre-v10; not ship proof.**
 
 Item 16 is not in the `42f02b0` Layer 1 row.
 
@@ -249,12 +277,15 @@ Item 16 is not in the `42f02b0` Layer 1 row.
 Operator FULL 2026-08-28 on `04fca66945fe24fc16fda5aff113c8e4782cbc68`
 (capture binary `./target/debug/bux`, `$BUX_HOME=/Users/xu/bux-full-hvf-clone`)
 exited 0 including clone flatten (`SMOKE_EXIT=0`, `OK (full e2e)`).
+**Pre-v10; not ship proof.**
 
 Item 17 is not in the Layer 1 or clone FULL rows.
 
 17. snapshot restore flatten: write `/restore-marker` → `bux snapshot create` →
     `bux snapshot restore` → `exec` cat marker; source still listed; `rm`
     restore; `rm` source drops snapshot rows (`ON DELETE CASCADE`)
+18. load.sh (below)
+19. chaos.sh (below)
 
 `scripts/e2e/load.sh` (`BUX_E2E_FULL=1`, dedicated `$BUX_HOME`):
 

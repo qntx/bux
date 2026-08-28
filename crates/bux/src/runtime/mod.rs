@@ -437,7 +437,13 @@ impl Runtime {
     pub async fn restore(&self, snapshot_id: &str, name: Option<String>) -> Result<Vm> {
         let opts = self.restore_prepare(snapshot_id, name)?;
         let handle = self.create(opts).await?;
-        info!(snapshot_id, restore_id = %handle.stored().id, "VM restored from snapshot");
+        let vm_id = handle.stored().id.clone();
+        info!(snapshot_id, restore_id = %vm_id, "VM restored from snapshot");
+        self.events
+            .emit(AuditEvent::now(AuditEventKind::SnapshotRestored {
+                vm_id,
+                snapshot_id: snapshot_id.to_owned(),
+            }));
         Ok(handle)
     }
 

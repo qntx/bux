@@ -1,4 +1,4 @@
-# Shared FULL pin for load.sh / chaos.sh. Source after ROOT is set.
+# Shared FULL pin for smoke.sh / load.sh / chaos.sh. Source after ROOT is set.
 # shellcheck shell=bash
 
 full_guest_fail() {
@@ -28,16 +28,17 @@ if machine != expected:
 e_phoff = struct.unpack_from("<Q", data, 32)[0]
 e_phentsize = struct.unpack_from("<H", data, 54)[0]
 e_phnum = struct.unpack_from("<H", data, 56)[0]
-if e_phoff == 0 or e_phentsize == 0 or e_phnum == 0:
-    sys.exit(0)
-for i in range(e_phnum):
-    off = e_phoff + i * e_phentsize
-    end = off + 4
-    if end > len(data):
-        break
-    p_type = struct.unpack_from("<I", data, off)[0]
-    if p_type == 3:
-        sys.exit(1)
+if e_phoff != 0 and e_phentsize != 0 and e_phnum != 0:
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        end = off + 4
+        if end > len(data):
+            break
+        p_type = struct.unpack_from("<I", data, off)[0]
+        if p_type == 3:
+            sys.exit(1)
+if b"bux-guest-protocol-v10" not in data:
+    sys.exit(1)
 sys.exit(0)
 PY
 }
@@ -58,7 +59,7 @@ pin_full_guest() {
     echo "FULL requires python3 to validate the guest ELF (CONTRIBUTING.md)" >&2
     exit 1
   fi
-  local arch musl_triple guest="" c env_var
+  local arch musl_triple guest="" env_var
   case "$(uname -m)" in
     x86_64|amd64)
       arch=x86_64
@@ -77,30 +78,29 @@ pin_full_guest() {
       full_guest_fail
     fi
     guest="${BUX_GUEST_PATH}"
+  elif [[ "$(uname -s)" == "Darwin" ]]; then
+    echo "Darwin FULL requires BUX_GUEST_PATH from fetch-guest.sh of this HEAD (CONTRIBUTING.md)" >&2
+    echo "unset BUX_GUEST_PATH and delete leftover target/debug/bux-guest-* before fetch" >&2
+    exit 1
+  elif command -v musl-gcc >/dev/null 2>&1 \
+    && linux_musl_target_present "${musl_triple}"; then
+    echo "building bux-guest (${musl_triple})..."
+    env_var="CARGO_TARGET_$(echo "${musl_triple}" | tr '[:lower:]-' '[:upper:]_')_LINKER"
+    env "${env_var}=musl-gcc" cargo build -p bux-guest --target "${musl_triple}" \
+      --manifest-path "${ROOT}/Cargo.toml"
+    mkdir -p "${ROOT}/target/debug"
+    cp "${ROOT}/target/${musl_triple}/debug/bux-guest" \
+      "${ROOT}/target/debug/bux-guest-${musl_triple}"
+    guest="${ROOT}/target/debug/bux-guest-${musl_triple}"
+    chmod 0755 "${guest}"
+    [[ -x "${guest}" ]] || full_guest_fail
+    validate_guest_elf "${guest}" "${arch}" || full_guest_fail
   else
-    for c in \
-      "${ROOT}/target/debug/bux-guest-${musl_triple}" \
-      "${ROOT}/target/${musl_triple}/debug/bux-guest"
-    do
-      if [[ -f "${c}" ]] && validate_guest_elf "${c}" "${arch}"; then
-        guest="${c}"
-        break
-      fi
-    done
-    if [[ -z "${guest}" && "$(uname -s)" == "Linux" ]] \
-      && command -v musl-gcc >/dev/null 2>&1 \
-      && linux_musl_target_present "${musl_triple}"; then
-      echo "building bux-guest (${musl_triple})..."
-      env_var="CARGO_TARGET_$(echo "${musl_triple}" | tr '[:lower:]-' '[:upper:]_')_LINKER"
-      env "${env_var}=musl-gcc" cargo build -p bux-guest --target "${musl_triple}" \
-        --manifest-path "${ROOT}/Cargo.toml"
-      mkdir -p "${ROOT}/target/debug"
-      cp "${ROOT}/target/${musl_triple}/debug/bux-guest" \
-        "${ROOT}/target/debug/bux-guest-${musl_triple}"
-      guest="${ROOT}/target/debug/bux-guest-${musl_triple}"
-      chmod 0755 "${guest}"
-      [[ -x "${guest}" ]] || full_guest_fail
-      validate_guest_elf "${guest}" "${arch}" || full_guest_fail
+    echo "fetching bux-guest via fetch-guest.sh..."
+    bash "${ROOT}/scripts/e2e/fetch-guest.sh"
+    guest="${ROOT}/target/debug/bux-guest-${musl_triple}"
+    if [[ ! -f "${guest}" ]] || ! validate_guest_elf "${guest}" "${arch}"; then
+      full_guest_fail
     fi
   fi
   [[ -n "${guest}" && -f "${guest}" ]] || full_guest_fail
