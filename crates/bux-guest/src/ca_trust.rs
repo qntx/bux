@@ -4,8 +4,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-/// alpine wget reads this env; sibling PEM paths are not loaded automatically.
-const SSL_CERT_FILE: &str = "/etc/ssl/certs/bux-mitm-ca.pem";
+/// alpine wget reads this env as `CAfile` (replaces the default bundle; `CApath` is unchanged).
+const SSL_CERT_FILE: &str = "/etc/ssl/certs/bux-ca-bundle.pem";
 
 /// Write the CA PEM to well-known trust paths and activate `SSL_CERT_FILE`.
 pub fn install_mitm_ca(pem: &str) -> io::Result<()> {
@@ -53,7 +53,13 @@ fn write_ca_pem(root: &Path, pem: &str) -> io::Result<()> {
     let _ = fs::write(&anchor, pem.as_bytes());
 
     let bundle = root.join("etc/ssl/certs/ca-certificates.crt");
-    if bundle.exists() {
+    // Read before append: composing from the mutated bundle duplicates MITM.
+    let system_copy = match fs::read(&bundle) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    if system_copy.is_some() {
         let mut f = fs::OpenOptions::new().append(true).open(&bundle)?;
         f.write_all(b"\n")?;
         f.write_all(pem.as_bytes())?;
@@ -61,6 +67,14 @@ fn write_ca_pem(root: &Path, pem: &str) -> io::Result<()> {
             f.write_all(b"\n")?;
         }
     }
+
+    let mut body = system_copy.unwrap_or_default();
+    if !body.is_empty() && !body.ends_with(b"\n") {
+        body.push(b'\n');
+    }
+    body.extend_from_slice(pem.as_bytes());
+    let combined = root.join("etc/ssl/certs/bux-ca-bundle.pem");
+    fs::write(&combined, body)?;
     Ok(())
 }
 
@@ -96,6 +110,10 @@ mod tests {
                 .join("etc/ssl/certs/ca-certificates.crt")
                 .exists()
         );
+        assert_eq!(
+            fs::read(dir.path().join("etc/ssl/certs/bux-ca-bundle.pem")).unwrap(),
+            PEM.as_bytes()
+        );
     }
 
     #[test]
@@ -116,6 +134,23 @@ mod tests {
             got.find("old").unwrap() < got.find("test").unwrap(),
             "{got}"
         );
+        let combined =
+            fs::read_to_string(dir.path().join("etc/ssl/certs/bux-ca-bundle.pem")).unwrap();
+        assert!(combined.contains("old"), "{combined}");
+        assert!(combined.contains("test"), "{combined}");
+        assert!(
+            combined.find("old").unwrap() < combined.find("test").unwrap(),
+            "{combined}"
+        );
+        assert_eq!(
+            combined.matches("BEGIN CERTIFICATE").count(),
+            2,
+            "{combined}"
+        );
+        assert_eq!(
+            fs::read(dir.path().join("etc/ssl/certs/bux-mitm-ca.pem")).unwrap(),
+            PEM.as_bytes()
+        );
     }
 
     #[test]
@@ -132,5 +167,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("etc/ssl/certs/ca-certificates.crt")).unwrap();
         assert!(write_ca_pem(dir.path(), PEM).is_err());
+    }
+
+    #[test]
+    fn write_ca_pem_fails_when_combined_write_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("etc/ssl/certs/bux-ca-bundle.pem")).unwrap();
+        assert!(write_ca_pem(dir.path(), PEM).is_err());
+    }
+
+    #[test]
+    fn ssl_cert_file_is_combined_bundle() {
+        assert_eq!(SSL_CERT_FILE, "/etc/ssl/certs/bux-ca-bundle.pem");
     }
 }
