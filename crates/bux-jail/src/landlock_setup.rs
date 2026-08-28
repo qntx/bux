@@ -20,7 +20,7 @@ pub(crate) fn build_fd(
     restrictions.build().map_err(|e| e.to_string())
 }
 
-/// Writable `/dev` leaves. `/dev` itself stays read-only because PathBeneath is recursive.
+/// Writable `/dev` leaves. `/dev` itself stays read-only because `PathBeneath` is recursive.
 const DEV_RW_LEAVES: &[&str] = &[
     "/dev/kvm",
     "/dev/null",
@@ -91,7 +91,7 @@ fn path_restrictions(jail: &JailConfig, shim: &Path, config_path: &Path) -> Path
 
 /// Grant `/dev` read/traverse and RW only on listed leaves that exist.
 ///
-/// PathBeneath is recursive, so `/dev` itself must not be RW.
+/// `PathBeneath` is recursive, so `/dev` itself must not be RW.
 fn allow_dev(mut r: PathRestrictions, exists: impl Fn(&Path) -> bool) -> PathRestrictions {
     if exists(Path::new("/dev")) {
         r = r.allow_read("/dev");
