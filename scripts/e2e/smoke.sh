@@ -246,6 +246,41 @@ require_wget_fail() {
   esac
 }
 
+# Handshake only (no secret in the request). MITM intercepts the secret host.
+guest_https_probe() {
+  local target="$1"
+  local host="$2"
+  local timeout="${3:-10}"
+  bux exec "${target}" -- sh -c "
+    if command -v wget >/dev/null 2>&1; then
+      w() { wget -qO- -T ${timeout} https://${host}/; }
+    elif command -v busybox >/dev/null 2>&1; then
+      w() { busybox wget -qO- -T ${timeout} https://${host}/; }
+    else
+      echo HTTPS_MISSING
+      exit 1
+    fi
+    body=\$(w) || { echo HTTPS_FAIL; exit 0; }
+    if [ -n \"\$body\" ]; then
+      echo HTTPS_OK
+    else
+      echo HTTPS_EMPTY
+    fi
+  "
+}
+
+require_https_ok() {
+  local status
+  status="$(retry_until_needle HTTPS_OK "${WGET_OK_DEADLINE_SECS}" "${WGET_OK_SLEEP_SECS}" guest_https_probe "$1" "$2" "$3")" || {
+    echo "$4: expected https handshake, got ${status:-empty}"
+    return 1
+  }
+  if [[ "${status}" != *HTTPS_OK* ]]; then
+    echo "$4: expected https handshake, got ${status:-empty}"
+    return 1
+  fi
+}
+
 # Alpine busybox has no httpd; busybox-extras does. httpd without -f daemonizes
 # so this exec returns and releases bux.lock. Never background bux exec.
 start_guest_port80() {
@@ -480,8 +515,9 @@ bux rm "${LIFE}"
 
 SEC="e2e-sec-$(date +%s)"
 SECRET_VAL="e2e-s3cr3t-n0t-persisted-$$"
-echo "==> secrets not in sqlite or guest environ ${SEC}"
-create_or_dump --name "${SEC}" --secret "e2e=${SECRET_VAL}@example.com" "${IMAGE}"
+SEC_HOST="example.com"
+echo "==> secrets not in sqlite or guest environ; HTTPS handshake ${SEC}"
+create_or_dump --name "${SEC}" --secret "e2e=${SECRET_VAL}@${SEC_HOST}" "${IMAGE}"
 if grep -a -F "${SECRET_VAL}" "${BUX_HOME}/bux.db" >/dev/null 2>&1; then
   echo "secrets: value found in bux.db"
   bux rm -f "${SEC}" || true
@@ -490,6 +526,10 @@ fi
 bux exec "${SEC}" -- cat /proc/1/environ > "${BUX_HOME}/guest-environ.bin"
 if grep -a -F "${SECRET_VAL}" "${BUX_HOME}/guest-environ.bin" >/dev/null; then
   echo "secrets: value found in guest /proc/1/environ"
+  bux rm -f "${SEC}" || true
+  exit 1
+fi
+if ! require_https_ok "${SEC}" "${SEC_HOST}" 10 "secrets https handshake"; then
   bux rm -f "${SEC}" || true
   exit 1
 fi
