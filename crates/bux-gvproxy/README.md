@@ -1,9 +1,8 @@
 # bux-gvproxy
 
-Safe Rust wrapper over [gvisor-tap-vsock] (gvproxy), packaged as an L1
-platform primitive for the bux workspace. Owns the Go toolchain
-integration, static linkage of `libgvproxy.a`, and the raw FFI surface
-so that higher layers can consume a tiny, safe Rust API.
+Safe Rust wrapper over [gvisor-tap-vsock] (gvproxy) for the bux workspace.
+Owns the Go toolchain integration, static linkage of `libgvproxy.a`, and the
+raw FFI surface so callers get a small safe Rust API.
 
 ## Scope
 

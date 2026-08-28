@@ -334,6 +334,25 @@ pub fn add_virtiofs2(ctx: u32, tag: &str, host_path: &str, shm_size: u64) -> Res
     })
 }
 
+/// Add a virtio-fs shared directory with DAX SHM size and a read-only flag.
+///
+/// # Errors
+///
+/// Returns [`Error::InteriorNul`] / [`Error::Krun`] as above.
+pub fn add_virtiofs3(
+    ctx: u32,
+    tag: &str,
+    host_path: &str,
+    shm_size: u64,
+    read_only: bool,
+) -> Result<()> {
+    let c_tag = CString::new(tag)?;
+    let c_path = CString::new(host_path)?;
+    check("add_virtiofs3", unsafe {
+        sys::krun_add_virtiofs3(ctx, c_tag.as_ptr(), c_path.as_ptr(), shm_size, read_only)
+    })
+}
+
 // ----------------------------------------------------------------------
 // Disks
 // ----------------------------------------------------------------------
@@ -1027,6 +1046,17 @@ mod tests {
             Feature::InitBlob as u64,
             u64::from(sys::KRUN_FEATURE_INIT_BLOB),
             "Feature::InitBlob must match KRUN_FEATURE_INIT_BLOB",
+        );
+    }
+
+    #[test]
+    fn add_virtiofs3_invokes_krun_add_virtiofs3() {
+        let _: unsafe extern "C" fn(u32, *const c_char, *const c_char, u64, bool) -> i32 =
+            sys::krun_add_virtiofs3;
+        let err = add_virtiofs3(u32::MAX, "vol0", "/tmp", 0, true);
+        assert!(
+            matches!(&err, Err(Error::Krun { op, code }) if *op == "add_virtiofs3" && *code < 0),
+            "{err:?}"
         );
     }
 }

@@ -1,6 +1,6 @@
 //! Apply [`ShimConfig`] to a libkrun context and start the VM.
 //!
-//! Product callers are [`prepare`] / optional [`install_seccomp`] / [`start`].
+//! Product callers are [`prepare`] / [`install_seccomp`] / [`start`].
 //! This module never constructs gvproxy.
 
 use bux_krun::ctx as sys;
@@ -93,8 +93,9 @@ pub fn start(ctx: u32) -> Result<()> {
 
 /// Install the default seccomp BPF filter (Linux `x86_64`/`aarch64`).
 ///
-/// Other platforms: no-op. The `bux-shim` binary skips this when gvproxy
-/// is in-process.
+/// Darwin and other platforms: no-op. Linux: fail-closed (`SIGSYS` on a
+/// missing syscall). The `bux-shim` binary calls this after
+/// `GvproxyInstance::new` so existing Go threads inherit via TSYNC.
 ///
 /// # Errors
 ///
@@ -150,7 +151,7 @@ fn apply_all(ctx: u32, cfg: &ShimConfig) -> Result<()> {
     }
 
     for share in &cfg.virtiofs {
-        sys::add_virtiofs(ctx, &share.tag, &share.path)?;
+        add_virtiofs_share(ctx, share)?;
     }
 
     // Virtio-net only. Never `set_port_map`.
@@ -189,6 +190,30 @@ fn apply_all(ctx: u32, cfg: &ShimConfig) -> Result<()> {
     Ok(())
 }
 
+/// Disabled DAX window for `krun_add_virtiofs3`.
+const VIRTIOFS_SHM_SIZE: u64 = 0;
+
+/// RO is a virtio-fs device flag (`krun_add_virtiofs3`), not a guest remount.
+fn add_virtiofs_share(ctx: u32, share: &crate::config::ShimVirtioFs) -> Result<()> {
+    add_virtiofs3(
+        ctx,
+        &share.tag,
+        &share.path,
+        VIRTIOFS_SHM_SIZE,
+        share.read_only,
+    )
+}
+
+/// Real libkrun `krun_add_virtiofs3`. Tests record through this wrapper.
+fn add_virtiofs3(ctx: u32, tag: &str, path: &str, shm_size: u64, read_only: bool) -> Result<()> {
+    #[cfg(test)]
+    krun_spy::record(krun_spy::Call::AddVirtioFs3 {
+        shm_size,
+        read_only,
+    });
+    Ok(sys::add_virtiofs3(ctx, tag, path, shm_size, read_only)?)
+}
+
 /// Real libkrun `krun_disable_implicit_vsock`. Tests record through this wrapper.
 fn disable_implicit_vsock(ctx: u32) -> Result<()> {
     #[cfg(test)]
@@ -215,6 +240,7 @@ mod krun_spy {
     pub(super) enum Call {
         DisableImplicitVsock,
         AddVsock { tsi_features: u32 },
+        AddVirtioFs3 { shm_size: u64, read_only: bool },
     }
 
     thread_local! {
@@ -241,7 +267,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::config::{ShimDiskFormat, ShimVsockPort};
+    use crate::config::{ShimDiskFormat, ShimVirtioFs, ShimVsockPort};
 
     fn offline_cfg(rootfs: &str, vsock: &str) -> ShimConfig {
         ShimConfig {
@@ -308,5 +334,51 @@ mod tests {
         );
         drop(prepared);
         drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn add_virtiofs_share_calls_virtiofs3_with_zero_shm() {
+        drop(krun_spy::take());
+        let ro = ShimVirtioFs {
+            tag: "vol0".into(),
+            path: "/tmp".into(),
+            read_only: true,
+        };
+        let rw = ShimVirtioFs {
+            tag: "vol1".into(),
+            path: "/tmp".into(),
+            read_only: false,
+        };
+        let ro_err = add_virtiofs_share(u32::MAX, &ro);
+        let rw_err = add_virtiofs_share(u32::MAX, &rw);
+        assert_eq!(
+            krun_spy::take(),
+            [
+                krun_spy::Call::AddVirtioFs3 {
+                    shm_size: 0,
+                    read_only: true,
+                },
+                krun_spy::Call::AddVirtioFs3 {
+                    shm_size: 0,
+                    read_only: false,
+                },
+            ]
+        );
+        assert!(
+            matches!(
+                &ro_err,
+                Err(Error::Krun(bux_krun::Error::Krun { op, code }))
+                    if *op == "add_virtiofs3" && *code < 0
+            ),
+            "{ro_err:?}"
+        );
+        assert!(
+            matches!(
+                &rw_err,
+                Err(Error::Krun(bux_krun::Error::Krun { op, code }))
+                    if *op == "add_virtiofs3" && *code < 0
+            ),
+            "{rw_err:?}"
+        );
     }
 }

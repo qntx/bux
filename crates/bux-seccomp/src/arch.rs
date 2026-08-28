@@ -16,11 +16,9 @@ pub const AUDIT_ARCH: u32 = 0xc000_00b7;
 
 /// Syscalls allowed for the bux-shim VMM process on `x86_64`.
 ///
-/// The allowlist is sorted for readability and verified by a unit test.
-/// It covers libkrun's runtime needs: standard I/O, memory management,
-/// KVM ioctls, threading, signals, and vsock/virtio networking.
-#[cfg(target_arch = "x86_64")]
-pub const DEFAULT_ALLOWLIST: &[u32] = &[
+/// Sorted and unique; frozen by a unit test. Covers libkrun plus the
+/// in-process gvproxy/Go runtime (clone3, rseq, netpoll, timers).
+pub const X86_64_ALLOWLIST: &[u32] = &[
     0,   // read
     1,   // write
     2,   // open
@@ -47,10 +45,12 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
     23,  // select
     24,  // sched_yield
     25,  // mremap
+    27,  // mincore
     28,  // madvise
     32,  // dup
     33,  // dup2
     35,  // nanosleep
+    38,  // setitimer
     39,  // getpid
     41,  // socket
     42,  // connect
@@ -70,6 +70,7 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
     57,  // fork
     60,  // exit
     62,  // kill
+    63,  // uname
     72,  // fcntl
     73,  // flock
     74,  // fsync
@@ -98,19 +99,26 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
     204, // sched_getaffinity
     217, // getdents64
     218, // set_tid_address
+    222, // timer_create
+    223, // timer_settime
+    226, // timer_delete
     228, // clock_gettime
     230, // clock_nanosleep
     231, // exit_group
     232, // epoll_wait
     233, // epoll_ctl
+    234, // tgkill
     257, // openat
     262, // newfstatat
     269, // faccessat
     271, // ppoll
-    280, // eventfd2
+    273, // set_robust_list
+    280, // utimensat
+    281, // epoll_pwait
     282, // signalfd4
     284, // eventfd
     288, // accept4
+    290, // eventfd2
     291, // epoll_create1
     292, // dup3
     293, // pipe2
@@ -121,6 +129,7 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
     334, // rseq
     435, // clone3
     439, // faccessat2
+    441, // epoll_pwait2
     448, // process_mrelease
     449, // futex_waitv
     451, // cachestat
@@ -128,26 +137,30 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
 
 /// Syscalls allowed for the bux-shim VMM process on `aarch64`.
 ///
-/// Numbers come from `asm-generic/unistd.h`; comments audited against
-/// the Linux 6.x headers and corrected where the original source had
-/// stale annotations.
-#[cfg(target_arch = "aarch64")]
-pub const DEFAULT_ALLOWLIST: &[u32] = &[
+/// Sorted and unique; frozen by a unit test. Numbers and names from
+/// `asm-generic/unistd.h`. Covers libkrun plus in-process gvproxy/Go
+/// (clone3, rseq, netpoll, timers). `ptrace` is not listed.
+pub const AARCH64_ALLOWLIST: &[u32] = &[
     0,   // io_setup
     17,  // getcwd
+    19,  // eventfd2
+    20,  // epoll_create1
+    21,  // epoll_ctl
+    22,  // epoll_pwait
     23,  // dup
     24,  // dup3
     25,  // fcntl
     29,  // ioctl (KVM uses many)
     34,  // mkdirat
     35,  // unlinkat
-    37,  // renameat
+    38,  // renameat
     46,  // ftruncate
     48,  // faccessat
     49,  // chdir
-    50,  // fchmod
+    52,  // fchmod
     56,  // openat
     57,  // close
+    59,  // pipe2
     61,  // getdents64
     62,  // lseek
     63,  // read
@@ -162,23 +175,30 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
     80,  // fstat
     82,  // fsync
     83,  // fdatasync
+    93,  // exit
+    94,  // exit_group
     96,  // set_tid_address
     98,  // futex
     99,  // set_robust_list
+    101, // nanosleep
+    103, // setitimer
+    107, // timer_create
+    110, // timer_settime
+    111, // timer_delete
     113, // clock_gettime
     115, // clock_nanosleep
-    117, // rt_sigsuspend
-    122, // sched_setparam
+    122, // sched_setaffinity
+    123, // sched_getaffinity
     124, // sched_yield
     129, // kill
     130, // tkill
-    131, // sigaltstack
-    132, // rt_sigprocmask
-    133, // rt_sigpending
+    131, // tgkill
+    132, // sigaltstack
+    133, // rt_sigsuspend
     134, // rt_sigaction
-    135, // rt_sigpending
+    135, // rt_sigprocmask
     137, // rt_sigtimedwait
-    139, // rt_sigsuspend
+    139, // rt_sigreturn
     160, // uname
     167, // prctl
     172, // getpid
@@ -211,28 +231,34 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
     221, // execve
     222, // mmap
     226, // mprotect
-    228, // madvise
-    233, // exit
-    234, // exit_group
+    232, // mincore
+    233, // madvise
     242, // accept4
     260, // wait4
     261, // prlimit64
     278, // getrandom
-    281, // epoll_create1
-    282, // epoll_ctl
-    283, // epoll_pwait
     291, // statx
     293, // rseq
     435, // clone3
     439, // faccessat2
+    441, // epoll_pwait2
     449, // futex_waitv
 ];
+
+/// Default allowlist for the compiled architecture.
+#[cfg(target_arch = "x86_64")]
+pub const DEFAULT_ALLOWLIST: &[u32] = X86_64_ALLOWLIST;
+
+/// Default allowlist for the compiled architecture.
+#[cfg(target_arch = "aarch64")]
+pub const DEFAULT_ALLOWLIST: &[u32] = AARCH64_ALLOWLIST;
 
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
     clippy::missing_docs_in_private_items,
-    reason = "tests are allowed to use unwrap and omit docs"
+    clippy::indexing_slicing,
+    reason = "tests are allowed to use unwrap/indexing and omit docs"
 )]
 mod tests {
     use super::*;
@@ -249,9 +275,52 @@ mod tests {
         assert_eq!(AUDIT_ARCH, 0xc000_00b7);
     }
 
+    fn assert_sorted_unique(list: &[u32], arch: &str) {
+        assert!(!list.is_empty(), "{arch} allowlist is empty");
+        for window in list.windows(2) {
+            assert!(
+                window[0] < window[1],
+                "{arch} allowlist not strictly increasing: {} followed by {}",
+                window[0],
+                window[1]
+            );
+        }
+    }
+
     #[test]
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    fn allowlist_is_non_empty() {
-        assert!(!DEFAULT_ALLOWLIST.is_empty());
+    fn allowlists_are_sorted_and_unique() {
+        // Unsorted or duplicate nrs hide a hole until SIGSYS at create.
+        assert_sorted_unique(X86_64_ALLOWLIST, "x86_64");
+        assert_sorted_unique(AARCH64_ALLOWLIST, "aarch64");
+    }
+
+    #[test]
+    fn allowlists_include_clone3_and_rseq() {
+        // Go starts threads with these; TSYNC cannot add them after install.
+        assert!(
+            X86_64_ALLOWLIST.contains(&435),
+            "clone3 missing from x86_64 allowlist"
+        );
+        assert!(
+            X86_64_ALLOWLIST.contains(&334),
+            "rseq missing from x86_64 allowlist"
+        );
+        assert!(
+            AARCH64_ALLOWLIST.contains(&435),
+            "clone3 missing from aarch64 allowlist"
+        );
+        assert!(
+            AARCH64_ALLOWLIST.contains(&293),
+            "rseq missing from aarch64 allowlist"
+        );
+    }
+
+    #[test]
+    fn aarch64_allowlist_omits_ptrace() {
+        // Filter exists to block ptrace; 117 is ptrace on asm-generic.
+        assert!(
+            !AARCH64_ALLOWLIST.contains(&117),
+            "aarch64 allowlist must not contain ptrace"
+        );
     }
 }

@@ -23,6 +23,7 @@ libc.workspace = true
 serde_json.workspace = true
 tar.workspace = true
 tokio = { workspace = true, features = ["io-std"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tempfile.workspace = true

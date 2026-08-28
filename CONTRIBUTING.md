@@ -92,7 +92,8 @@ bux system info --format json
 - Guest agent: postcard protocol v9; Phase A process identity only.
 - Schema: SQLite `user_version` 5 — **no migrations**; wipe `BUX_HOME` on mismatch.
 
-Current architecture: `docs/bux-redesign.md`.
+Current architecture: `docs/bux-redesign.md`. Production-ready 1.0 bar:
+`docs/1.0-release-bar.md` (crate version for that increment: 0.8.0).
 
 ## Tests
 
@@ -101,18 +102,24 @@ cargo test -p bux --lib
 cargo test -p bux-proto --lib
 # Host-only smoke (no hypervisor). This is the GitHub-hosted CI gate:
 ./scripts/e2e/smoke.sh
-# Full VM e2e — documented **manual** gate on local HVF (Apple Silicon).
+# Full VM e2e — documented **manual** gate (HVF recorded; KVM needs /dev/kvm).
 # Never set BUX_E2E_FULL=1 on GitHub-hosted runners.
 BUX_E2E_FULL=1 ./scripts/e2e/smoke.sh
+# Load / chaos — same FULL pin as smoke (cli+shim, guest ELF). Manual HVF/KVM.
+# GitHub-hosted CI does not run these; e2e-host.yml stays BUX_E2E_FULL=0.
+BUX_E2E_FULL=1 ./scripts/e2e/load.sh
+BUX_E2E_FULL=1 ./scripts/e2e/chaos.sh
 ```
 
 `.github/workflows/e2e-host.yml` forces `BUX_E2E_FULL=0` on `ubuntu-latest` and
 `macos-latest`. Host-only is not production proof. `BUX_E2E_FULL=1` is not a CI
 job. GitHub-hosted runners must not set `BUX_E2E_FULL=1`. Self-hosted runners
-can take it later without redesign.
+can take it later without redesign. `load.sh` and `chaos.sh` are the same
+manual gate, not GitHub-hosted jobs.
 
 The first green FULL is recorded below on **local HVF (Apple Silicon)**.
-Host CI (`BUX_E2E_FULL=0`) is not that proof. KVM later without redesign.
+Host CI (`BUX_E2E_FULL=0`) is not that proof. Linux KVM has **no** Layer 1
+row in this tree (procedure under **Linux KVM FULL record**).
 
 ### Layer 1 FULL record
 
@@ -136,11 +143,36 @@ substring).
 | image reference | docker.io/library/alpine:latest |
 | image digest | sha256:e7a1a92a5bfeee40966aea60f0796b0e7917cc35591542701834f03a68fa3d18 |
 
-Leftover sibling `BUX_GUEST_PATH` host mode **0644** is OK to record (inject
-0555 is #108 sidecar). Item 7 `NO_ETH0` sysfs still counts as offline proof.
+Leftover sibling `BUX_GUEST_PATH` host mode **0644** is OK to record; Runtime
+inject writes the guest ELF at mode `0555`. Item 7 `NO_ETH0` sysfs still counts as offline proof.
 Item 5/7 wget-fail is unclassified; do not treat as HVF proof of
 `allow_net` / offline **policy**. This record is not GitHub-hosted
 `BUX_E2E_FULL=1`.
+
+### Linux KVM FULL record
+
+Empty. 0.8 ships **without** a Linux KVM FULL record until an operator with
+`/dev/kvm` runs `BUX_E2E_FULL=1 ./scripts/e2e/smoke.sh` and the script prints
+`OK (full e2e)`. Do not copy the HVF `uname`, git SHA, ELF sha256, or image
+digest. Do not invent those values or `SMOKE_EXIT=0`. Host identity is a
+checklist input, not a GitHub-hosted job. `.github/workflows/e2e-host.yml`
+keeps `BUX_E2E_FULL=0` on `ubuntu-latest`. If smoke fails, a code PR first.
+
+After that green run, fill a Layer 1 row from **that** host (capture binary
+`./target/debug/bux`, not PATH `bux`; `$BUX_HOME` without substring
+`bux-e2e`):
+
+| Field | How to capture |
+| ----- | -------------- |
+| Date | calendar date of the run |
+| uname | `uname -a` |
+| /dev/kvm | character device present (`test -c /dev/kvm`) |
+| rustc | `rustc --version` |
+| git | `git rev-parse HEAD` of the tree that ran smoke |
+| guest ELF sha256 | sha256 of `$BUX_GUEST_PATH` (the ELF smoke used) |
+| image digest | `./target/debug/bux images --format json` |
+| SMOKE_EXIT | `0` only with `OK (full e2e)` |
+| boot_s | optional; wall seconds create → first successful exec; not a fail gate |
 
 Capture `.host.*` with `./target/debug/bux system info --format json` and image
 reference/digest with `./target/debug/bux images --format json`. Pin `$BUX_HOME`
@@ -201,7 +233,7 @@ OCI (`bux pull` / `bux create IMAGE`).
 10. secrets: value not in `bux.db` or guest `/proc/1/environ`
 
 The Layer 1 record above is that green local HVF run. Host CI
-(`BUX_E2E_FULL=0`) is not that proof.
+(`BUX_E2E_FULL=0`) is not that proof. Linux KVM FULL remains empty.
 
 Items 11–15 are not in the `42f02b0` Layer 1 row.
 
@@ -222,6 +254,29 @@ Item 16 is not in the `42f02b0` Layer 1 row.
 Operator FULL 2026-08-28 on `04fca66945fe24fc16fda5aff113c8e4782cbc68`
 (capture binary `./target/debug/bux`, `$BUX_HOME=/Users/xu/bux-full-hvf-clone`)
 exited 0 including clone flatten (`SMOKE_EXIT=0`, `OK (full e2e)`).
+
+Item 17 is not in the Layer 1 or clone FULL rows.
+
+17. snapshot restore flatten: write `/restore-marker` → `bux snapshot create` →
+    `bux snapshot restore` → `exec` cat marker; source still listed; `rm`
+    restore; `rm` source drops snapshot rows (`ON DELETE CASCADE`)
+
+`scripts/e2e/load.sh` (`BUX_E2E_FULL=1`, dedicated `$BUX_HOME`):
+
+- `bux create` 8 detached alpine VMs (default 512 MiB each); all `bux ps` Running
+- 16 concurrent `Vm::exec_output(echo ok)` on **one** `Runtime`
+  (`crates/bux/examples/concurrent_exec.rs`); all exit 0. Not 16 `bux exec`
+  CLI processes (R5 exclusive `bux.lock`)
+- `bux rm -f` all 8; `bux ps -q` empty; no leftover `$BUX_HOME/disks/vms/*.qcow2`
+- If available RAM is below 8×512 MiB plus per-VM/host overhead, the script
+  exits with a message (no OOM flake)
+
+`scripts/e2e/chaos.sh` (`BUX_E2E_FULL=1`):
+
+- create → `kill -9` shim PID → `inspect` JSON `"Stopped"` within 5s → `bux rm`
+  without `-f`
+- no leftover overlay `$BUX_HOME/disks/vms/{id}.qcow2` for that id
+- no `ulimit` disk-full test
 
 Schema mismatches require `bux system reset` (or wiping `$BUX_HOME`).
 

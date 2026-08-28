@@ -32,9 +32,9 @@ impl std::fmt::Debug for MitmCa {
     }
 }
 
-/// Generate a fresh ECDSA P-256 CA certificate suitable for short-lived MITM.
+/// Generate a fresh ECDSA P-256 CA certificate suitable for MITM.
 ///
-/// Validity: roughly now−1m … now+24h (skew-tolerant, ephemeral).
+/// Validity: now−1m … now+10y (`not_before` skew).
 ///
 /// # Errors
 ///
@@ -52,7 +52,7 @@ pub fn generate() -> Result<MitmCa> {
 
     let now = OffsetDateTime::now_utc();
     params.not_before = now - Duration::minutes(1);
-    params.not_after = now + Duration::hours(24);
+    params.not_after = now + Duration::days(365 * 10);
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
     params.key_usages = vec![KeyUsagePurpose::CrlSign, KeyUsagePurpose::KeyCertSign];
 
@@ -85,5 +85,25 @@ mod tests {
         let dbg = format!("{ca:?}");
         assert!(dbg.contains("REDACTED"));
         assert!(!dbg.contains("BEGIN EC") && !dbg.contains("BEGIN PRIVATE"));
+    }
+
+    fn ca_not_after(pem: &str) -> OffsetDateTime {
+        let (_, block) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).unwrap();
+        block
+            .parse_x509()
+            .unwrap()
+            .validity()
+            .not_after
+            .to_datetime()
+    }
+
+    #[test]
+    fn generate_ca_not_after_is_ten_years() {
+        let ca = generate().unwrap();
+        let span = ca_not_after(&ca.cert_pem) - OffsetDateTime::now_utc();
+        assert!(
+            span >= Duration::days(365 * 10 - 1) && span <= Duration::days(365 * 10 + 1),
+            "not_after delta {span:?}"
+        );
     }
 }

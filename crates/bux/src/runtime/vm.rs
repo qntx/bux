@@ -33,6 +33,49 @@ use crate::state::{StateDb, Status, VmState};
 use crate::volumes::VolumeManager;
 use crate::watchdog::Keepalive;
 
+/// Inspect JSON egress label derived from [`NetworkSpec`].
+///
+/// Serializes as `"unrestricted"` | `"disabled"` | `{ "allow": [...] }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EgressClass {
+    /// [`NetworkSpec::Enabled`] with an empty allow-list (full egress).
+    Unrestricted,
+    /// [`NetworkSpec::Disabled`] (no virtio-net).
+    Disabled,
+    /// [`NetworkSpec::Enabled`] with a non-empty allow-list.
+    Allow(Vec<String>),
+}
+
+impl From<&NetworkSpec> for EgressClass {
+    fn from(spec: &NetworkSpec) -> Self {
+        match spec {
+            NetworkSpec::Disabled => Self::Disabled,
+            NetworkSpec::Enabled { allow_net } if allow_net.is_empty() => Self::Unrestricted,
+            NetworkSpec::Enabled { allow_net } => Self::Allow(allow_net.clone()),
+        }
+    }
+}
+
+impl Serialize for EgressClass {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            Self::Unrestricted => serializer.serialize_str("unrestricted"),
+            Self::Disabled => serializer.serialize_str("disabled"),
+            Self::Allow(allow) => {
+                #[derive(Serialize)]
+                struct AllowList<'a> {
+                    allow: &'a [String],
+                }
+                AllowList { allow }.serialize(serializer)
+            }
+        }
+    }
+}
+
 /// Read-only product view of a managed VM (no persist/engine internals).
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
@@ -53,6 +96,8 @@ pub struct VmInfo {
     pub published_ports: Vec<PublishedPort>,
     /// Guest network mode.
     pub network: NetworkSpec,
+    /// Egress class for inspect JSON (empty `allow_net` is unrestricted, not disabled).
+    pub egress: EgressClass,
     /// Actual isolation posture from last spawn.
     pub security: SecurityStatus,
     /// Requested isolation policy.
@@ -76,6 +121,7 @@ impl VmInfo {
             HealthStatus::Starting
         };
         let network = state.config.network.clone();
+        let egress = EgressClass::from(&network);
         Self {
             id: state.id.clone(),
             name: state.name.clone(),
@@ -85,6 +131,7 @@ impl VmInfo {
             health,
             published_ports: state.config.published_ports.clone(),
             network,
+            egress,
             security: state.config.security_status.clone(),
             security_options: state.config.security,
             isolation_note: PHASE_A_LIMITS,
@@ -816,5 +863,65 @@ impl Vm {
             self.db.update_status(&self.state.id, Status::Stopped)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "tests")]
+mod tests {
+    use super::*;
+    use crate::options::NetworkSpec;
+    use crate::state::{Status, VmConfig, VmState};
+    use std::path::PathBuf;
+    use std::time::SystemTime;
+
+    fn info_with_network(network: NetworkSpec) -> VmInfo {
+        VmInfo::from_stored(&VmState {
+            id: "aabbccddeeff".into(),
+            name: None,
+            pid: 1,
+            image: None,
+            socket: PathBuf::from("/tmp/x.sock"),
+            status: Status::Stopped,
+            config: VmConfig {
+                network,
+                ..VmConfig::default()
+            },
+            created_at: SystemTime::UNIX_EPOCH,
+        })
+    }
+
+    #[test]
+    fn egress_json_unrestricted() {
+        let info = info_with_network(NetworkSpec::Enabled {
+            allow_net: Vec::new(),
+        });
+        assert_eq!(info.egress, EgressClass::Unrestricted);
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["egress"], serde_json::json!("unrestricted"));
+    }
+
+    #[test]
+    fn egress_json_disabled() {
+        let info = info_with_network(NetworkSpec::Disabled);
+        assert_eq!(info.egress, EgressClass::Disabled);
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["egress"], serde_json::json!("disabled"));
+    }
+
+    #[test]
+    fn egress_json_allow_list() {
+        let info = info_with_network(NetworkSpec::Enabled {
+            allow_net: vec!["example.com".into(), "10.0.0.0/8".into()],
+        });
+        assert_eq!(
+            info.egress,
+            EgressClass::Allow(vec!["example.com".into(), "10.0.0.0/8".into()])
+        );
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(
+            json["egress"],
+            serde_json::json!({ "allow": ["example.com", "10.0.0.0/8"] })
+        );
     }
 }

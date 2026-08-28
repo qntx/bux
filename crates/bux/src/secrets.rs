@@ -151,7 +151,7 @@ fn mint_mitm_ca() -> crate::Result<(String, String)> {
 
     let now = OffsetDateTime::now_utc();
     params.not_before = now - time::Duration::minutes(1);
-    params.not_after = now + time::Duration::hours(24);
+    params.not_after = now + time::Duration::days(365 * 10);
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
     params.key_usages = vec![KeyUsagePurpose::CrlSign, KeyUsagePurpose::KeyCertSign];
 
@@ -189,5 +189,26 @@ mod tests {
     fn mint_produces_pem() {
         let live = LiveSecrets::mint(vec![Secret::new("A", ["h"], "v")]).unwrap();
         assert!(live.ca_cert_pem.contains("BEGIN CERTIFICATE"));
+    }
+
+    fn ca_not_after(pem: &str) -> time::OffsetDateTime {
+        let (_, block) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).unwrap();
+        block
+            .parse_x509()
+            .unwrap()
+            .validity()
+            .not_after
+            .to_datetime()
+    }
+
+    #[test]
+    fn mint_ca_not_after_is_ten_years() {
+        let live = LiveSecrets::mint(vec![Secret::new("A", ["h"], "v")]).unwrap();
+        let span = ca_not_after(&live.ca_cert_pem) - time::OffsetDateTime::now_utc();
+        assert!(
+            span >= time::Duration::days(365 * 10 - 1)
+                && span <= time::Duration::days(365 * 10 + 1),
+            "not_after delta {span:?}"
+        );
     }
 }

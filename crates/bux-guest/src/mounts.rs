@@ -108,9 +108,7 @@ pub fn mount_essential_tmpfs() {
 
 /// Mount each boot volume as `virtiofs`. Failure is fatal (agent does not listen).
 ///
-/// `GuestVolume::read_only` is not passed to `mount(2)`: libkrun virtio-fs is
-/// RW, and a guest `MS_RDONLY` would fake a guarantee the host share does not
-/// provide.
+/// Does not pass `MS_RDONLY`: RO is the virtio-fs device, not a guest remount.
 ///
 /// # Errors
 ///

@@ -28,6 +28,9 @@ pub struct ShimVirtioFs {
     pub tag: String,
     /// Absolute host path.
     pub path: String,
+    /// Read-only virtio-fs (`krun_add_virtiofs3`).
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 /// vsock port mapping (guest port ↔ host Unix socket).
@@ -300,5 +303,42 @@ mod tests {
         let cfg = ShimConfig::from_json(json).unwrap();
         assert!(cfg.gvproxy.is_none());
         assert!(cfg.network.is_none());
+    }
+
+    #[test]
+    fn virtiofs_read_only_roundtrip() {
+        let cfg = ShimConfig {
+            vcpus: 1,
+            ram_mib: 256,
+            rootfs: Some("/r".into()),
+            root_disk: None,
+            disk_format: ShimDiskFormat::Raw,
+            virtiofs: vec![ShimVirtioFs {
+                tag: "vol0".into(),
+                path: "/host/data".into(),
+                read_only: true,
+            }],
+            vsock_ports: vec![],
+            network: None,
+            gvproxy: None,
+            exec_path: None,
+            exec_args: vec![],
+            env: None,
+        };
+        let de = ShimConfig::from_json(&cfg.to_json().unwrap()).unwrap();
+        let share = de.virtiofs.first().expect("one share");
+        assert_eq!(share.tag, "vol0");
+        assert_eq!(share.path, "/host/data");
+        assert!(share.read_only);
+    }
+
+    #[test]
+    fn virtiofs_read_only_defaults_false() {
+        let json =
+            br#"{"vcpus":1,"ram_mib":256,"rootfs":"/r","virtiofs":[{"tag":"vol0","path":"/h"}]}"#;
+        let cfg = ShimConfig::from_json(json).unwrap();
+        let share = cfg.virtiofs.first().expect("one share");
+        assert_eq!(share.tag, "vol0");
+        assert!(!share.read_only);
     }
 }

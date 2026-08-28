@@ -1,7 +1,7 @@
 # bux-jail
 
-Process isolation for the `bux-shim` child process — L2 glue over L1
-primitives (`bux-bwrap`, `bux-seccomp`).
+Process isolation for the `bux-shim` child process (`bux-bwrap`,
+`bux-landlock`).
 
 ## Scope
 

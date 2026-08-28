@@ -40,7 +40,7 @@ pub struct VolumeMount {
     pub source: VolumeSource,
     /// Guest mount point. The agent mounts this at PID 1 from `GuestBootConfig.volumes`.
     pub guest_path: String,
-    /// Prefer read-only exposure (recorded; engine virtiofs is still RW in v1).
+    /// Guest sees this share as read-only.
     #[serde(default)]
     pub read_only: bool,
     /// Permit otherwise default-denied sensitive host prefixes.
@@ -73,7 +73,7 @@ impl VolumeMount {
         }
     }
 
-    /// Mark the mount read-only (metadata; virtiofs RW until engine supports RO).
+    /// Expose the share read-only in the guest.
     #[must_use]
     pub const fn read_only(mut self, yes: bool) -> Self {
         self.read_only = yes;
@@ -98,7 +98,7 @@ pub struct ResolvedVolume {
     pub host_path: PathBuf,
     /// Guest mount point. The agent mounts this at PID 1 from `GuestBootConfig.volumes`.
     pub guest_path: String,
-    /// Read-only preference.
+    /// Guest sees this share as read-only.
     pub read_only: bool,
     /// Named volume id when source was named; `None` for binds.
     pub volume_id: Option<String>,
@@ -532,10 +532,12 @@ mod tests {
         fs::create_dir_all(&host).unwrap();
         let db = Arc::new(StateDb::open(dir.path().join("bux.db")).unwrap());
         let vm = VolumeManager::open(dir.path(), db).unwrap();
-        let mounts = vec![VolumeMount::bind(&host, "/mnt/data")];
+        let mounts = vec![VolumeMount::bind(&host, "/mnt/data").read_only(true)];
         let resolved = vm.resolve_mounts(&mounts).unwrap();
         let first = resolved.first().expect("one resolved mount");
         assert_eq!(first.tag, "vol0");
         assert!(first.volume_id.is_none());
+        assert!(first.read_only);
+        assert!(first.to_virtiofs().read_only);
     }
 }

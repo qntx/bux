@@ -2,8 +2,7 @@
 //!
 //! The host `bux` Runtime serialises a [`ShimConfig`] and spawns the
 //! `bux-shim` binary (`bux-shim-bin`). Product path is [`prepare`] /
-//! optional [`install_seccomp`] / [`start`]. This library does not
-//! start gvproxy.
+//! [`install_seccomp`] / [`start`]. This library does not start gvproxy.
 
 mod apply;
 mod config;

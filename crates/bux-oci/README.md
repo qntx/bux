@@ -55,15 +55,15 @@ oci.remove("ubuntu:24.04")?;
 
 ## Storage Layout
 
+SQLite index plus content-addressed blobs (`src/store.rs`). Default root is
+`$BUX_HOME` or `<platform_data_dir>/bux`.
+
 ```text
-$BUX_HOME/                          # or <platform_data_dir>/bux
-├── images.json                     # Metadata index (reference, digest, size)
-└── rootfs/
-    ├── <storage_key>/              # Extracted filesystem tree
-    │   ├── bin/
-    │   ├── etc/
-    │   └── ...
-    └── <storage_key>.json          # Cached image config (Cmd, Env, ...)
+{root}/
+├── images.db                 # SQLite: image index + layer refs
+├── layers/                   # sha256-addressed layer tarballs
+├── configs/                  # sha256-addressed image config blobs
+└── rootfs/{digest}/          # extracted rootfs (keyed by manifest digest)
 ```
 
 Layers are applied in order (bottom → top) via sequential tar extraction into a single directory, producing a merged rootfs equivalent to an overlay filesystem.
@@ -71,8 +71,9 @@ Layers are applied in order (bottom → top) via sequential tar extraction into 
 ## Limitations
 
 - **Pull-only** — no OCI image build or push. Image creation is out of scope.
-- **No layer deduplication** — each image stores a fully merged rootfs. Shared base layers are not deduplicated across images.
+- **No overlay sharing of merged rootfs** — each manifest digest has its own `rootfs/{digest}/` tree. Layer tarballs in `layers/` are content-addressed and ref-counted across images.
 
 ## License
 
-Same as the parent `bux` project. See [LICENSE](../LICENSE).
+Same as the parent `bux` project. See [`LICENSE-MIT`](../../LICENSE-MIT) and
+[`LICENSE-APACHE`](../../LICENSE-APACHE).

@@ -1,7 +1,58 @@
 //! `bux run` — create and run a command in a new micro-VM.
 
 use anyhow::{Context, Result};
-use bux::{NetworkSpec, VmOptions};
+use bux::{NetworkSpec, SecurityOptions, VmOptions};
+
+/// Isolation flags shared by `bux run` and `bux create`.
+///
+/// Clap bools are `--flag` / `--no-flag` (not `--flag true|false`). Absent flags
+/// keep `SecurityOptions` defaults.
+#[derive(clap::Args, Debug, Clone, Copy)]
+struct SecurityArgs {
+    /// Use the platform jailer (bwrap / seatbelt). Default on.
+    #[arg(long, overrides_with = "no_jailer")]
+    jailer: bool,
+
+    /// Disable the platform jailer.
+    #[arg(long, overrides_with = "jailer")]
+    no_jailer: bool,
+
+    /// Request Landlock LSM. Default on Linux, off elsewhere.
+    #[arg(long, overrides_with = "no_landlock")]
+    landlock: bool,
+
+    /// Disable Landlock.
+    #[arg(long, overrides_with = "landlock")]
+    no_landlock: bool,
+
+    /// Continue if a requested isolation layer is unavailable.
+    #[arg(long)]
+    allow_degraded: bool,
+}
+
+impl SecurityArgs {
+    fn options(self) -> SecurityOptions {
+        let defaults = SecurityOptions::default();
+        SecurityOptions::new()
+            .jailer(resolve_flag(self.jailer, self.no_jailer, defaults.jailer))
+            .landlock(resolve_flag(
+                self.landlock,
+                self.no_landlock,
+                defaults.landlock,
+            ))
+            .allow_degraded(self.allow_degraded)
+    }
+}
+
+const fn resolve_flag(on: bool, off: bool, default: bool) -> bool {
+    if off {
+        false
+    } else if on {
+        true
+    } else {
+        default
+    }
+}
 
 /// Arguments for `bux run`.
 ///
@@ -54,6 +105,9 @@ pub struct RunArgs {
     /// Network mode: `enabled` (gvproxy, default) or `disabled` (offline).
     #[arg(long, default_value = "enabled", value_parser = ["enabled", "disabled"])]
     network: String,
+
+    #[command(flatten)]
+    security: SecurityArgs,
 
     /// Host MITM secret (`name=value@host1,host2` or `name=value` using --allow-net hosts).
     ///
@@ -133,6 +187,9 @@ pub struct CreateArgs {
     #[arg(long, default_value = "enabled", value_parser = ["enabled", "disabled"])]
     network: String,
 
+    #[command(flatten)]
+    security: SecurityArgs,
+
     /// Host MITM secret (`name=value@host` or `name=value`).
     ///
     /// Visible on `/proc/<pid>/cmdline`. Prefer `--secret-file` on shared hosts.
@@ -163,6 +220,7 @@ impl CreateArgs {
             publish: self.publish,
             allow_net: self.allow_net,
             network: self.network,
+            security: self.security,
             secrets: self.secrets,
             secret_file: self.secret_file,
             volume: self.volume,
@@ -197,7 +255,8 @@ impl RunArgs {
             .vcpus(self.cpus)
             .ram_mib(self.memory)
             .auto_remove(self.rm)
-            .detach(self.detach);
+            .detach(self.detach)
+            .security(self.security.options());
 
         if let Some(ref n) = self.name {
             opts = opts.name(n.clone());
@@ -523,5 +582,156 @@ mod secret_tests {
         assert_eq!(secrets[0].name, "k");
         assert_eq!(secrets[0].value, "v");
         assert_eq!(secrets[0].hosts, vec!["api.example.com"]);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "tests"
+)]
+mod security_flag_tests {
+    use super::*;
+    use clap::{CommandFactory, Parser};
+
+    #[derive(Parser)]
+    #[command(name = "run")]
+    struct RunParser {
+        #[command(flatten)]
+        args: RunArgs,
+    }
+
+    #[derive(Parser)]
+    #[command(name = "create")]
+    struct CreateParser {
+        #[command(flatten)]
+        args: CreateArgs,
+    }
+
+    fn parse_run(argv: &[&str]) -> RunArgs {
+        RunParser::try_parse_from(std::iter::once("run").chain(argv.iter().copied()))
+            .unwrap_or_else(|e| panic!("{e}"))
+            .args
+    }
+
+    fn parse_create(argv: &[&str]) -> CreateArgs {
+        CreateParser::try_parse_from(std::iter::once("create").chain(argv.iter().copied()))
+            .unwrap_or_else(|e| panic!("{e}"))
+            .args
+    }
+
+    #[test]
+    fn run_defaults_match_library() {
+        let opts = parse_run(&["alpine"]).security.options();
+        assert_eq!(opts, SecurityOptions::default());
+    }
+
+    #[test]
+    fn create_defaults_match_library() {
+        let opts = parse_create(&["alpine"]).security.options();
+        assert_eq!(opts, SecurityOptions::default());
+    }
+
+    #[test]
+    fn run_no_jailer() {
+        let opts = parse_run(&["--no-jailer", "alpine"]).security.options();
+        assert!(!opts.jailer);
+        assert_eq!(opts.landlock, SecurityOptions::default().landlock);
+        assert!(!opts.allow_degraded);
+    }
+
+    #[test]
+    fn create_no_jailer() {
+        let opts = parse_create(&["--no-jailer", "alpine"]).security.options();
+        assert!(!opts.jailer);
+    }
+
+    #[test]
+    fn run_jailer_explicit() {
+        let opts = parse_run(&["--jailer", "alpine"]).security.options();
+        assert!(opts.jailer);
+    }
+
+    #[test]
+    fn run_no_landlock() {
+        let opts = parse_run(&["--no-landlock", "alpine"]).security.options();
+        assert!(!opts.landlock);
+    }
+
+    #[test]
+    fn run_landlock_explicit() {
+        let opts = parse_run(&["--landlock", "alpine"]).security.options();
+        assert!(opts.landlock);
+    }
+
+    #[test]
+    fn create_landlock_and_degraded() {
+        let opts = parse_create(&["alpine", "--landlock", "--allow-degraded"])
+            .security
+            .options();
+        assert!(opts.landlock);
+        assert!(opts.allow_degraded);
+    }
+
+    #[test]
+    fn run_allow_degraded() {
+        let opts = parse_run(&["--allow-degraded", "alpine"])
+            .security
+            .options();
+        assert!(opts.allow_degraded);
+    }
+
+    #[test]
+    fn last_flag_wins_no_jailer() {
+        let opts = parse_run(&["--jailer", "--no-jailer", "alpine"])
+            .security
+            .options();
+        assert!(!opts.jailer);
+    }
+
+    #[test]
+    fn last_flag_wins_jailer() {
+        let opts = parse_run(&["--no-jailer", "--jailer", "alpine"])
+            .security
+            .options();
+        assert!(opts.jailer);
+    }
+
+    #[test]
+    fn jailer_does_not_take_true_false_value() {
+        let err = RunParser::try_parse_from(["run", "--jailer=false", "alpine"])
+            .err()
+            .expect("--jailer is a switch, not --jailer=false");
+        assert!(err.to_string().contains("unexpected value"), "{err}");
+    }
+
+    #[test]
+    fn run_help_lists_pairs() {
+        let help = RunParser::command().render_long_help().to_string();
+        for flag in [
+            "--jailer",
+            "--no-jailer",
+            "--landlock",
+            "--no-landlock",
+            "--allow-degraded",
+        ] {
+            assert!(help.contains(flag), "missing {flag} in {help}");
+        }
+    }
+
+    #[test]
+    fn create_help_lists_pairs() {
+        let help = CreateParser::command().render_long_help().to_string();
+        for flag in [
+            "--jailer",
+            "--no-jailer",
+            "--landlock",
+            "--no-landlock",
+            "--allow-degraded",
+        ] {
+            assert!(help.contains(flag), "missing {flag} in {help}");
+        }
     }
 }

@@ -29,13 +29,15 @@ use crate::Result;
 use crate::options::{ImageRef, NetworkSpec, VmOptions};
 use crate::ports::parse_publish_spec;
 use crate::process::merge_image_config;
+use crate::security::HostInfo;
 use crate::state::{VirtioFs, VmConfig};
 
 /// Create and start a managed VM from product options.
 ///
 /// # Errors
 ///
-/// Propagates image pull, disk, network, spawn, or agent-ready failures.
+/// Propagates validation, missing virtualization, image pull, disk, network,
+/// spawn, or agent-ready failures.
 pub(crate) async fn create(
     rt: &Runtime,
     mut opts: VmOptions,
@@ -43,6 +45,7 @@ pub(crate) async fn create(
 ) -> Result<Vm> {
     on_progress("validating options");
     validate(&opts)?;
+    require_virtualization(HostInfo::probe().virtualization)?;
 
     on_progress("resolving image");
     let resolved = resolve_image(rt, &opts.image, &on_progress).await?;
@@ -96,6 +99,16 @@ pub(crate) async fn create(
 
     on_progress("running");
     Ok(vm)
+}
+
+/// Reject create before image pull/disk work when hardware virtualization is absent.
+fn require_virtualization(virtualization: bool) -> Result<()> {
+    if !virtualization {
+        return Err(crate::Error::SecurityUnavailable(
+            "no hardware virtualization (KVM / HVF)".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Validate product options before expensive work.
@@ -261,5 +274,13 @@ mod tests {
         opts = VmOptions::from_image("alpine");
         opts.ram_mib = 0;
         assert!(validate(&opts).is_err());
+    }
+
+    #[test]
+    fn require_virtualization_false_is_unavailable() {
+        let err = require_virtualization(false).unwrap_err();
+        assert!(matches!(err, crate::Error::SecurityUnavailable(_)));
+        assert_eq!(err.to_string(), "no hardware virtualization (KVM / HVF)");
+        assert!(require_virtualization(true).is_ok());
     }
 }

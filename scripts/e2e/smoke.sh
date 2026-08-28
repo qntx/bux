@@ -181,6 +181,7 @@ echo "==> help for new commands"
 bux create --help >/dev/null
 bux logs --help >/dev/null
 bux run --help | grep -q secret
+bux snapshot restore --help >/dev/null
 bux system reset --help >/dev/null
 
 if [[ "${BUX_E2E_FULL:-}" != "1" ]]; then
@@ -244,6 +245,41 @@ require_wget_fail() {
       return 1
       ;;
   esac
+}
+
+# Handshake only (no secret in the request). MITM intercepts the secret host.
+guest_https_probe() {
+  local target="$1"
+  local host="$2"
+  local timeout="${3:-10}"
+  bux exec "${target}" -- sh -c "
+    if command -v wget >/dev/null 2>&1; then
+      w() { wget -qO- -T ${timeout} https://${host}/; }
+    elif command -v busybox >/dev/null 2>&1; then
+      w() { busybox wget -qO- -T ${timeout} https://${host}/; }
+    else
+      echo HTTPS_MISSING
+      exit 1
+    fi
+    body=\$(w) || { echo HTTPS_FAIL; exit 0; }
+    if [ -n \"\$body\" ]; then
+      echo HTTPS_OK
+    else
+      echo HTTPS_EMPTY
+    fi
+  "
+}
+
+require_https_ok() {
+  local status
+  status="$(retry_until_needle HTTPS_OK "${WGET_OK_DEADLINE_SECS}" "${WGET_OK_SLEEP_SECS}" guest_https_probe "$1" "$2" "$3")" || {
+    echo "$4: expected https handshake, got ${status:-empty}"
+    return 1
+  }
+  if [[ "${status}" != *HTTPS_OK* ]]; then
+    echo "$4: expected https handshake, got ${status:-empty}"
+    return 1
+  fi
 }
 
 # Alpine busybox has no httpd; busybox-extras does. httpd without -f daemonizes
@@ -452,6 +488,21 @@ vol_ls="$(bux exec "${VOL}" -- ls /data)"
 echo "${vol_ls}" | grep -q marker
 bux rm -f "${VOL}"
 
+# :ro is engine-enforced (krun_add_virtiofs3), not a guest remount.
+RO="e2e-vol-ro-$(date +%s)"
+RO_HOST="${BUX_HOME}/vol-ro-src"
+mkdir -p "${RO_HOST}"
+printf 'ro-ok\n' > "${RO_HOST}/marker"
+echo "==> volume :ro ${RO} (${RO_HOST}:/data:ro)"
+create_or_dump --name "${RO}" -v "${RO_HOST}:/data:ro" "${IMAGE}"
+bux exec "${RO}" -- cat /data/marker | grep -qx ro-ok
+if bux exec "${RO}" -- touch /data/should-fail; then
+  echo "volume :ro failed: guest touch succeeded"
+  bux rm -f "${RO}" || true
+  exit 1
+fi
+bux rm -f "${RO}"
+
 # stop / restart / rm of a detach=true VM: each CLI exit must leave the VM as designed.
 LIFE="e2e-life-$(date +%s)"
 echo "==> detach lifecycle ${LIFE} (stop/restart/rm)"
@@ -465,8 +516,9 @@ bux rm "${LIFE}"
 
 SEC="e2e-sec-$(date +%s)"
 SECRET_VAL="e2e-s3cr3t-n0t-persisted-$$"
-echo "==> secrets not in sqlite or guest environ ${SEC}"
-create_or_dump --name "${SEC}" --secret "e2e=${SECRET_VAL}@example.com" "${IMAGE}"
+SEC_HOST="example.com"
+echo "==> secrets not in sqlite or guest environ; HTTPS handshake ${SEC}"
+create_or_dump --name "${SEC}" --secret "e2e=${SECRET_VAL}@${SEC_HOST}" "${IMAGE}"
 if grep -a -F "${SECRET_VAL}" "${BUX_HOME}/bux.db" >/dev/null 2>&1; then
   echo "secrets: value found in bux.db"
   bux rm -f "${SEC}" || true
@@ -475,6 +527,10 @@ fi
 bux exec "${SEC}" -- cat /proc/1/environ > "${BUX_HOME}/guest-environ.bin"
 if grep -a -F "${SECRET_VAL}" "${BUX_HOME}/guest-environ.bin" >/dev/null; then
   echo "secrets: value found in guest /proc/1/environ"
+  bux rm -f "${SEC}" || true
+  exit 1
+fi
+if ! require_https_ok "${SEC}" "${SEC_HOST}" 10 "secrets https handshake"; then
   bux rm -f "${SEC}" || true
   exit 1
 fi
@@ -529,5 +585,23 @@ bux clone "${CSRC}" --name "${CDST}"
 cloned="$(bux exec "${CDST}" -- cat /clone-marker)"
 echo "${cloned}" | grep -qx cloned
 bux rm -f "${CDST}" "${CSRC}"
+
+RSRC="e2e-rsrc-$(date +%s)"
+RDST="e2e-rdst-$(date +%s)"
+echo "==> snapshot restore flatten ${RSRC} -> ${RDST}"
+create_or_dump --name "${RSRC}" "${IMAGE}"
+bux exec "${RSRC}" -- sh -c 'printf "%s\n" restored > /restore-marker && sync'
+rsid="$(bux snapshot create --name e2e-restore "${RSRC}")"
+test -n "${rsid}"
+bux snapshot restore "${rsid}" --name "${RDST}"
+restored="$(bux exec "${RDST}" -- cat /restore-marker)"
+echo "${restored}" | grep -qx restored
+bux inspect "${RSRC}" >/dev/null
+bux rm -f "${RDST}"
+bux rm -f "${RSRC}"
+if bux snapshot restore "${rsid}" --name e2e-restore-gone; then
+  echo "restore after rm source should be NotFound"
+  exit 1
+fi
 
 echo "OK (full e2e)"

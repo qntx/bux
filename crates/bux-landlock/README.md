@@ -43,10 +43,6 @@ if let Some(fd) = fd_opt {
 - Linux 5.13+ < 6.7 (no network rules): `deny_network()` silently
   no-ops thanks to the `BestEffort` compatibility mode.
 
-## Status
-
-Fresh crate, extracted per the Phase 1 L1 refactor. See
-`docs/design/L1-platform-primitives.md` in the workspace root for the
-design rationale.
+Used by `bux-jail`. Architecture: [`docs/bux-redesign.md`](../../docs/bux-redesign.md).
 
 [`landlock`]: https://crates.io/crates/landlock

@@ -32,6 +32,7 @@ tokio = { workspace = true, features = ["io-util", "net", "time"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+x509-parser = "0.18"
 
 [lints]
 workspace = true

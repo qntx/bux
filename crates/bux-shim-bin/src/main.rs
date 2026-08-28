@@ -59,14 +59,13 @@ fn main() {
     }
 }
 
-/// Start optional gvproxy, prepare libkrun, seccomp when offline, then enter.
+/// Start optional gvproxy, prepare libkrun, install seccomp, then enter.
 #[cfg(unix)]
 fn run(cfg: &bux_shim::ShimConfig) -> Result<(), String> {
     let gvp = start_gvproxy(cfg)?;
     let prepared = bux_shim::prepare(cfg).map_err(|e| e.to_string())?;
-    if gvp.is_none() {
-        bux_shim::install_seccomp().map_err(|e| e.to_string())?;
-    }
+    // After GvproxyInstance::new so existing Go threads inherit via TSYNC.
+    bux_shim::install_seccomp().map_err(|e| e.to_string())?;
     let start_result = prepared.start();
     drop(gvp);
     start_result.map_err(|e| e.to_string())
@@ -169,5 +168,25 @@ mod tests {
     fn both_none_skips_gvproxy() {
         let cfg = base_cfg();
         assert!(start_gvproxy(&cfg).unwrap().is_none());
+    }
+
+    #[test]
+    fn run_installs_seccomp_after_gvproxy_unconditionally() {
+        // Networked shims are the common path; a gvp.is_none() guard skips the filter.
+        let src = include_str!("main.rs");
+        let start = src.find("fn run(").unwrap();
+        let run_and_after = src.get(start..).unwrap();
+        let end = run_and_after.find("fn start_gvproxy(").unwrap();
+        let run = run_and_after.get(..end).unwrap();
+        assert!(
+            !run.contains("gvp.is_none()"),
+            "run must not skip seccomp when gvproxy is in-process:\n{run}"
+        );
+        let gvp_at = run.find("start_gvproxy(").unwrap();
+        let seccomp_at = run.find("install_seccomp()").unwrap();
+        assert!(
+            gvp_at < seccomp_at,
+            "install_seccomp must run after start_gvproxy:\n{run}"
+        );
     }
 }

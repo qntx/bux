@@ -2,7 +2,9 @@
 //!
 //! A snapshot copies the current QCOW2 overlay disk, optionally quiescing
 //! guest filesystems first (via `FIFREEZE`) for consistency. Snapshots can
-//! be listed or deleted.
+//! be listed or deleted. Restore is [`crate::Runtime::restore`]: flatten the
+//! snapshot overlay into a new base, then create like clone. Snapshot rows
+//! are `ON DELETE CASCADE` on the source VM.
 //!
 //! The snapshot workflow:
 //! 1. Quiesce guest filesystems (if VM is running).

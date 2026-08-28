@@ -233,6 +233,7 @@ fn to_shim_config(
             .map(|v| ShimVirtioFs {
                 tag: v.tag.clone(),
                 path: v.path.clone(),
+                read_only: v.read_only,
             })
             .collect(),
         vsock_ports: config
@@ -481,6 +482,24 @@ mod tests {
         let shim = to_shim_config(&cfg, None, None);
         assert!(shim.network.is_none());
         assert!(shim.gvproxy.is_none());
+    }
+
+    #[test]
+    fn to_shim_config_copies_virtiofs_read_only() {
+        let cfg = VmConfig {
+            virtiofs: vec![state::VirtioFs {
+                tag: "vol0".into(),
+                path: "/host/data".into(),
+                guest_path: "/data".into(),
+                read_only: true,
+            }],
+            ..VmConfig::default()
+        };
+        let shim = to_shim_config(&cfg, None, None);
+        let share = shim.virtiofs.first().unwrap();
+        assert_eq!(share.tag, "vol0");
+        assert_eq!(share.path, "/host/data");
+        assert!(share.read_only);
     }
 
     #[test]

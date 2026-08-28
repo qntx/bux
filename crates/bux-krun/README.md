@@ -3,10 +3,9 @@
 Safe FFI wrapper for [`libkrun`](https://github.com/libkrun/libkrun) — a
 lightweight VM engine for sandboxed code execution.
 
-> This crate is the L1 platform primitive. Higher-level RAII/Builder
-> abstractions live in the [`bux`](https://crates.io/crates/bux) crate;
-> direct consumers of the C ABI can still reach the raw bindings via
-> the [`sys`](./src/sys.rs) module.
+Higher-level Runtime/Vm APIs live in the [`bux`](https://crates.io/crates/bux)
+crate. Direct consumers of the C ABI can still reach the raw bindings via
+[`sys`](./src/sys.rs).
 
 ## Layout
 

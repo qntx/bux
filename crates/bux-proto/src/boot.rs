@@ -26,14 +26,11 @@ pub enum GuestNetworkMode {
 /// virtio-fs share the guest agent must mount before vsock listen.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GuestVolume {
-    /// libkrun virtio-fs tag from `krun_add_virtiofs`.
+    /// libkrun virtio-fs tag from `krun_add_virtiofs3`.
     pub tag: String,
     /// Absolute guest mount point (no `..`; not filesystem root).
     pub guest_path: String,
-    /// Read-only preference recorded by the host.
-    ///
-    /// Best-effort metadata: libkrun does not pass a RO flag today, so the
-    /// kernel mount is RW even when this is `true`. Not a guest mount option.
+    /// Host share is read-only. Not a guest `MS_RDONLY` mount flag.
     #[serde(default)]
     pub read_only: bool,
 }
@@ -95,8 +92,6 @@ pub struct GuestBootConfig {
     #[serde(default)]
     pub vm_id: String,
     /// virtio-fs volumes to mount at PID 1 (tag → `guest_path`).
-    ///
-    /// `GuestVolume::read_only` is metadata only; see that field.
     #[serde(default)]
     pub volumes: Vec<GuestVolume>,
 }
