@@ -92,7 +92,8 @@ bux system info --format json
 - Guest agent: postcard protocol v9; Phase A process identity only.
 - Schema: SQLite `user_version` 5 — **no migrations**; wipe `BUX_HOME` on mismatch.
 
-Current architecture: `docs/bux-redesign.md`.
+Current architecture: `docs/bux-redesign.md`. Production-ready 1.0 bar:
+`docs/1.0-release-bar.md` (crate version for that increment: 0.8.0).
 
 ## Tests
 
@@ -136,8 +137,8 @@ substring).
 | image reference | docker.io/library/alpine:latest |
 | image digest | sha256:e7a1a92a5bfeee40966aea60f0796b0e7917cc35591542701834f03a68fa3d18 |
 
-Leftover sibling `BUX_GUEST_PATH` host mode **0644** is OK to record (inject
-0555 is #108 sidecar). Item 7 `NO_ETH0` sysfs still counts as offline proof.
+Leftover sibling `BUX_GUEST_PATH` host mode **0644** is OK to record; Runtime
+inject writes the guest ELF at mode `0555`. Item 7 `NO_ETH0` sysfs still counts as offline proof.
 Item 5/7 wget-fail is unclassified; do not treat as HVF proof of
 `allow_net` / offline **policy**. This record is not GitHub-hosted
 `BUX_E2E_FULL=1`.

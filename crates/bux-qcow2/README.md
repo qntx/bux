@@ -36,8 +36,5 @@ assert_eq!(hdr.virtual_size, 1 << 30);
 # Ok::<_, bux_qcow2::Error>(())
 ```
 
-## Status
-
-Extracted from the `bux` main crate as part of the Phase 1 L1 refactor.
-See `docs/design/L1-platform-primitives.md` in the workspace root for the
-design rationale.
+Used by the `bux` Runtime for overlay create/flatten. Architecture:
+[`docs/bux-redesign.md`](../../docs/bux-redesign.md).

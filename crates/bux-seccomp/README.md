@@ -28,8 +28,4 @@ bux_seccomp::install_default()?;
 # fn main() {}
 ```
 
-## Status
-
-Extracted from the `bux` main crate as part of the Phase 1 L1 refactor.
-See `docs/design/L1-platform-primitives.md` in the workspace root for
-the design rationale.
+Used by `bux-shim` / `bux-shim-bin`. Architecture: [`docs/bux-redesign.md`](../../docs/bux-redesign.md).
