@@ -40,7 +40,7 @@ pub struct VolumeMount {
     pub source: VolumeSource,
     /// Guest mount point. The agent mounts this at PID 1 from `GuestBootConfig.volumes`.
     pub guest_path: String,
-    /// Read-only virtio-fs (`krun_add_virtiofs3`).
+    /// Guest sees this share as read-only.
     #[serde(default)]
     pub read_only: bool,
     /// Permit otherwise default-denied sensitive host prefixes.
@@ -73,7 +73,7 @@ impl VolumeMount {
         }
     }
 
-    /// Expose the share read-only via `krun_add_virtiofs3`.
+    /// Expose the share read-only in the guest.
     #[must_use]
     pub const fn read_only(mut self, yes: bool) -> Self {
         self.read_only = yes;
@@ -98,7 +98,7 @@ pub struct ResolvedVolume {
     pub host_path: PathBuf,
     /// Guest mount point. The agent mounts this at PID 1 from `GuestBootConfig.volumes`.
     pub guest_path: String,
-    /// Read-only virtio-fs (`krun_add_virtiofs3`).
+    /// Guest sees this share as read-only.
     pub read_only: bool,
     /// Named volume id when source was named; `None` for binds.
     pub volume_id: Option<String>,

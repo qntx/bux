@@ -363,7 +363,21 @@ mod tests {
                 },
             ]
         );
-        ro_err.expect_err("krun_add_virtiofs3");
-        rw_err.expect_err("krun_add_virtiofs3");
+        assert!(
+            matches!(
+                &ro_err,
+                Err(Error::Krun(bux_krun::Error::Krun { op, code }))
+                    if *op == "add_virtiofs3" && *code < 0
+            ),
+            "{ro_err:?}"
+        );
+        assert!(
+            matches!(
+                &rw_err,
+                Err(Error::Krun(bux_krun::Error::Krun { op, code }))
+                    if *op == "add_virtiofs3" && *code < 0
+            ),
+            "{rw_err:?}"
+        );
     }
 }
