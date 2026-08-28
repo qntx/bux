@@ -179,4 +179,28 @@ mod tests {
         assert_eq!(r.read_write_paths().len(), 1);
         assert!(r.network_denied());
     }
+
+    #[test]
+    fn parent_read_and_leaf_write_stay_on_separate_lists() {
+        let r = PathRestrictions::new()
+            .allow_read("/dev")
+            .allow_read_write("/dev/kvm")
+            .allow_read_write("/dev/null")
+            .allow_read_write("/dev/zero")
+            .allow_read_write("/dev/urandom")
+            .allow_read_write("/dev/random")
+            .allow_read_write("/dev/shm");
+        assert_eq!(r.read_paths(), [Path::new("/dev")]);
+        assert_eq!(
+            r.read_write_paths(),
+            [
+                Path::new("/dev/kvm"),
+                Path::new("/dev/null"),
+                Path::new("/dev/zero"),
+                Path::new("/dev/urandom"),
+                Path::new("/dev/random"),
+                Path::new("/dev/shm"),
+            ]
+        );
+    }
 }
