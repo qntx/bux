@@ -102,7 +102,7 @@ cargo test -p bux --lib
 cargo test -p bux-proto --lib
 # Host-only smoke (no hypervisor). This is the GitHub-hosted CI gate:
 ./scripts/e2e/smoke.sh
-# Full VM e2e — documented **manual** gate on local HVF (Apple Silicon).
+# Full VM e2e — documented **manual** gate (HVF recorded; KVM needs /dev/kvm).
 # Never set BUX_E2E_FULL=1 on GitHub-hosted runners.
 BUX_E2E_FULL=1 ./scripts/e2e/smoke.sh
 # Load / chaos — same FULL pin as smoke (cli+shim, guest ELF). Manual HVF/KVM.
@@ -118,7 +118,8 @@ can take it later without redesign. `load.sh` and `chaos.sh` are the same
 manual gate, not GitHub-hosted jobs.
 
 The first green FULL is recorded below on **local HVF (Apple Silicon)**.
-Host CI (`BUX_E2E_FULL=0`) is not that proof. KVM later without redesign.
+Host CI (`BUX_E2E_FULL=0`) is not that proof. Linux KVM has **no** Layer 1
+row in this tree (procedure under **Linux KVM FULL record**).
 
 ### Layer 1 FULL record
 
@@ -147,6 +148,31 @@ inject writes the guest ELF at mode `0555`. Item 7 `NO_ETH0` sysfs still counts 
 Item 5/7 wget-fail is unclassified; do not treat as HVF proof of
 `allow_net` / offline **policy**. This record is not GitHub-hosted
 `BUX_E2E_FULL=1`.
+
+### Linux KVM FULL record
+
+Empty. 0.8 ships **without** a Linux KVM FULL record until an operator with
+`/dev/kvm` runs `BUX_E2E_FULL=1 ./scripts/e2e/smoke.sh` and the script prints
+`OK (full e2e)`. Do not copy the HVF `uname`, git SHA, ELF sha256, or image
+digest. Do not invent those values or `SMOKE_EXIT=0`. Host identity is a
+checklist input, not a GitHub-hosted job. `.github/workflows/e2e-host.yml`
+keeps `BUX_E2E_FULL=0` on `ubuntu-latest`. If smoke fails, a code PR first.
+
+After that green run, fill a Layer 1 row from **that** host (capture binary
+`./target/debug/bux`, not PATH `bux`; `$BUX_HOME` without substring
+`bux-e2e`):
+
+| Field | How to capture |
+| ----- | -------------- |
+| Date | calendar date of the run |
+| uname | `uname -a` |
+| /dev/kvm | character device present (`test -c /dev/kvm`) |
+| rustc | `rustc --version` |
+| git | `git rev-parse HEAD` of the tree that ran smoke |
+| guest ELF sha256 | sha256 of `$BUX_GUEST_PATH` (the ELF smoke used) |
+| image digest | `./target/debug/bux images --format json` |
+| SMOKE_EXIT | `0` only with `OK (full e2e)` |
+| boot_s | optional; wall seconds create → first successful exec; not a fail gate |
 
 Capture `.host.*` with `./target/debug/bux system info --format json` and image
 reference/digest with `./target/debug/bux images --format json`. Pin `$BUX_HOME`
@@ -207,7 +233,7 @@ OCI (`bux pull` / `bux create IMAGE`).
 10. secrets: value not in `bux.db` or guest `/proc/1/environ`
 
 The Layer 1 record above is that green local HVF run. Host CI
-(`BUX_E2E_FULL=0`) is not that proof.
+(`BUX_E2E_FULL=0`) is not that proof. Linux KVM FULL remains empty.
 
 Items 11–15 are not in the `42f02b0` Layer 1 row.
 
