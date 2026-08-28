@@ -18,8 +18,7 @@ pub const AUDIT_ARCH: u32 = 0xc000_00b7;
 ///
 /// Sorted and unique; frozen by a unit test. Covers libkrun plus the
 /// in-process gvproxy/Go runtime (clone3, rseq, netpoll, timers).
-#[cfg(target_arch = "x86_64")]
-pub const DEFAULT_ALLOWLIST: &[u32] = &[
+pub const X86_64_ALLOWLIST: &[u32] = &[
     0,   // read
     1,   // write
     2,   // open
@@ -138,11 +137,10 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
 
 /// Syscalls allowed for the bux-shim VMM process on `aarch64`.
 ///
-/// Sorted and unique; frozen by a unit test. Numbers from
+/// Sorted and unique; frozen by a unit test. Numbers and names from
 /// `asm-generic/unistd.h`. Covers libkrun plus in-process gvproxy/Go
-/// (clone3, rseq, netpoll, timers).
-#[cfg(target_arch = "aarch64")]
-pub const DEFAULT_ALLOWLIST: &[u32] = &[
+/// (clone3, rseq, netpoll, timers). `ptrace` is not listed.
+pub const AARCH64_ALLOWLIST: &[u32] = &[
     0,   // io_setup
     17,  // getcwd
     19,  // eventfd2
@@ -155,11 +153,11 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
     29,  // ioctl (KVM uses many)
     34,  // mkdirat
     35,  // unlinkat
-    37,  // renameat
+    38,  // renameat
     46,  // ftruncate
     48,  // faccessat
     49,  // chdir
-    50,  // fchmod
+    52,  // fchmod
     56,  // openat
     57,  // close
     59,  // pipe2
@@ -189,19 +187,18 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
     111, // timer_delete
     113, // clock_gettime
     115, // clock_nanosleep
-    117, // rt_sigsuspend
-    122, // sched_setparam
+    122, // sched_setaffinity
     123, // sched_getaffinity
     124, // sched_yield
     129, // kill
     130, // tkill
-    131, // sigaltstack
-    132, // rt_sigprocmask
-    133, // rt_sigpending
+    131, // tgkill
+    132, // sigaltstack
+    133, // rt_sigsuspend
     134, // rt_sigaction
-    135, // rt_sigpending
+    135, // rt_sigprocmask
     137, // rt_sigtimedwait
-    139, // rt_sigsuspend
+    139, // rt_sigreturn
     160, // uname
     167, // prctl
     172, // getpid
@@ -234,17 +231,12 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
     221, // execve
     222, // mmap
     226, // mprotect
-    228, // madvise
     232, // mincore
-    233, // exit
-    234, // exit_group
+    233, // madvise
     242, // accept4
     260, // wait4
     261, // prlimit64
     278, // getrandom
-    281, // epoll_create1
-    282, // epoll_ctl
-    283, // epoll_pwait
     291, // statx
     293, // rseq
     435, // clone3
@@ -252,6 +244,14 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
     441, // epoll_pwait2
     449, // futex_waitv
 ];
+
+/// Default allowlist for the compiled architecture.
+#[cfg(target_arch = "x86_64")]
+pub const DEFAULT_ALLOWLIST: &[u32] = X86_64_ALLOWLIST;
+
+/// Default allowlist for the compiled architecture.
+#[cfg(target_arch = "aarch64")]
+pub const DEFAULT_ALLOWLIST: &[u32] = AARCH64_ALLOWLIST;
 
 #[cfg(test)]
 #[allow(
@@ -275,20 +275,12 @@ mod tests {
         assert_eq!(AUDIT_ARCH, 0xc000_00b7);
     }
 
-    #[test]
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    fn allowlist_is_non_empty() {
-        assert!(!DEFAULT_ALLOWLIST.is_empty());
-    }
-
-    #[test]
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    fn allowlist_is_sorted_and_unique() {
-        // Unsorted or duplicate nrs hide a hole until SIGSYS at create.
-        for window in DEFAULT_ALLOWLIST.windows(2) {
+    fn assert_sorted_unique(list: &[u32], arch: &str) {
+        assert!(!list.is_empty(), "{arch} allowlist is empty");
+        for window in list.windows(2) {
             assert!(
                 window[0] < window[1],
-                "allowlist not strictly increasing: {} followed by {}",
+                "{arch} allowlist not strictly increasing: {} followed by {}",
                 window[0],
                 window[1]
             );
@@ -296,22 +288,39 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    fn allowlist_includes_clone3_and_rseq() {
+    fn allowlists_are_sorted_and_unique() {
+        // Unsorted or duplicate nrs hide a hole until SIGSYS at create.
+        assert_sorted_unique(X86_64_ALLOWLIST, "x86_64");
+        assert_sorted_unique(AARCH64_ALLOWLIST, "aarch64");
+    }
+
+    #[test]
+    fn allowlists_include_clone3_and_rseq() {
         // Go starts threads with these; TSYNC cannot add them after install.
         assert!(
-            DEFAULT_ALLOWLIST.contains(&435),
-            "clone3 missing from allowlist"
+            X86_64_ALLOWLIST.contains(&435),
+            "clone3 missing from x86_64 allowlist"
         );
-        #[cfg(target_arch = "x86_64")]
         assert!(
-            DEFAULT_ALLOWLIST.contains(&334),
+            X86_64_ALLOWLIST.contains(&334),
             "rseq missing from x86_64 allowlist"
         );
-        #[cfg(target_arch = "aarch64")]
         assert!(
-            DEFAULT_ALLOWLIST.contains(&293),
+            AARCH64_ALLOWLIST.contains(&435),
+            "clone3 missing from aarch64 allowlist"
+        );
+        assert!(
+            AARCH64_ALLOWLIST.contains(&293),
             "rseq missing from aarch64 allowlist"
+        );
+    }
+
+    #[test]
+    fn aarch64_allowlist_omits_ptrace() {
+        // Filter exists to block ptrace; 117 is ptrace on asm-generic.
+        assert!(
+            !AARCH64_ALLOWLIST.contains(&117),
+            "aarch64 allowlist must not contain ptrace"
         );
     }
 }
