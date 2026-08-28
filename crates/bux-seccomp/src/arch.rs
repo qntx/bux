@@ -16,9 +16,8 @@ pub const AUDIT_ARCH: u32 = 0xc000_00b7;
 
 /// Syscalls allowed for the bux-shim VMM process on `x86_64`.
 ///
-/// The allowlist is sorted for readability and verified by a unit test.
-/// It covers libkrun's runtime needs: standard I/O, memory management,
-/// KVM ioctls, threading, signals, and vsock/virtio networking.
+/// Sorted and unique; frozen by a unit test. Covers libkrun plus the
+/// in-process gvproxy/Go runtime (clone3, rseq, netpoll, timers).
 #[cfg(target_arch = "x86_64")]
 pub const DEFAULT_ALLOWLIST: &[u32] = &[
     0,   // read
@@ -47,10 +46,12 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
     23,  // select
     24,  // sched_yield
     25,  // mremap
+    27,  // mincore
     28,  // madvise
     32,  // dup
     33,  // dup2
     35,  // nanosleep
+    38,  // setitimer
     39,  // getpid
     41,  // socket
     42,  // connect
@@ -70,6 +71,7 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
     57,  // fork
     60,  // exit
     62,  // kill
+    63,  // uname
     72,  // fcntl
     73,  // flock
     74,  // fsync
@@ -98,19 +100,26 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
     204, // sched_getaffinity
     217, // getdents64
     218, // set_tid_address
+    222, // timer_create
+    223, // timer_settime
+    226, // timer_delete
     228, // clock_gettime
     230, // clock_nanosleep
     231, // exit_group
     232, // epoll_wait
     233, // epoll_ctl
+    234, // tgkill
     257, // openat
     262, // newfstatat
     269, // faccessat
     271, // ppoll
-    280, // eventfd2
+    273, // set_robust_list
+    280, // utimensat
+    281, // epoll_pwait
     282, // signalfd4
     284, // eventfd
     288, // accept4
+    290, // eventfd2
     291, // epoll_create1
     292, // dup3
     293, // pipe2
@@ -121,6 +130,7 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
     334, // rseq
     435, // clone3
     439, // faccessat2
+    441, // epoll_pwait2
     448, // process_mrelease
     449, // futex_waitv
     451, // cachestat
@@ -128,13 +138,17 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
 
 /// Syscalls allowed for the bux-shim VMM process on `aarch64`.
 ///
-/// Numbers come from `asm-generic/unistd.h`; comments audited against
-/// the Linux 6.x headers and corrected where the original source had
-/// stale annotations.
+/// Sorted and unique; frozen by a unit test. Numbers from
+/// `asm-generic/unistd.h`. Covers libkrun plus in-process gvproxy/Go
+/// (clone3, rseq, netpoll, timers).
 #[cfg(target_arch = "aarch64")]
 pub const DEFAULT_ALLOWLIST: &[u32] = &[
     0,   // io_setup
     17,  // getcwd
+    19,  // eventfd2
+    20,  // epoll_create1
+    21,  // epoll_ctl
+    22,  // epoll_pwait
     23,  // dup
     24,  // dup3
     25,  // fcntl
@@ -148,6 +162,7 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
     50,  // fchmod
     56,  // openat
     57,  // close
+    59,  // pipe2
     61,  // getdents64
     62,  // lseek
     63,  // read
@@ -162,13 +177,21 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
     80,  // fstat
     82,  // fsync
     83,  // fdatasync
+    93,  // exit
+    94,  // exit_group
     96,  // set_tid_address
     98,  // futex
     99,  // set_robust_list
+    101, // nanosleep
+    103, // setitimer
+    107, // timer_create
+    110, // timer_settime
+    111, // timer_delete
     113, // clock_gettime
     115, // clock_nanosleep
     117, // rt_sigsuspend
     122, // sched_setparam
+    123, // sched_getaffinity
     124, // sched_yield
     129, // kill
     130, // tkill
@@ -212,6 +235,7 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
     222, // mmap
     226, // mprotect
     228, // madvise
+    232, // mincore
     233, // exit
     234, // exit_group
     242, // accept4
@@ -225,6 +249,7 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
     293, // rseq
     435, // clone3
     439, // faccessat2
+    441, // epoll_pwait2
     449, // futex_waitv
 ];
 
@@ -232,7 +257,8 @@ pub const DEFAULT_ALLOWLIST: &[u32] = &[
 #[allow(
     clippy::unwrap_used,
     clippy::missing_docs_in_private_items,
-    reason = "tests are allowed to use unwrap and omit docs"
+    clippy::indexing_slicing,
+    reason = "tests are allowed to use unwrap/indexing and omit docs"
 )]
 mod tests {
     use super::*;
@@ -253,5 +279,39 @@ mod tests {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn allowlist_is_non_empty() {
         assert!(!DEFAULT_ALLOWLIST.is_empty());
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn allowlist_is_sorted_and_unique() {
+        // Unsorted or duplicate nrs hide a hole until SIGSYS at create.
+        for window in DEFAULT_ALLOWLIST.windows(2) {
+            assert!(
+                window[0] < window[1],
+                "allowlist not strictly increasing: {} followed by {}",
+                window[0],
+                window[1]
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn allowlist_includes_clone3_and_rseq() {
+        // Go starts threads with these; TSYNC cannot add them after install.
+        assert!(
+            DEFAULT_ALLOWLIST.contains(&435),
+            "clone3 missing from allowlist"
+        );
+        #[cfg(target_arch = "x86_64")]
+        assert!(
+            DEFAULT_ALLOWLIST.contains(&334),
+            "rseq missing from x86_64 allowlist"
+        );
+        #[cfg(target_arch = "aarch64")]
+        assert!(
+            DEFAULT_ALLOWLIST.contains(&293),
+            "rseq missing from aarch64 allowlist"
+        );
     }
 }

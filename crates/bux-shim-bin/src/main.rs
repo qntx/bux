@@ -59,14 +59,13 @@ fn main() {
     }
 }
 
-/// Start optional gvproxy, prepare libkrun, seccomp when offline, then enter.
+/// Start optional gvproxy, prepare libkrun, install seccomp, then enter.
 #[cfg(unix)]
 fn run(cfg: &bux_shim::ShimConfig) -> Result<(), String> {
     let gvp = start_gvproxy(cfg)?;
     let prepared = bux_shim::prepare(cfg).map_err(|e| e.to_string())?;
-    if gvp.is_none() {
-        bux_shim::install_seccomp().map_err(|e| e.to_string())?;
-    }
+    // After GvproxyInstance::new so existing Go threads inherit via TSYNC.
+    bux_shim::install_seccomp().map_err(|e| e.to_string())?;
     let start_result = prepared.start();
     drop(gvp);
     start_result.map_err(|e| e.to_string())

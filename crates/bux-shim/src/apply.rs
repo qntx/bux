@@ -1,6 +1,6 @@
 //! Apply [`ShimConfig`] to a libkrun context and start the VM.
 //!
-//! Product callers are [`prepare`] / optional [`install_seccomp`] / [`start`].
+//! Product callers are [`prepare`] / [`install_seccomp`] / [`start`].
 //! This module never constructs gvproxy.
 
 use bux_krun::ctx as sys;
@@ -93,8 +93,9 @@ pub fn start(ctx: u32) -> Result<()> {
 
 /// Install the default seccomp BPF filter (Linux `x86_64`/`aarch64`).
 ///
-/// Other platforms: no-op. The `bux-shim` binary skips this when gvproxy
-/// is in-process.
+/// Darwin and other platforms: no-op. Linux: fail-closed (`SIGSYS` on a
+/// missing syscall). The `bux-shim` binary calls this after
+/// `GvproxyInstance::new` so existing Go threads inherit via TSYNC.
 ///
 /// # Errors
 ///
