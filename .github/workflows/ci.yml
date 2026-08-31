@@ -39,7 +39,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: crates/bux-gvproxy/gvproxy-bridge/go.mod
       - uses: Swatinem/rust-cache@v2
