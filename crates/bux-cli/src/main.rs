@@ -750,10 +750,15 @@ mod log_level_tests {
     #[test]
     fn serve_start_and_openapi_are_subcommands() {
         let start = parse(&["serve", "start", "--api-key", "t1:s"]);
-        assert!(
-            matches!(start.command, Command::Serve(Serve::Start(_))),
-            "start"
-        );
+        match start.command {
+            Command::Serve(Serve::Start(args)) => {
+                assert!(
+                    args.listen.is_empty(),
+                    "omitted --listen stays empty so ServeConfig applies TCP+unix defaults"
+                );
+            }
+            _ => panic!("start"),
+        }
         let openapi = parse(&["serve", "openapi"]);
         assert!(
             matches!(openapi.command, Command::Serve(Serve::Openapi)),
