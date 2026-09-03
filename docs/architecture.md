@@ -35,7 +35,7 @@ Engine (this workspace):
 | Crate | Role |
 |-------|------|
 | `bux` | `Runtime` / `Vm` / `VmOptions`. Exclusive `bux.lock`. Schema v5. Daemonless. |
-| `bux-cli` | Operator CLI (`run`/`create`/`exec`/…) and `bux serve`. Binary name `bux`. |
+| `bux-cli` | Operator CLI (`run`/`create`/`exec`/…). Binary name `bux`. `serve` is 1.0, not in 0.8.0. |
 | `bux-shim` | `ShimConfig` apply to libkrun. Never starts gvproxy. |
 | `bux-shim-bin` | Process that `krun_start_enter`. gvproxy in-process when networked. Seccomp **after** `GvproxyInstance::new`. |
 | `bux-guest` | Static musl ELF, PID 1, protocol stamp `bux-guest-protocol-v10`. |
