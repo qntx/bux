@@ -1,4 +1,4 @@
-//! HTTP router: public health, Bearer-protected me/config/metrics, sandboxes, exec, files, images.
+//! HTTP router: public health, Bearer-protected me/config/metrics, sandboxes, exec, files, images, logs, snapshots.
 
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
@@ -15,7 +15,7 @@ use utoipa::ToSchema;
 use crate::auth::{Tenant, require_bearer};
 use crate::error::ApiError;
 use crate::state::{AppState, Limits};
-use crate::{exec, files, images, logs, sandboxes};
+use crate::{exec, files, images, logs, sandboxes, snapshots};
 
 /// JSON request body cap.
 pub(crate) const MAX_JSON_BODY_BYTES: usize = 1024 * 1024;
@@ -29,6 +29,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .merge(sandboxes::routes())
         .merge(exec::routes())
         .merge(logs::routes())
+        .merge(snapshots::routes())
         .merge(images::routes())
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
         .layer(RequestBodyLimitLayer::new(MAX_JSON_BODY_BYTES));
@@ -413,6 +414,7 @@ mod tests {
         assert!(prod.contains("images::routes"), "images routes");
         assert!(prod.contains("logs::routes"), "logs routes");
         assert!(prod.contains("/v1/metrics"), "metrics");
+        assert!(prod.contains("snapshots::routes"), "snapshot routes");
         assert!(prod.contains("MAX_FILE_BODY_BYTES"), "files body limit");
     }
 

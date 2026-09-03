@@ -3,10 +3,10 @@
 //! `bux serve start` opens one [`bux::Runtime`] (exclusive flock on `BUX_HOME`),
 //! binds TCP (loopback unless `--public`) and a Unix socket, sweeps idle VMs
 //! every 30s, and serves `/v1/health` (public) plus Bearer-protected `/v1/me`,
-//! `/v1/metrics`, sandbox get-or-create, collect exec, files, images, and logs.
-//! At least one API key is required to start, including on the Unix socket.
-//! Identifiers use the alphabet `[A-Za-z0-9._]`; `-` is only a separator in
-//! formatted sandbox and volume names.
+//! `/v1/metrics`, sandbox get-or-create, collect exec, files, images, logs,
+//! snapshots, clone, and restore. At least one API key is required to start,
+//! including on the Unix socket. Identifiers use the alphabet `[A-Za-z0-9._]`;
+//! `-` is only a separator in formatted sandbox and volume names.
 
 #![allow(
     clippy::missing_docs_in_private_items,
@@ -24,6 +24,7 @@ mod logs;
 mod openapi;
 mod router;
 mod sandboxes;
+mod snapshots;
 mod state;
 
 use std::fmt;
@@ -599,6 +600,30 @@ mod tests {
             v.get("security"),
             Some(&serde_json::json!([{"bearer": []}])),
             "global bearer"
+        );
+        assert!(
+            v.get("paths")
+                .and_then(|p| p.get("/v1/sandboxes/{id}/snapshots"))
+                .is_some(),
+            "snapshots path"
+        );
+        assert!(
+            v.get("paths")
+                .and_then(|p| p.get("/v1/sandboxes/{id}/snapshots/{sid}"))
+                .is_some(),
+            "delete snapshot path"
+        );
+        assert!(
+            v.get("paths")
+                .and_then(|p| p.get("/v1/sandboxes/{id}/snapshots/{sid}/restore"))
+                .is_some(),
+            "restore path"
+        );
+        assert!(
+            v.get("paths")
+                .and_then(|p| p.get("/v1/sandboxes/{id}/clone"))
+                .is_some(),
+            "clone path"
         );
     }
 

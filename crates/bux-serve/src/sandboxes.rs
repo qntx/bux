@@ -18,7 +18,7 @@ use crate::error::{ApiError, JsonBody};
 use crate::ids::{sandbox_name, validate_agent_id, workspace_volume_name};
 use crate::state::AppState;
 
-const WORKSPACE_GUEST_PATH: &str = "/workspace";
+pub(crate) const WORKSPACE_GUEST_PATH: &str = "/workspace";
 const DEFAULT_AUTO_STOP_SECS: u64 = 1800;
 const STOP_WAIT: Duration = Duration::from_secs(10);
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -80,7 +80,7 @@ pub(crate) struct SandboxBody {
 }
 
 impl SandboxBody {
-    fn from_info(info: &VmInfo) -> Self {
+    pub(crate) fn from_info(info: &VmInfo) -> Self {
         Self {
             id: info.id.clone(),
             name: info.name.clone(),
@@ -465,7 +465,12 @@ pub(crate) fn load_owned(runtime: &Runtime, tenant: &str, id: &str) -> Result<Vm
     Ok(vm)
 }
 
-fn admit(state: &AppState, tenant: &str, ram_mib: u32, vcpus: u8) -> Result<(), ApiError> {
+pub(crate) fn admit(
+    state: &AppState,
+    tenant: &str,
+    ram_mib: u32,
+    vcpus: u8,
+) -> Result<(), ApiError> {
     if ram_mib == 0 {
         return Err(ApiError::invalid_config("ram_mib must be >= 1").with_field("ram_mib"));
     }
