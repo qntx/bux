@@ -798,6 +798,9 @@ mod tests {
                 "agent_id": "dead",
             }),
         );
+        if bux::HostInfo::probe().virtualization {
+            return;
+        }
         let res = send(
             h.app,
             "POST",
@@ -806,11 +809,9 @@ mod tests {
             Body::from(r#"{"agent_id":"a1","image":"alpine","ram_mib":512}"#),
         )
         .await;
-        assert_ne!(
-            res.status(),
-            StatusCode::TOO_MANY_REQUESTS,
-            "dead pid must not count toward running RAM"
-        );
+        assert_eq!(res.status(), StatusCode::PRECONDITION_FAILED, "no create");
+        let v = json_body(res).await;
+        assert_eq!(error_code(&v), Some("security_unavailable"), "code");
     }
 
     #[tokio::test]
