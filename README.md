@@ -57,9 +57,11 @@ Product artifact is the GitHub Release tarball (`v*` tags), not crates.io.
 
 ```bash
 tar xf bux-*-x86_64-unknown-linux-gnu.tar.gz
-cd bux-*-x86_64-unknown-linux-gnu
 ./bux system info
 ```
+
+Members are at archive root (`tar czf … -C "$staging" .`). Run `./bux` from
+the directory that received the extract.
 
 Extracted layout (Linux `.so` / Darwin `.dylib`; keep `libkrun*` next to `bux`):
 
@@ -86,15 +88,14 @@ One process owns one data dir. `Runtime::open` takes an exclusive flock;
 a second `bux serve start` (or `bux create`) on the same `BUX_HOME` is `Busy`.
 
 ```bash
-./bux serve start \
-  --api-key-file /etc/bux/keys \
-  --listen 127.0.0.1:8080 \
-  --listen unix://${XDG_RUNTIME_DIR:-/tmp}/bux.sock
+./bux serve start --api-key-file /etc/bux/keys
 ```
 
-At least one API key is required to start, including loopback and Unix.
-`--public` is required to bind a non-loopback TCP address. Terminate TLS in a
-reverse proxy; the worker does not.
+Omitted `--listen` is `127.0.0.1:8080` and
+`unix://$XDG_RUNTIME_DIR/bux.sock` (fallback `/tmp/bux-$UID.sock`). At least
+one API key is required to start, including loopback and Unix. `--public` is
+required to bind a non-loopback TCP address. Terminate TLS in a reverse
+proxy; the worker does not.
 
 Flags, keys, listeners, proxy, disk: [docs/serve.md](docs/serve.md).
 

@@ -12,10 +12,12 @@ release bumps schema.
 
 ```bash
 tar xf bux-<ver>-x86_64-unknown-linux-gnu.tar.gz
-cd bux-<ver>-x86_64-unknown-linux-gnu
 ./bux system info --format json
 ./bux serve start --help
 ```
+
+Members are at archive root (`cd.yml` packs with `tar czf … -C "$staging" .`).
+Run `./bux` from the directory that received the extract.
 
 Targets: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
 `aarch64-apple-darwin`. Layout:
@@ -69,11 +71,10 @@ Zero API keys → process exits **2** before bind. No “warn and listen
 unauthenticated.” `--public` without a key is a hard error.
 
 ```bash
-./bux serve start \
-  --api-key-file /etc/bux/keys \
-  --listen 127.0.0.1:8080 \
-  --listen unix://${XDG_RUNTIME_DIR:-/tmp}/bux.sock
+./bux serve start --api-key-file /etc/bux/keys
 ```
+
+Omitted `--listen` binds both defaults (TCP loopback and Unix; see Listen).
 
 ```bash
 bux serve openapi   # JSON on stdout, exit 0

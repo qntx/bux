@@ -1,8 +1,8 @@
 # bux-cli
 
-Operator CLI and hosted worker binary (`bux`). Local verbs (`create` / `exec`
-/ …) are a client of the `bux` `Runtime` / `Vm` / `VmOptions` API. `bux serve`
-is the product surface: one process, one Runtime, many per-agent VMs.
+CLI client of the `bux` `Runtime` / `Vm` / `VmOptions` API. Binary name: `bux`.
+`bux serve` is the product surface (one process, one Runtime, many per-agent
+VMs) and is 1.0, not in this 0.8.0 clap.
 
 1.0 is **hosted + FULL proof**, not library-only. See
 [`docs/serve.md`](../../docs/serve.md) and the root [`README.md`](../../README.md).
@@ -36,18 +36,17 @@ and FULL procedure: [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 | `system info` | Host capabilities, data dir, capture env (flock-free) |
 | `system reset` | Delete the runtime data directory (requires flock) |
 | `info` | Alias of `system info` |
-| `serve start` | HTTP worker: exclusive flock on `BUX_HOME`, Bearer keys, per-agent VMs |
-| `serve openapi` | OpenAPI JSON to stdout, exit 0 |
 
 List/info commands take `--format table|json` where present.
 
 `create` is always detach (CLI exits; VM survives). Equivalent to
 `bux run -d IMAGE` with no command override.
 
-Local Runtime verbs cannot run during `bux serve start` on the same
-`BUX_HOME` (exclusive flock → `Busy`). `system info` is flock-free. HTTP
-default network is deny; CLI default remains unrestricted
-(`Enabled { allow_net: [] }`).
+`serve start` / `serve openapi` are 1.0 (not in 0.8.0 clap). Spec:
+[`docs/serve.md`](../../docs/serve.md). Local Runtime verbs cannot run
+during serve on the same `BUX_HOME` (exclusive flock → `Busy`).
+`system info` is flock-free. HTTP default network is deny; CLI default
+remains unrestricted (`Enabled { allow_net: [] }`).
 
 ## Capture env
 
