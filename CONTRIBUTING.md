@@ -1,5 +1,14 @@
 # Contributing to bux
 
+The product is a hosted per-agent sandbox (`bux serve`). The engine
+(`Runtime` / `Vm` / `VmOptions`) is the substrate. **1.0 is hosted + FULL
+proof** (HVF v10 guest from that commit, Linux `/dev/kvm` FULL, load/chaos),
+not library-only. Do not tag `v1.0.0` until that bar is true. Do not invent
+FULL sha256 rows.
+
+Operator docs: root `README.md`, `docs/architecture.md`,
+`docs/security-model.md`, `docs/serve.md`.
+
 ## Build
 
 ```bash
@@ -84,11 +93,19 @@ bux system info --format json
 
 ## Architecture notes
 
-- Product entry: `Runtime` + `Vm` + `VmOptions` (`crates/bux`).
+- Product: hosted per-agent sandbox (`bux serve`). HTTP is a client of
+  `Runtime`; it does not live in `crates/bux`. 1.0 is that worker plus
+  recorded FULL proof, not library-only.
+- Engine: `Runtime` + `Vm` + `VmOptions` (`crates/bux`). Exclusive flock;
+  one process owns `BUX_HOME`. Second serve (or CLI Runtime) on the same
+  dir is `Busy`.
 - Engine boundary: product `VmConfig` → `ShimConfig` → `bux-shim` → libkrun.
 - Managed network: gvproxy virtio-net in the `bux-shim` process (`bux-shim-bin`); no TSI `set_port_map`.
 - Guest agent: postcard protocol v10; Phase A process identity only.
 - Schema: SQLite `user_version` 5 — **no migrations**; wipe `BUX_HOME` on mismatch.
+- Isolation vs host: hardware VM. Isolation vs other agents: one VM per agent.
+- `create` fail-closed: `require_virtualization` before image resolve
+  (`Error::SecurityUnavailable`; HTTP 412).
 
 ## Tests
 
@@ -308,4 +325,4 @@ Schema mismatches require `bux system reset` (or wiping `$BUX_HOME`).
 
 ## Lints
 
-Workspace clippy is strict (`unsafe_code = deny` with crate exceptions). Prefer small, modular PRs along the redesign plan spine.
+Workspace clippy is strict (`unsafe_code = deny` with crate exceptions). Prefer small, modular PRs. Hosted worker and engine stay separate crates.

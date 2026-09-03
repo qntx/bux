@@ -1,6 +1,11 @@
 # bux-cli
 
-CLI client of the `bux` `Runtime` / `Vm` / `VmOptions` API. Binary name: `bux`.
+Operator CLI and hosted worker binary (`bux`). Local verbs (`create` / `exec`
+/ …) are a client of the `bux` `Runtime` / `Vm` / `VmOptions` API. `bux serve`
+is the product surface: one process, one Runtime, many per-agent VMs.
+
+1.0 is **hosted + FULL proof**, not library-only. See
+[`docs/serve.md`](../../docs/serve.md) and the root [`README.md`](../../README.md).
 
 Build: `cargo build -p bux-cli -p bux-shim-bin`. Capture env, tarball layout,
 and FULL procedure: [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
@@ -31,11 +36,18 @@ and FULL procedure: [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 | `system info` | Host capabilities, data dir, capture env (flock-free) |
 | `system reset` | Delete the runtime data directory (requires flock) |
 | `info` | Alias of `system info` |
+| `serve start` | HTTP worker: exclusive flock on `BUX_HOME`, Bearer keys, per-agent VMs |
+| `serve openapi` | OpenAPI JSON to stdout, exit 0 |
 
 List/info commands take `--format table|json` where present.
 
 `create` is always detach (CLI exits; VM survives). Equivalent to
 `bux run -d IMAGE` with no command override.
+
+Local Runtime verbs cannot run during `bux serve start` on the same
+`BUX_HOME` (exclusive flock → `Busy`). `system info` is flock-free. HTTP
+default network is deny; CLI default remains unrestricted
+(`Enabled { allow_net: [] }`).
 
 ## Capture env
 
