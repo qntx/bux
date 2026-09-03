@@ -41,10 +41,14 @@ impl AppState {
     }
 }
 
+/// Pad to at least this many bytes so unequal lengths are not a `zip` min-len oracle.
+const CT_EQ_MIN_ITERS: usize = 256;
+
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     let mut acc = u8::from(left.len() != right.len());
-    for (a, b) in left.iter().zip(right.iter()) {
-        acc |= a ^ b;
+    let n = left.len().max(right.len()).max(CT_EQ_MIN_ITERS);
+    for i in 0..n {
+        acc |= left.get(i).copied().unwrap_or(0) ^ right.get(i).copied().unwrap_or(0);
     }
     acc == 0
 }
@@ -200,6 +204,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "wrong secret");
+    }
+
+    #[test]
+    fn tenant_for_bearer_last_match_wins() {
+        let state = AppState::new(vec![
+            ApiKey::new("first", "shared").unwrap(),
+            ApiKey::new("second", "shared").unwrap(),
+        ]);
+        assert_eq!(
+            state.tenant_for_bearer("shared"),
+            Some("second"),
+            "must walk every key"
+        );
     }
 
     #[tokio::test]

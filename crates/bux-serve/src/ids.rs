@@ -10,10 +10,14 @@ const AGENT_LEN: std::ops::RangeInclusive<usize> = 1..=64;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IdError {
     /// `tenant_id` failed the alphabet or length check.
-    #[error("invalid tenant_id {0:?}: ids are [A-Za-z0-9._], tenant 1..=32, agent 1..=64")]
+    #[error(
+        "invalid tenant_id {0:?}: ids are [A-Za-z0-9._], tenant 1..=32, agent 1..=64, no \"..\""
+    )]
     Tenant(String),
     /// `agent_id` failed the alphabet or length check.
-    #[error("invalid agent_id {0:?}: ids are [A-Za-z0-9._], tenant 1..=32, agent 1..=64")]
+    #[error(
+        "invalid agent_id {0:?}: ids are [A-Za-z0-9._], tenant 1..=32, agent 1..=64, no \"..\""
+    )]
     Agent(String),
 }
 
@@ -22,15 +26,15 @@ const fn is_id_char(c: char) -> bool {
 }
 
 fn id_ok(id: &str, len: std::ops::RangeInclusive<usize>) -> bool {
-    len.contains(&id.len()) && id.chars().all(is_id_char)
+    len.contains(&id.len()) && id.chars().all(is_id_char) && !id.contains("..")
 }
 
 /// Check a tenant id (`[A-Za-z0-9._]`, 1..=32).
 ///
 /// # Errors
 ///
-/// Returns [`IdError::Tenant`] when the id is empty, too long, or contains a
-/// character outside the alphabet (including `-`).
+/// Returns [`IdError::Tenant`] when the id is empty, too long, contains `..`,
+/// or a character outside the alphabet (including `-`).
 pub fn validate_tenant_id(id: &str) -> Result<(), IdError> {
     if id_ok(id, TENANT_LEN) {
         Ok(())
@@ -43,8 +47,8 @@ pub fn validate_tenant_id(id: &str) -> Result<(), IdError> {
 ///
 /// # Errors
 ///
-/// Returns [`IdError::Agent`] when the id is empty, too long, or contains a
-/// character outside the alphabet (including `-`).
+/// Returns [`IdError::Agent`] when the id is empty, too long, contains `..`,
+/// or a character outside the alphabet (including `-`).
 pub fn validate_agent_id(id: &str) -> Result<(), IdError> {
     if id_ok(id, AGENT_LEN) {
         Ok(())
@@ -97,6 +101,29 @@ mod tests {
         assert!(sandbox_name("x-y", "z").is_err(), "hyphen in tenant");
         assert!(sandbox_name("x", "y-z").is_err(), "hyphen in agent");
         assert!(sandbox_name("x", "y:z").is_err(), "colon in agent");
+        assert!(
+            workspace_volume_name("x-y", "z").is_err(),
+            "hyphen in tenant volume"
+        );
+        assert!(
+            workspace_volume_name("x", "y-z").is_err(),
+            "hyphen in agent volume"
+        );
+        assert!(
+            workspace_volume_name("x", "y:z").is_err(),
+            "colon in agent volume"
+        );
+    }
+
+    #[test]
+    fn consecutive_dots_rejected() {
+        assert!(
+            workspace_volume_name("a..b", "x").is_err(),
+            "dot-dot tenant"
+        );
+        assert!(sandbox_name("t", "a..b").is_err(), "dot-dot agent");
+        assert!(validate_tenant_id("..").is_err(), "dot-dot only");
+        assert!(sandbox_name("a.b", "x").is_ok(), "single dots allowed");
     }
 
     #[test]

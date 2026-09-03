@@ -194,39 +194,45 @@ pub fn run(config: ServeConfig) -> Result<()> {
 }
 
 async fn serve(config: ServeConfig) -> Result<()> {
+    let shutdown = install_shutdown()?;
     let listen = config.listen;
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!(%listen, api_keys = config.keys.len(), "listening");
     let app = router::router(AppState::new(config.keys));
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown)
         .await?;
     Ok(())
 }
 
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        if let Err(e) = tokio::signal::ctrl_c().await {
-            tracing::error!(%e, "ctrl_c handler");
-        }
-    };
-    #[cfg(unix)]
-    {
-        let term = async {
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(mut signal) => {
-                    signal.recv().await;
-                }
-                Err(e) => tracing::error!(%e, "SIGTERM handler"),
-            }
-        };
+/// Install SIGINT/SIGTERM first. A failed install is I/O, not shutdown.
+#[cfg(unix)]
+fn install_shutdown() -> std::io::Result<impl Future<Output = ()> + Send> {
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    Ok(async move {
         tokio::select! {
-            () = ctrl_c => {}
-            () = term => {}
+            () = recv_signal(&mut interrupt) => {}
+            () = recv_signal(&mut terminate) => {}
         }
+    })
+}
+
+/// `None` from `recv` means the stream closed, not that a signal arrived.
+#[cfg(unix)]
+async fn recv_signal(signal: &mut tokio::signal::unix::Signal) {
+    if signal.recv().await.is_none() {
+        std::future::pending::<()>().await;
     }
-    #[cfg(not(unix))]
-    ctrl_c.await;
+}
+
+#[cfg(not(unix))]
+fn install_shutdown() -> std::io::Result<impl Future<Output = ()> + Send> {
+    Ok(async {
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    })
 }
 
 /// OpenAPI 3.1 document for routes this worker currently serves.
