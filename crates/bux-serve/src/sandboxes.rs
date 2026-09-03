@@ -195,7 +195,9 @@ async fn delete_one(
     let mut vm = load_owned(&state.runtime, &tenant.id, &id)?;
     let info = vm.info();
     let volume = match (info.tenant_id.as_deref(), info.agent_id.as_deref()) {
-        (Some(t), Some(a)) => workspace_volume_name(t, a).ok(),
+        (Some(t), Some(a)) => {
+            Some(workspace_volume_name(t, a).map_err(|err| ApiError::internal(err.to_string()))?)
+        }
         _ => None,
     };
     stop_for_delete(&mut vm).await?;
@@ -335,29 +337,98 @@ fn remove_workspace_volume(runtime: &Runtime, name: &str) -> Result<(), ApiError
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 mod tests {
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::Duration;
+
     use super::*;
     use axum::Router;
     use axum::body::Body;
     use axum::http::header::AUTHORIZATION;
     use axum::http::{Request, header};
+    use rusqlite::params;
     use tower::ServiceExt;
 
     use crate::ApiKey;
     use crate::router::router;
     use crate::state::Limits;
 
-    fn test_app(limits: Limits) -> (tempfile::TempDir, Router) {
+    struct Harness {
+        dir: tempfile::TempDir,
+        runtime: Arc<Runtime>,
+        app: Router,
+    }
+
+    fn harness(limits: Limits) -> Harness {
         let dir = tempfile::tempdir().unwrap();
-        let runtime = Runtime::open(dir.path()).unwrap();
+        let opened = Runtime::open(dir.path()).unwrap();
         let state = AppState::new(
             vec![
                 ApiKey::new("tenant1", "secret1").unwrap(),
                 ApiKey::new("tenant2", "secret2").unwrap(),
             ],
-            runtime,
+            opened,
             limits,
         );
-        (dir, router(state))
+        let runtime = Arc::clone(&state.runtime);
+        let app = router(state);
+        Harness { dir, runtime, app }
+    }
+
+    fn test_app(limits: Limits) -> (tempfile::TempDir, Router) {
+        let h = harness(limits);
+        (h.dir, h.app)
+    }
+
+    fn open_db(data_dir: &Path) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(data_dir.join("bux.db")).unwrap();
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        conn
+    }
+
+    fn plant_vm(
+        data_dir: &Path,
+        id: &str,
+        name: &str,
+        pid: i32,
+        status: &str,
+        config: &serde_json::Value,
+    ) {
+        let socket = data_dir.join("socks").join(format!("{id}.sock"));
+        open_db(data_dir)
+            .execute(
+                "INSERT INTO vms (id, name, pid, image, socket, status, config, created_at)
+                 VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, 0)",
+                params![
+                    id,
+                    name,
+                    pid,
+                    socket.to_str().expect("socket utf-8"),
+                    status,
+                    config.to_string(),
+                ],
+            )
+            .unwrap();
+    }
+
+    fn dead_pid() -> i32 {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = i32::try_from(child.id()).unwrap();
+        drop(child.wait());
+        pid
+    }
+
+    fn attach_volume(data_dir: &Path, vm_id: &str, volume_id: &str) {
+        open_db(data_dir)
+            .execute(
+                "INSERT INTO vm_volumes (vm_id, volume_id, guest_path) VALUES (?1, ?2, ?3)",
+                params![vm_id, volume_id, WORKSPACE_GUEST_PATH],
+            )
+            .unwrap();
+    }
+
+    fn error_code(v: &serde_json::Value) -> Option<&str> {
+        v.pointer("/error/code").and_then(serde_json::Value::as_str)
     }
 
     async fn json_body(res: axum::response::Response) -> serde_json::Value {
@@ -670,30 +741,102 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admission_running_ram_is_429() {
-        let limits = Limits {
-            max_running_ram_mib: 256,
+    async fn admission_running_ram_counts_live_vm_info() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = i32::try_from(child.id()).unwrap();
+        let h = harness(Limits {
+            max_running_ram_mib: 1000,
             ..Limits::default()
-        };
-        let (_dir, app) = test_app(limits);
+        });
+        plant_vm(
+            h.dir.path(),
+            "cafebabe0001",
+            "a-tenant1-live",
+            pid,
+            "running",
+            &serde_json::json!({
+                "vcpus": 1,
+                "ram_mib": 700,
+                "tenant_id": "tenant1",
+                "agent_id": "live",
+            }),
+        );
         let res = send(
-            app,
+            h.app,
             "POST",
             "/v1/sandboxes",
             Some("secret1"),
             Body::from(r#"{"agent_id":"a1","image":"alpine","ram_mib":512}"#),
         )
         .await;
-        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS, "status");
+        drop(child.kill());
+        drop(child.wait());
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS, "live ram sum");
+        let v = json_body(res).await;
+        assert_eq!(error_code(&v), Some("resource_exhausted"), "code");
+    }
+
+    #[tokio::test]
+    async fn admission_running_ram_ignores_dead_pid() {
+        let h = harness(Limits {
+            max_running_ram_mib: 1000,
+            ..Limits::default()
+        });
+        plant_vm(
+            h.dir.path(),
+            "cafebabe0002",
+            "a-tenant1-dead",
+            dead_pid(),
+            "running",
+            &serde_json::json!({
+                "vcpus": 1,
+                "ram_mib": 700,
+                "tenant_id": "tenant1",
+                "agent_id": "dead",
+            }),
+        );
+        let res = send(
+            h.app,
+            "POST",
+            "/v1/sandboxes",
+            Some("secret1"),
+            Body::from(r#"{"agent_id":"a1","image":"alpine","ram_mib":512}"#),
+        )
+        .await;
+        assert_ne!(
+            res.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "dead pid must not count toward running RAM"
+        );
     }
 
     #[tokio::test]
     async fn admission_disk_is_429() {
-        let limits = Limits {
-            max_disk_bytes: 0,
-            ..Limits::default()
-        };
-        let (_dir, app) = test_app(limits);
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::open(dir.path()).unwrap();
+        let disk = runtime.disk_usage().unwrap();
+        let data = runtime.data_dir_usage().unwrap();
+        assert!(
+            data > disk,
+            "data_dir_usage={data} must exceed disk_usage={disk}"
+        );
+        let cap = disk.saturating_add(1);
+        assert!(
+            cap <= data,
+            "cap {cap} must be in (disk_usage, data_dir_usage]"
+        );
+        let state = AppState::new(
+            vec![ApiKey::new("tenant1", "secret1").unwrap()],
+            runtime,
+            Limits {
+                max_disk_bytes: cap,
+                ..Limits::default()
+            },
+        );
+        let app = router(state);
         let res = send(
             app,
             "POST",
@@ -703,6 +846,304 @@ mod tests {
         )
         .await;
         assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS, "status");
+        let v = json_body(res).await;
+        assert_eq!(error_code(&v), Some("resource_exhausted"), "code");
+    }
+
+    #[tokio::test]
+    async fn same_tenant_post_returns_existing_without_create() {
+        const ID: &str = "abc123aaa001";
+        let h = harness(Limits::default());
+        plant_vm(
+            h.dir.path(),
+            ID,
+            "a-tenant1-a1",
+            dead_pid(),
+            "stopped",
+            &serde_json::json!({
+                "vcpus": 1,
+                "ram_mib": 512,
+                "tenant_id": "tenant1",
+                "agent_id": "a1",
+            }),
+        );
+        let created = send(
+            h.app.clone(),
+            "POST",
+            "/v1/sandboxes",
+            Some("secret1"),
+            Body::from(r#"{"agent_id":"a1","image":"alpine","ram_mib":2048}"#),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK, "same tenant");
+        let body = json_body(created).await;
+        assert_eq!(body.get("id").and_then(serde_json::Value::as_str), Some(ID));
+        assert_eq!(
+            body.get("ram_mib").and_then(serde_json::Value::as_u64),
+            Some(512),
+            "must not compare or overwrite ram"
+        );
+
+        let got = send(
+            h.app.clone(),
+            "GET",
+            &format!("/v1/sandboxes/{ID}"),
+            Some("secret1"),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(got.status(), StatusCode::OK, "owner get");
+
+        let missing = send(
+            h.app.clone(),
+            "GET",
+            "/v1/sandboxes/ffffffffffff",
+            Some("secret2"),
+            Body::empty(),
+        )
+        .await;
+        let other_get = send(
+            h.app.clone(),
+            "GET",
+            &format!("/v1/sandboxes/{ID}"),
+            Some("secret2"),
+            Body::empty(),
+        )
+        .await;
+        let other_del = send(
+            h.app.clone(),
+            "DELETE",
+            &format!("/v1/sandboxes/{ID}"),
+            Some("secret2"),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND, "missing");
+        assert_eq!(other_get.status(), StatusCode::NOT_FOUND, "other get");
+        assert_eq!(other_del.status(), StatusCode::NOT_FOUND, "other delete");
+        let missing_json = json_body(missing).await;
+        assert_eq!(json_body(other_get).await, missing_json, "get envelope");
+        assert_eq!(json_body(other_del).await, missing_json, "delete envelope");
+
+        let list2 = send(
+            h.app.clone(),
+            "GET",
+            "/v1/sandboxes",
+            Some("secret2"),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(
+            json_body(list2).await,
+            serde_json::json!([]),
+            "tenant2 list"
+        );
+        let list1 = send(
+            h.app,
+            "GET",
+            "/v1/sandboxes",
+            Some("secret1"),
+            Body::empty(),
+        )
+        .await;
+        let listed = json_body(list1).await;
+        let row = listed.as_array().and_then(|a| a.first());
+        assert_eq!(
+            row.and_then(|item| item.get("id"))
+                .and_then(serde_json::Value::as_str),
+            Some(ID),
+            "tenant1 list"
+        );
+    }
+
+    #[tokio::test]
+    async fn none_tenant_name_is_occupied() {
+        const ID: &str = "abc123aaa002";
+        let h = harness(Limits::default());
+        plant_vm(
+            h.dir.path(),
+            ID,
+            "a-tenant1-a1",
+            dead_pid(),
+            "stopped",
+            &serde_json::json!({
+                "vcpus": 1,
+                "ram_mib": 512,
+                "tenant_id": null,
+                "agent_id": "a1",
+            }),
+        );
+        let res = send(
+            h.app.clone(),
+            "POST",
+            "/v1/sandboxes",
+            Some("secret1"),
+            Body::from(r#"{"agent_id":"a1","image":"alpine"}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::CONFLICT, "occupied");
+        let v = json_body(res).await;
+        assert_eq!(error_code(&v), Some("name_occupied"), "code");
+        assert_eq!(
+            v.pointer("/error/existing_id")
+                .and_then(serde_json::Value::as_str),
+            Some(ID),
+            "existing_id"
+        );
+        let list = send(
+            h.app,
+            "GET",
+            "/v1/sandboxes",
+            Some("secret1"),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(
+            json_body(list).await,
+            serde_json::json!([]),
+            "cli vm omitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn other_tenant_name_is_occupied() {
+        const ID: &str = "abc123aaa003";
+        let h = harness(Limits::default());
+        plant_vm(
+            h.dir.path(),
+            ID,
+            "a-tenant1-a1",
+            dead_pid(),
+            "stopped",
+            &serde_json::json!({
+                "vcpus": 1,
+                "ram_mib": 512,
+                "tenant_id": "tenant2",
+                "agent_id": "a1",
+            }),
+        );
+        let res = send(
+            h.app.clone(),
+            "POST",
+            "/v1/sandboxes",
+            Some("secret1"),
+            Body::from(r#"{"agent_id":"a1","image":"alpine"}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::CONFLICT, "occupied");
+        let v = json_body(res).await;
+        assert_eq!(error_code(&v), Some("name_occupied"), "code");
+        assert_eq!(
+            v.pointer("/error/existing_id")
+                .and_then(serde_json::Value::as_str),
+            Some(ID),
+            "existing_id"
+        );
+        let list1 = send(
+            h.app.clone(),
+            "GET",
+            "/v1/sandboxes",
+            Some("secret1"),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(
+            json_body(list1).await,
+            serde_json::json!([]),
+            "owner is tenant2"
+        );
+        let list2 = send(
+            h.app,
+            "GET",
+            "/v1/sandboxes",
+            Some("secret2"),
+            Body::empty(),
+        )
+        .await;
+        let listed = json_body(list2).await;
+        let row = listed.as_array().and_then(|a| a.first());
+        assert_eq!(
+            row.and_then(|item| item.get("id"))
+                .and_then(serde_json::Value::as_str),
+            Some(ID),
+            "tenant2 list"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_owned_removes_workspace_volume() {
+        const ID: &str = "abc123aaa004";
+        const VOL: &str = "ws-tenant1-a1";
+        let h = harness(Limits::default());
+        plant_vm(
+            h.dir.path(),
+            ID,
+            "a-tenant1-a1",
+            dead_pid(),
+            "stopped",
+            &serde_json::json!({
+                "vcpus": 1,
+                "ram_mib": 512,
+                "tenant_id": "tenant1",
+                "agent_id": "a1",
+            }),
+        );
+        let info = h.runtime.volumes().create(VOL).unwrap();
+        attach_volume(h.dir.path(), ID, &info.id);
+        let vol_dir = h.dir.path().join("volumes").join(VOL);
+        assert!(vol_dir.is_dir(), "volume dir planted");
+
+        let res = send(
+            h.app.clone(),
+            "DELETE",
+            &format!("/v1/sandboxes/{ID}"),
+            Some("secret1"),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT, "delete");
+        assert!(
+            matches!(h.runtime.get_exact(ID), Err(bux::Error::NotFound(_))),
+            "row gone"
+        );
+        assert!(
+            matches!(h.runtime.volumes().get(VOL), Err(bux::Error::NotFound(_))),
+            "volume row gone"
+        );
+        assert!(!vol_dir.exists(), "volume directory gone");
+    }
+
+    #[tokio::test]
+    async fn delete_invalid_stored_ids_is_500() {
+        const ID: &str = "abc123aaa005";
+        let h = harness(Limits::default());
+        plant_vm(
+            h.dir.path(),
+            ID,
+            "a-tenant1-a1",
+            dead_pid(),
+            "stopped",
+            &serde_json::json!({
+                "vcpus": 1,
+                "ram_mib": 512,
+                "tenant_id": "tenant1",
+                "agent_id": "bad-id",
+            }),
+        );
+        let res = send(
+            h.app.clone(),
+            "DELETE",
+            &format!("/v1/sandboxes/{ID}"),
+            Some("secret1"),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(
+            res.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid ids"
+        );
+        assert!(h.runtime.get_exact(ID).is_ok(), "must not remove the VM");
     }
 
     #[tokio::test]
@@ -739,13 +1180,43 @@ mod tests {
     #[test]
     fn handlers_never_call_runtime_get() {
         let src = include_str!("sandboxes.rs");
+        let prod = src.split("#[cfg(test)]").next().expect("prod");
         let forbidden = concat!("runtime.get", "(");
-        for (i, line) in src.lines().enumerate() {
+        for (i, line) in prod.lines().enumerate() {
             assert!(
                 !line.contains(forbidden),
                 "HTTP must use get_exact/get_named, line {}: {line}",
                 i + 1
             );
         }
+        assert!(prod.contains("get_named"), "occupancy uses get_named");
+        assert!(prod.contains("get_exact"), "HTTP id uses get_exact");
+    }
+
+    #[test]
+    fn delete_removes_vm_before_volume() {
+        let src = include_str!("sandboxes.rs");
+        let prod = src.split("#[cfg(test)]").next().expect("prod");
+        let vm = prod.find("remove(&info.id)").expect("Runtime::remove");
+        let vol = prod.find("remove_workspace_volume").expect("volume remove");
+        assert!(
+            vm < vol,
+            "VM row must be removed before the workspace volume"
+        );
+    }
+
+    #[test]
+    fn admit_uses_data_dir_usage_not_disk_usage() {
+        let src = include_str!("sandboxes.rs");
+        let admit = src
+            .split("fn admit(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("admit");
+        assert!(admit.contains("data_dir_usage"), "disk cap");
+        assert!(
+            !admit.contains("disk_usage"),
+            "disk cap is data_dir_usage, not disk_usage"
+        );
     }
 }
