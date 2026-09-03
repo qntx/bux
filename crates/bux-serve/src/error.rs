@@ -182,6 +182,26 @@ impl ApiError {
         }
     }
 
+    pub(crate) fn sandbox_exists(existing_id: impl Into<String>, field: &'static str) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "sandbox_exists",
+            message: "sandbox exists with a different spec".into(),
+            existing_id: Some(existing_id.into()),
+            field: Some(field.into()),
+        }
+    }
+
+    pub(crate) fn still_stopping() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "guest_unavailable",
+            message: "sandbox still stopping".into(),
+            existing_id: None,
+            field: None,
+        }
+    }
+
     pub(crate) fn resource_exhausted(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::TOO_MANY_REQUESTS,

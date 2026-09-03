@@ -1,4 +1,4 @@
-//! Sandbox HTTP: list, create, exact-id get, DELETE (stop + remove + workspace volume).
+//! Sandbox HTTP: list, get-or-create, exact-id get, start, DELETE.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -6,7 +6,7 @@ use axum::Json;
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use bux::{
     EgressClass, NetworkSpec, Runtime, SecurityOptions, Status, Vm, VmInfo, VmOptions, VolumeMount,
 };
@@ -26,6 +26,7 @@ pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/sandboxes", get(list).post(create))
         .route("/v1/sandboxes/{id}", get(get_one).delete(delete_one))
+        .route("/v1/sandboxes/{id}/start", post(start_one))
 }
 
 #[derive(Debug, Deserialize)]
@@ -40,11 +41,20 @@ struct CreateRequest {
     #[serde(default)]
     allow_net: Vec<String>,
     #[serde(default)]
+    unrestricted: bool,
+    #[serde(default)]
     env: Vec<String>,
     #[serde(default)]
     workdir: Option<String>,
     #[serde(default)]
     auto_stop_secs: Option<u64>,
+}
+
+struct CreateSpec {
+    image: String,
+    ram_mib: u32,
+    vcpus: u8,
+    network: NetworkSpec,
 }
 
 #[derive(Debug, Serialize)]
@@ -132,59 +142,42 @@ async fn create(
     JsonBody(req): JsonBody<CreateRequest>,
 ) -> Result<(StatusCode, Json<SandboxBody>), ApiError> {
     validate_agent_id(&req.agent_id)?;
-    if !req.allow_net.is_empty() {
-        return Err(ApiError::invalid_config("allow_net is not accepted").with_field("allow_net"));
-    }
-    let image = parse_image(&req.image)?;
+    let spec = CreateSpec {
+        image: parse_image(&req.image)?,
+        ram_mib: req.ram_mib.unwrap_or(state.limits.default_ram_mib),
+        vcpus: req.vcpus.unwrap_or(state.limits.default_vcpus),
+        network: translate_network(
+            &req.allow_net,
+            req.unrestricted,
+            state.allow_unrestricted_net,
+        )?,
+    };
     let name = sandbox_name(&tenant.id, &req.agent_id)?;
-    let volume = workspace_volume_name(&tenant.id, &req.agent_id)?;
 
     if let Some(vm) = state
         .runtime
         .get_named(&name)
         .map_err(ApiError::from_engine)?
     {
-        return existing_or_occupied(&tenant.id, &vm);
+        return existing_sandbox(&state.runtime, &tenant.id, &name, vm, &spec).await;
     }
 
-    let ram_mib = req.ram_mib.unwrap_or(state.limits.default_ram_mib);
-    let vcpus = req.vcpus.unwrap_or(state.limits.default_vcpus);
-    admit(&state, &tenant.id, ram_mib, vcpus)?;
+    create_new(&state, &tenant, name, req, &spec).await
+}
 
-    let mut opts = VmOptions::from_image(image)
-        .name(name.clone())
-        .agent_id(req.agent_id.clone())
-        .tenant_id(tenant.id.clone())
-        .detach(true)
-        .network(NetworkSpec::Disabled)
-        .volume(VolumeMount::named(volume, WORKSPACE_GUEST_PATH))
-        .auto_stop_secs(Some(req.auto_stop_secs.unwrap_or(DEFAULT_AUTO_STOP_SECS)))
-        .env(req.env)
-        .vcpus(vcpus)
-        .ram_mib(ram_mib)
-        .security(SecurityOptions::default())
-        .ready_timeout(READY_TIMEOUT);
-    if let Some(workdir) = req.workdir {
-        opts = opts.workdir(workdir);
+async fn start_one(
+    State(state): State<AppState>,
+    tenant: Tenant,
+    Path(id): Path<String>,
+) -> Result<Json<SandboxBody>, ApiError> {
+    let mut vm = load_owned(&state.runtime, &tenant.id, &id)?;
+    if vm.info().secrets_required {
+        return Err(ApiError::from_engine(bux::Error::SecretsRequired));
     }
-
-    match state.runtime.create(opts).await {
-        Ok(vm) => {
-            let info = vm.info();
-            tracing::info!(
-                tenant_id = %tenant.id,
-                agent_id = %req.agent_id,
-                id = %info.id,
-                "sandbox created"
-            );
-            Ok((StatusCode::CREATED, Json(SandboxBody::from_info(&info))))
-        }
-        Err(err) => match state.runtime.get_named(&name) {
-            Ok(Some(vm)) => existing_or_occupied(&tenant.id, &vm),
-            Ok(None) => Err(create_miss_error(err)),
-            Err(lookup) => Err(ApiError::from_engine(lookup)),
-        },
-    }
+    vm.start(READY_TIMEOUT)
+        .await
+        .map_err(ApiError::from_engine)?;
+    Ok(Json(SandboxBody::from_info(&vm.info())))
 }
 
 async fn delete_one(
@@ -226,14 +219,161 @@ fn parse_image(image: &str) -> Result<String, ApiError> {
     bux::canonical_reference(image).map_err(|e| ApiError::invalid_config(e.to_string()))
 }
 
-fn existing_or_occupied(
+fn translate_network(
+    allow_net: &[String],
+    unrestricted: bool,
+    allow_unrestricted: bool,
+) -> Result<NetworkSpec, ApiError> {
+    if unrestricted {
+        if !allow_unrestricted {
+            return Err(ApiError::invalid_config(
+                "unrestricted network requires --allow-unrestricted-net",
+            )
+            .with_field("unrestricted"));
+        }
+        return Ok(NetworkSpec::Enabled {
+            allow_net: Vec::new(),
+        });
+    }
+    if allow_net.is_empty() {
+        Ok(NetworkSpec::Disabled)
+    } else {
+        Ok(NetworkSpec::Enabled {
+            allow_net: allow_net.to_vec(),
+        })
+    }
+}
+
+fn image_matches(stored: Option<&str>, canonical: &str) -> bool {
+    stored
+        .and_then(|label| bux::canonical_reference(label).ok())
+        .as_deref()
+        == Some(canonical)
+}
+
+fn spec_mismatch(info: &VmInfo, spec: &CreateSpec) -> Option<&'static str> {
+    if !image_matches(info.image.as_deref(), &spec.image) {
+        return Some("image");
+    }
+    if info.ram_mib != spec.ram_mib {
+        return Some("ram_mib");
+    }
+    if info.vcpus != spec.vcpus {
+        return Some("vcpus");
+    }
+    if info.network != spec.network {
+        return Some("network");
+    }
+    None
+}
+
+async fn existing_sandbox(
+    runtime: &Runtime,
     tenant: &str,
-    vm: &Vm,
+    name: &str,
+    vm: Vm,
+    spec: &CreateSpec,
 ) -> Result<(StatusCode, Json<SandboxBody>), ApiError> {
     let info = vm.info();
     match info.tenant_id.as_deref() {
-        Some(id) if id == tenant => Ok((StatusCode::OK, Json(SandboxBody::from_info(&info)))),
-        _ => Err(ApiError::name_occupied(info.id)),
+        Some(id) if id == tenant => {}
+        _ => return Err(ApiError::name_occupied(info.id)),
+    }
+    if info.secrets_required {
+        return Err(ApiError::from_engine(bux::Error::SecretsRequired));
+    }
+    if let Some(field) = spec_mismatch(&info, spec) {
+        return Err(ApiError::sandbox_exists(info.id, field));
+    }
+    resume_matching(runtime, name, vm).await
+}
+
+async fn resume_matching(
+    runtime: &Runtime,
+    name: &str,
+    vm: Vm,
+) -> Result<(StatusCode, Json<SandboxBody>), ApiError> {
+    let vm = match vm.info().status {
+        Status::Stopping => wait_not_stopping(runtime, name).await?,
+        _ => vm,
+    };
+    match vm.info().status {
+        Status::Running => Ok((StatusCode::OK, Json(SandboxBody::from_info(&vm.info())))),
+        Status::Stopped => start_existing(vm).await,
+        Status::Stopping => Err(ApiError::still_stopping()),
+        _ => Err(ApiError::from_engine(bux::Error::InvalidState(
+            "sandbox is not running or stopped".into(),
+        ))),
+    }
+}
+
+async fn wait_not_stopping(runtime: &Runtime, name: &str) -> Result<Vm, ApiError> {
+    let deadline = tokio::time::sleep(STOP_WAIT);
+    tokio::pin!(deadline);
+    loop {
+        let Some(vm) = runtime.get_named(name).map_err(ApiError::from_engine)? else {
+            return Err(ApiError::not_found());
+        };
+        if vm.info().status != Status::Stopping {
+            return Ok(vm);
+        }
+        tokio::select! {
+            () = &mut deadline => return Err(ApiError::still_stopping()),
+            () = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
+    }
+}
+
+async fn start_existing(mut vm: Vm) -> Result<(StatusCode, Json<SandboxBody>), ApiError> {
+    vm.start(READY_TIMEOUT)
+        .await
+        .map_err(ApiError::from_engine)?;
+    Ok((StatusCode::OK, Json(SandboxBody::from_info(&vm.info()))))
+}
+
+async fn create_new(
+    state: &AppState,
+    tenant: &Tenant,
+    name: String,
+    req: CreateRequest,
+    spec: &CreateSpec,
+) -> Result<(StatusCode, Json<SandboxBody>), ApiError> {
+    let volume = workspace_volume_name(&tenant.id, &req.agent_id)?;
+    admit(state, &tenant.id, spec.ram_mib, spec.vcpus)?;
+
+    let mut opts = VmOptions::from_image(spec.image.clone())
+        .name(name.clone())
+        .agent_id(req.agent_id.clone())
+        .tenant_id(tenant.id.clone())
+        .detach(true)
+        .network(spec.network.clone())
+        .volume(VolumeMount::named(volume, WORKSPACE_GUEST_PATH))
+        .auto_stop_secs(Some(req.auto_stop_secs.unwrap_or(DEFAULT_AUTO_STOP_SECS)))
+        .env(req.env)
+        .vcpus(spec.vcpus)
+        .ram_mib(spec.ram_mib)
+        .security(SecurityOptions::default())
+        .ready_timeout(READY_TIMEOUT);
+    if let Some(workdir) = req.workdir {
+        opts = opts.workdir(workdir);
+    }
+
+    match state.runtime.create(opts).await {
+        Ok(vm) => {
+            let info = vm.info();
+            tracing::info!(
+                tenant_id = %tenant.id,
+                agent_id = %req.agent_id,
+                id = %info.id,
+                "sandbox created"
+            );
+            Ok((StatusCode::CREATED, Json(SandboxBody::from_info(&info))))
+        }
+        Err(err) => match state.runtime.get_named(&name) {
+            Ok(Some(vm)) => existing_sandbox(&state.runtime, &tenant.id, &name, vm, spec).await,
+            Ok(None) => Err(create_miss_error(err)),
+            Err(lookup) => Err(ApiError::from_engine(lookup)),
+        },
     }
 }
 
@@ -360,6 +500,10 @@ mod tests {
     }
 
     fn harness(limits: Limits) -> Harness {
+        harness_cfg(limits, false)
+    }
+
+    fn harness_cfg(limits: Limits, unrestricted: bool) -> Harness {
         let dir = tempfile::tempdir().unwrap();
         let opened = Runtime::open(dir.path()).unwrap();
         let state = AppState::new(
@@ -369,7 +513,8 @@ mod tests {
             ],
             opened,
             limits,
-        );
+        )
+        .with_unrestricted_net(unrestricted);
         let runtime = Arc::clone(&state.runtime);
         let app = router(state);
         Harness { dir, runtime, app }
@@ -392,23 +537,43 @@ mod tests {
         name: &str,
         pid: i32,
         status: &str,
+        image: Option<&str>,
         config: &serde_json::Value,
     ) {
         let socket = data_dir.join("socks").join(format!("{id}.sock"));
         open_db(data_dir)
             .execute(
                 "INSERT INTO vms (id, name, pid, image, socket, status, config, created_at)
-                 VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, 0)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
                 params![
                     id,
                     name,
                     pid,
+                    image,
                     socket.to_str().expect("socket utf-8"),
                     status,
                     config.to_string(),
                 ],
             )
             .unwrap();
+    }
+
+    fn alpine_image() -> String {
+        bux::canonical_reference("alpine").unwrap()
+    }
+
+    fn disabled_network() -> serde_json::Value {
+        serde_json::to_value(NetworkSpec::Disabled).unwrap()
+    }
+
+    fn owned_config(tenant: &str, agent: &str) -> serde_json::Value {
+        serde_json::json!({
+            "vcpus": 1,
+            "ram_mib": 512,
+            "tenant_id": tenant,
+            "agent_id": agent,
+            "network": disabled_network(),
+        })
     }
 
     fn dead_pid() -> i32 {
@@ -621,22 +786,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_allow_net_is_400() {
+    async fn post_unrestricted_without_flag_is_400() {
         let (_dir, app) = test_app(Limits::default());
         let res = send(
             app,
             "POST",
             "/v1/sandboxes",
             Some("secret1"),
-            Body::from(r#"{"agent_id":"a1","image":"alpine","allow_net":["example.com"]}"#),
+            Body::from(r#"{"agent_id":"a1","image":"alpine","unrestricted":true}"#),
         )
         .await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST, "status");
         let v = json_body(res).await;
+        assert_eq!(error_code(&v), Some("invalid_config"), "code");
         assert_eq!(
             v.pointer("/error/field")
                 .and_then(serde_json::Value::as_str),
-            Some("allow_net"),
+            Some("unrestricted"),
             "field"
         );
     }
@@ -757,6 +923,7 @@ mod tests {
             "a-tenant1-live",
             pid,
             "running",
+            None,
             &serde_json::json!({
                 "vcpus": 1,
                 "ram_mib": 700,
@@ -791,6 +958,7 @@ mod tests {
             "a-tenant1-dead",
             dead_pid(),
             "running",
+            None,
             &serde_json::json!({
                 "vcpus": 1,
                 "ram_mib": 700,
@@ -852,37 +1020,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_tenant_post_returns_existing_without_create() {
+    async fn running_same_spec_is_200_and_other_tenant_404() {
         const ID: &str = "abc123aaa001";
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = i32::try_from(child.id()).unwrap();
         let h = harness(Limits::default());
+        let image = alpine_image();
         plant_vm(
             h.dir.path(),
             ID,
             "a-tenant1-a1",
-            dead_pid(),
-            "stopped",
-            &serde_json::json!({
-                "vcpus": 1,
-                "ram_mib": 512,
-                "tenant_id": "tenant1",
-                "agent_id": "a1",
-            }),
+            pid,
+            "running",
+            Some(image.as_str()),
+            &owned_config("tenant1", "a1"),
         );
         let created = send(
             h.app.clone(),
             "POST",
             "/v1/sandboxes",
             Some("secret1"),
-            Body::from(r#"{"agent_id":"a1","image":"alpine","ram_mib":2048}"#),
+            Body::from(r#"{"agent_id":"a1","image":"alpine","env":["FOO=bar"],"workdir":"/tmp"}"#),
         )
         .await;
-        assert_eq!(created.status(), StatusCode::OK, "same tenant");
+        assert_eq!(created.status(), StatusCode::OK, "same spec running");
         let body = json_body(created).await;
         assert_eq!(body.get("id").and_then(serde_json::Value::as_str), Some(ID));
         assert_eq!(
             body.get("ram_mib").and_then(serde_json::Value::as_u64),
             Some(512),
-            "must not compare or overwrite ram"
+            "env/workdir are not conflict fields"
         );
 
         let got = send(
@@ -919,12 +1089,24 @@ mod tests {
             Body::empty(),
         )
         .await;
+        let other_start = send(
+            h.app.clone(),
+            "POST",
+            &format!("/v1/sandboxes/{ID}/start"),
+            Some("secret2"),
+            Body::empty(),
+        )
+        .await;
+        drop(child.kill());
+        drop(child.wait());
         assert_eq!(missing.status(), StatusCode::NOT_FOUND, "missing");
         assert_eq!(other_get.status(), StatusCode::NOT_FOUND, "other get");
         assert_eq!(other_del.status(), StatusCode::NOT_FOUND, "other delete");
+        assert_eq!(other_start.status(), StatusCode::NOT_FOUND, "other start");
         let missing_json = json_body(missing).await;
         assert_eq!(json_body(other_get).await, missing_json, "get envelope");
         assert_eq!(json_body(other_del).await, missing_json, "delete envelope");
+        assert_eq!(json_body(other_start).await, missing_json, "start envelope");
 
         let list2 = send(
             h.app.clone(),
@@ -967,6 +1149,7 @@ mod tests {
             "a-tenant1-a1",
             dead_pid(),
             "stopped",
+            None,
             &serde_json::json!({
                 "vcpus": 1,
                 "ram_mib": 512,
@@ -1016,6 +1199,7 @@ mod tests {
             "a-tenant1-a1",
             dead_pid(),
             "stopped",
+            None,
             &serde_json::json!({
                 "vcpus": 1,
                 "ram_mib": 512,
@@ -1082,6 +1266,7 @@ mod tests {
             "a-tenant1-a1",
             dead_pid(),
             "stopped",
+            None,
             &serde_json::json!({
                 "vcpus": 1,
                 "ram_mib": 512,
@@ -1124,6 +1309,7 @@ mod tests {
             "a-tenant1-a1",
             dead_pid(),
             "stopped",
+            None,
             &serde_json::json!({
                 "vcpus": 1,
                 "ram_mib": 512,
@@ -1166,6 +1352,375 @@ mod tests {
         assert_eq!(
             v.pointer("/error/code").and_then(serde_json::Value::as_str),
             Some("security_unavailable"),
+            "code"
+        );
+    }
+
+    async fn post_conflict(body: &'static str) -> (StatusCode, serde_json::Value) {
+        const ID: &str = "abc123aaa010";
+        let h = harness(Limits::default());
+        let image = alpine_image();
+        plant_vm(
+            h.dir.path(),
+            ID,
+            "a-tenant1-a1",
+            dead_pid(),
+            "stopped",
+            Some(image.as_str()),
+            &owned_config("tenant1", "a1"),
+        );
+        let res = send(
+            h.app,
+            "POST",
+            "/v1/sandboxes",
+            Some("secret1"),
+            Body::from(body),
+        )
+        .await;
+        let status = res.status();
+        (status, json_body(res).await)
+    }
+
+    #[tokio::test]
+    async fn spec_mismatch_ram_is_sandbox_exists() {
+        let (status, v) =
+            post_conflict(r#"{"agent_id":"a1","image":"alpine","ram_mib":1024}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT, "status");
+        assert_eq!(error_code(&v), Some("sandbox_exists"), "code");
+        assert_eq!(
+            v.pointer("/error/field")
+                .and_then(serde_json::Value::as_str),
+            Some("ram_mib"),
+            "field"
+        );
+        assert_eq!(
+            v.pointer("/error/existing_id")
+                .and_then(serde_json::Value::as_str),
+            Some("abc123aaa010"),
+            "existing_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn spec_mismatch_vcpus_is_sandbox_exists() {
+        let (status, v) = post_conflict(r#"{"agent_id":"a1","image":"alpine","vcpus":2}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT, "status");
+        assert_eq!(error_code(&v), Some("sandbox_exists"), "code");
+        assert_eq!(
+            v.pointer("/error/field")
+                .and_then(serde_json::Value::as_str),
+            Some("vcpus"),
+            "field"
+        );
+    }
+
+    #[tokio::test]
+    async fn spec_mismatch_image_is_sandbox_exists() {
+        let (status, v) = post_conflict(r#"{"agent_id":"a1","image":"python:slim"}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT, "status");
+        assert_eq!(error_code(&v), Some("sandbox_exists"), "code");
+        assert_eq!(
+            v.pointer("/error/field")
+                .and_then(serde_json::Value::as_str),
+            Some("image"),
+            "field"
+        );
+    }
+
+    #[tokio::test]
+    async fn spec_mismatch_network_is_sandbox_exists() {
+        let (status, v) =
+            post_conflict(r#"{"agent_id":"a1","image":"alpine","allow_net":["example.com"]}"#)
+                .await;
+        assert_eq!(status, StatusCode::CONFLICT, "status");
+        assert_eq!(error_code(&v), Some("sandbox_exists"), "code");
+        assert_eq!(
+            v.pointer("/error/field")
+                .and_then(serde_json::Value::as_str),
+            Some("network"),
+            "field"
+        );
+    }
+
+    #[tokio::test]
+    async fn secrets_required_post_is_409() {
+        const ID: &str = "abc123aaa011";
+        let h = harness(Limits::default());
+        let image = alpine_image();
+        let mut config = owned_config("tenant1", "a1");
+        config["secrets_required"] = serde_json::json!(true);
+        plant_vm(
+            h.dir.path(),
+            ID,
+            "a-tenant1-a1",
+            dead_pid(),
+            "stopped",
+            Some(image.as_str()),
+            &config,
+        );
+        let res = send(
+            h.app,
+            "POST",
+            "/v1/sandboxes",
+            Some("secret1"),
+            Body::from(r#"{"agent_id":"a1","image":"alpine"}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::CONFLICT, "secrets");
+        assert_eq!(
+            error_code(&json_body(res).await),
+            Some("secrets_required"),
+            "code"
+        );
+    }
+
+    #[tokio::test]
+    async fn canonical_image_aliases_match() {
+        const ID: &str = "abc123aaa012";
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = i32::try_from(child.id()).unwrap();
+        let h = harness(Limits::default());
+        let image = bux::canonical_reference("python:slim").unwrap();
+        plant_vm(
+            h.dir.path(),
+            ID,
+            "a-tenant1-a1",
+            pid,
+            "running",
+            Some(image.as_str()),
+            &owned_config("tenant1", "a1"),
+        );
+        let res = send(
+            h.app,
+            "POST",
+            "/v1/sandboxes",
+            Some("secret1"),
+            Body::from(r#"{"agent_id":"a1","image":"python:slim"}"#),
+        )
+        .await;
+        drop(child.kill());
+        drop(child.wait());
+        assert_eq!(res.status(), StatusCode::OK, "canonical alias");
+        assert_eq!(
+            json_body(res)
+                .await
+                .get("id")
+                .and_then(serde_json::Value::as_str),
+            Some(ID),
+            "id"
+        );
+    }
+
+    #[tokio::test]
+    async fn allow_net_same_spec_running_is_200() {
+        const ID: &str = "abc123aaa013";
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = i32::try_from(child.id()).unwrap();
+        let h = harness(Limits::default());
+        let image = alpine_image();
+        let mut config = owned_config("tenant1", "a1");
+        config["network"] = serde_json::to_value(NetworkSpec::Enabled {
+            allow_net: vec!["example.com".into()],
+        })
+        .unwrap();
+        plant_vm(
+            h.dir.path(),
+            ID,
+            "a-tenant1-a1",
+            pid,
+            "running",
+            Some(image.as_str()),
+            &config,
+        );
+        let res = send(
+            h.app,
+            "POST",
+            "/v1/sandboxes",
+            Some("secret1"),
+            Body::from(r#"{"agent_id":"a1","image":"alpine","allow_net":["example.com"]}"#),
+        )
+        .await;
+        drop(child.kill());
+        drop(child.wait());
+        assert_eq!(res.status(), StatusCode::OK, "allow_net match");
+    }
+
+    #[tokio::test]
+    async fn unrestricted_with_flag_matches_empty_allow_net() {
+        const ID: &str = "abc123aaa014";
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = i32::try_from(child.id()).unwrap();
+        let h = harness_cfg(Limits::default(), true);
+        let image = alpine_image();
+        let mut config = owned_config("tenant1", "a1");
+        config["network"] = serde_json::to_value(NetworkSpec::Enabled {
+            allow_net: Vec::new(),
+        })
+        .unwrap();
+        plant_vm(
+            h.dir.path(),
+            ID,
+            "a-tenant1-a1",
+            pid,
+            "running",
+            Some(image.as_str()),
+            &config,
+        );
+        let res = send(
+            h.app,
+            "POST",
+            "/v1/sandboxes",
+            Some("secret1"),
+            Body::from(r#"{"agent_id":"a1","image":"alpine","unrestricted":true}"#),
+        )
+        .await;
+        drop(child.kill());
+        drop(child.wait());
+        assert_eq!(res.status(), StatusCode::OK, "unrestricted match");
+    }
+
+    #[tokio::test]
+    async fn stopping_same_spec_times_out_503() {
+        const ID: &str = "abc123aaa015";
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = i32::try_from(child.id()).unwrap();
+        let h = harness(Limits::default());
+        let image = alpine_image();
+        plant_vm(
+            h.dir.path(),
+            ID,
+            "a-tenant1-a1",
+            pid,
+            "stopping",
+            Some(image.as_str()),
+            &owned_config("tenant1", "a1"),
+        );
+        let res = send(
+            h.app,
+            "POST",
+            "/v1/sandboxes",
+            Some("secret1"),
+            Body::from(r#"{"agent_id":"a1","image":"alpine"}"#),
+        )
+        .await;
+        drop(child.kill());
+        drop(child.wait());
+        assert_eq!(
+            res.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "still stopping"
+        );
+        assert_eq!(
+            error_code(&json_body(res).await),
+            Some("guest_unavailable"),
+            "code"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_missing_is_404() {
+        let (_dir, app) = test_app(Limits::default());
+        let res = send(
+            app,
+            "POST",
+            "/v1/sandboxes/0123456789ab/start",
+            Some("secret1"),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "missing");
+        assert_eq!(error_code(&json_body(res).await), Some("not_found"), "code");
+    }
+
+    #[tokio::test]
+    async fn start_without_bearer_is_401() {
+        let (_dir, app) = test_app(Limits::default());
+        let res = send(
+            app,
+            "POST",
+            "/v1/sandboxes/0123456789ab/start",
+            None,
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "status");
+    }
+
+    #[tokio::test]
+    async fn start_secrets_required_is_409() {
+        const ID: &str = "abc123aaa016";
+        let h = harness(Limits::default());
+        let mut config = owned_config("tenant1", "a1");
+        config["secrets_required"] = serde_json::json!(true);
+        plant_vm(
+            h.dir.path(),
+            ID,
+            "a-tenant1-a1",
+            dead_pid(),
+            "stopped",
+            None,
+            &config,
+        );
+        let res = send(
+            h.app,
+            "POST",
+            &format!("/v1/sandboxes/{ID}/start"),
+            Some("secret1"),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::CONFLICT, "secrets");
+        assert_eq!(
+            error_code(&json_body(res).await),
+            Some("secrets_required"),
+            "code"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_running_is_invalid_state() {
+        const ID: &str = "abc123aaa017";
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = i32::try_from(child.id()).unwrap();
+        let h = harness(Limits::default());
+        plant_vm(
+            h.dir.path(),
+            ID,
+            "a-tenant1-a1",
+            pid,
+            "running",
+            None,
+            &owned_config("tenant1", "a1"),
+        );
+        let res = send(
+            h.app,
+            "POST",
+            &format!("/v1/sandboxes/{ID}/start"),
+            Some("secret1"),
+            Body::empty(),
+        )
+        .await;
+        drop(child.kill());
+        drop(child.wait());
+        assert_eq!(res.status(), StatusCode::CONFLICT, "already running");
+        assert_eq!(
+            error_code(&json_body(res).await),
+            Some("invalid_state"),
             "code"
         );
     }
@@ -1218,6 +1773,86 @@ mod tests {
         assert!(
             !admit.contains("disk_usage"),
             "disk cap is data_dir_usage, not disk_usage"
+        );
+    }
+
+    #[test]
+    fn translate_network_table() {
+        assert_eq!(
+            translate_network(&[], false, false).unwrap(),
+            NetworkSpec::Disabled,
+            "omit/empty"
+        );
+        assert_eq!(
+            translate_network(&["pypi.org".into()], false, false).unwrap(),
+            NetworkSpec::Enabled {
+                allow_net: vec!["pypi.org".into()],
+            },
+            "allow_net"
+        );
+        assert!(
+            translate_network(&[], true, false).is_err(),
+            "unrestricted without flag"
+        );
+        assert_eq!(
+            translate_network(&["ignored".into()], true, true).unwrap(),
+            NetworkSpec::Enabled {
+                allow_net: Vec::new(),
+            },
+            "unrestricted with flag"
+        );
+    }
+
+    #[test]
+    fn image_matches_canonical_aliases() {
+        let canonical = bux::canonical_reference("python:slim").unwrap();
+        assert!(image_matches(Some("python:slim"), &canonical), "short");
+        assert!(
+            image_matches(Some("docker.io/library/python:slim"), &canonical),
+            "long"
+        );
+        assert!(!image_matches(Some("alpine"), &canonical), "other");
+        assert!(!image_matches(None, &canonical), "missing");
+    }
+
+    #[test]
+    fn spec_mismatch_ignores_env_and_workdir() {
+        let spec = include_str!("sandboxes.rs")
+            .split("fn spec_mismatch(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nasync fn ").next())
+            .expect("spec_mismatch");
+        assert!(spec.contains("image"), "image");
+        assert!(spec.contains("ram_mib"), "ram");
+        assert!(spec.contains("vcpus"), "vcpus");
+        assert!(spec.contains("network"), "network");
+        assert!(!spec.contains("env"), "env is not a conflict field");
+        assert!(!spec.contains("workdir"), "workdir is not a conflict field");
+    }
+
+    #[test]
+    fn stopped_same_spec_calls_start() {
+        let prod = include_str!("sandboxes.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("prod");
+        assert!(prod.contains("start(READY_TIMEOUT)"), "start ready 30s");
+        assert!(prod.contains("create_new"), "retry path after create");
+        assert!(prod.contains("existing_sandbox"), "conflict table");
+    }
+
+    #[test]
+    fn create_retries_get_named_once() {
+        let create_new = include_str!("sandboxes.rs")
+            .split("async fn create_new(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn create_miss_error").next())
+            .expect("create_new");
+        let lookups = create_new.matches("get_named").count();
+        assert_eq!(lookups, 1, "retry get_named after create fail");
+        assert!(
+            create_new.contains("existing_sandbox"),
+            "then conflict table"
         );
     }
 }

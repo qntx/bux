@@ -259,6 +259,14 @@ struct ServeStartArgs {
     /// Default `vcpus` when omitted on create.
     #[arg(long, default_value_t = 1)]
     default_vcpus: u8,
+
+    /// Required to bind a non-loopback TCP address.
+    #[arg(long)]
+    public: bool,
+
+    /// Allow `"unrestricted": true` on create (`Enabled { allow_net: [] }`).
+    #[arg(long)]
+    allow_unrestricted_net: bool,
 }
 
 impl ServeStartArgs {
@@ -282,9 +290,10 @@ impl ServeStartArgs {
             default_ram_mib: self.default_ram_mib,
             default_vcpus: self.default_vcpus,
         };
-        let config = bux_serve::ServeConfig::new(&self.listen, keys)?
+        let config = bux_serve::ServeConfig::bind(&self.listen, keys, self.public)?
             .data_dir(bux::default_data_dir())
-            .limits(limits);
+            .limits(limits)
+            .allow_unrestricted_net(self.allow_unrestricted_net);
         bux_serve::run(config)
     }
 }
@@ -762,6 +771,27 @@ mod log_level_tests {
         assert!(help.contains("--max-pull-bytes"), "{help}");
         assert!(help.contains("--max-exec-output-bytes"), "{help}");
         assert!(help.contains("--pull-timeout-secs"), "{help}");
+        assert!(help.contains("--public"), "{help}");
+        assert!(help.contains("--allow-unrestricted-net"), "{help}");
+    }
+
+    #[test]
+    fn serve_start_public_and_unrestricted_flags() {
+        let cli = parse(&[
+            "serve",
+            "start",
+            "--api-key",
+            "t1:s",
+            "--public",
+            "--allow-unrestricted-net",
+        ]);
+        match cli.command {
+            Command::Serve(Serve::Start(args)) => {
+                assert!(args.public, "public");
+                assert!(args.allow_unrestricted_net, "unrestricted");
+            }
+            _ => panic!("expected serve start"),
+        }
     }
 
     #[test]
