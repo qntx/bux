@@ -13,6 +13,7 @@ repository = "https://github.com/qntx/bux"
 bux = { version = "0.8", path = "crates/bux" }
 bux-oci = { version = "0.8", path = "crates/bux-oci" }
 bux-proto = { version = "0.8", path = "crates/bux-proto" }
+bux-serve = { version = "0.8", path = "crates/bux-serve" }
 
 bux-bwrap = { version = "0.2", path = "crates/bux-bwrap" }
 bux-jail = { version = "0.1", path = "crates/bux-jail" }
@@ -25,6 +26,7 @@ bux-qcow2 = { version = "0.1", path = "crates/bux-qcow2" }
 bux-seccomp = { version = "0.1", path = "crates/bux-seccomp" }
 
 anyhow = "1.0.104"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
 clap = { version = "4.6.6", features = ["derive"] }
 clap_complete = "4.6.9"
 colored = "3.1.1"
@@ -39,6 +41,8 @@ postcard = { version = "1.1.3", features = ["alloc"] }
 tempfile = "3.27.0"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["macros", "rt", "io-util", "net", "time", "sync", "signal"] }
+tower = { version = "0.5.2", features = ["util"] }
+tower-http = { version = "0.6.6", features = ["limit", "trace"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 tokio-vsock = "0.7.2"
 bindgen = "0.72.1"

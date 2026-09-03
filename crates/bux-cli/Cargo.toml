@@ -16,13 +16,14 @@ path = "src/main.rs"
 [dependencies]
 bux.workspace = true
 bux-proto.workspace = true
+bux-serve.workspace = true
 anyhow.workspace = true
-clap.workspace = true
+clap = { workspace = true, features = ["env"] }
 clap_complete.workspace = true
 libc.workspace = true
 serde_json.workspace = true
 tar.workspace = true
-tokio = { workspace = true, features = ["io-std"] }
+tokio = { workspace = true, features = ["io-std", "rt-multi-thread"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]

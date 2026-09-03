@@ -18,6 +18,8 @@ mod run;
 mod vm;
 mod volume;
 
+use std::path::PathBuf;
+
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
@@ -170,6 +172,10 @@ enum Command {
     /// Policies default off; set `auto_stop_secs` / `auto_delete_secs` on create.
     Sweep,
 
+    /// Hosted HTTP worker.
+    #[command(subcommand)]
+    Serve(Serve),
+
     /// Manage ext4 disk images.
     Disk {
         #[command(subcommand)]
@@ -182,6 +188,44 @@ enum Command {
         /// Target shell.
         shell: Shell,
     },
+}
+
+/// `bux serve` subcommands.
+#[derive(Subcommand)]
+enum Serve {
+    /// Run the HTTP worker.
+    Start(ServeStartArgs),
+    /// Print the OpenAPI document as JSON and exit.
+    Openapi,
+}
+
+/// Flags for `bux serve start`.
+#[derive(clap::Args)]
+struct ServeStartArgs {
+    /// TCP listen address (`IP:PORT`).
+    #[arg(long, env = "BUX_LISTEN", default_value = "127.0.0.1:8080")]
+    listen: String,
+
+    /// API key as `id:secret`. Repeatable. `id` is the tenant id (`[A-Za-z0-9._]`).
+    #[arg(long = "api-key")]
+    api_key: Vec<String>,
+
+    /// File of `id=secret` lines. Blank lines and `#` comments are skipped.
+    #[arg(long, env = "BUX_API_KEY_FILE")]
+    api_key_file: Option<PathBuf>,
+}
+
+impl ServeStartArgs {
+    fn run(self) -> std::result::Result<(), bux_serve::Error> {
+        let env_keys = std::env::var("BUX_API_KEYS").ok();
+        let keys = bux_serve::load_api_keys(
+            &self.api_key,
+            self.api_key_file.as_deref(),
+            env_keys.as_deref().filter(|s| !s.is_empty()),
+        )?;
+        let config = bux_serve::ServeConfig::new(&self.listen, keys)?;
+        bux_serve::run(config)
+    }
 }
 
 /// Subcommands for `bux system`.
@@ -263,13 +307,42 @@ pub(crate) enum OutputFormat {
     Json,
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
+fn main() {
     let cli = Cli::parse();
     init_tracing(cli.log_level);
-    if let Err(e) = cli.dispatch().await {
-        eprintln!("bux: {e:#}");
-        std::process::exit(1);
+    match cli.command {
+        Command::Serve(cmd) => {
+            if let Err(e) = run_serve(cmd) {
+                eprintln!("bux: {e}");
+                std::process::exit(e.exit_code());
+            }
+        }
+        command => {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    eprintln!("bux: {e:#}");
+                    std::process::exit(1);
+                }
+            };
+            if let Err(e) = rt.block_on(dispatch(command)) {
+                eprintln!("bux: {e:#}");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+fn run_serve(cmd: Serve) -> std::result::Result<(), bux_serve::Error> {
+    match cmd {
+        Serve::Start(args) => args.run(),
+        Serve::Openapi => {
+            println!("{}", bux_serve::openapi_json());
+            Ok(())
+        }
     }
 }
 
@@ -287,42 +360,41 @@ fn init_tracing(log_level: Option<LogLevel>) {
         .init();
 }
 
-impl Cli {
-    async fn dispatch(self) -> Result<()> {
-        match self.command {
-            Command::Run(args) => args.run().await,
-            Command::Create(args) => args.run().await,
-            Command::Exec(args) => vm::exec(args).await,
-            Command::Logs(ref args) => logs::logs(args),
-            Command::Ps(ref args) => vm::ps(args),
-            Command::Stop(args) => vm::stop(args).await,
-            Command::Kill(ref args) => vm::kill(args),
-            Command::Rm(ref args) => vm::rm(args),
-            Command::Inspect(ref args) => vm::inspect(args),
-            Command::Cp(args) => vm::cp(args).await,
-            Command::Wait(args) => vm::wait(args).await,
-            Command::Prune => vm::prune(),
-            Command::Rename(ref args) => vm::rename(args),
-            Command::Restart(args) => vm::restart(args).await,
-            Command::Stats(ref args) => vm::stats(args).await,
-            Command::Snapshot { action } => snapshot_cmd(action).await,
-            Command::Clone(args) => vm::clone_box(args).await,
-            Command::Export(ref args) => vm::export(args),
-            Command::Pull { image } => pull(&image).await,
-            Command::Images { format } => images(format),
-            Command::Rmi { images } => rmi(&images),
-            Command::Info { format } => system_info(format),
-            Command::System { action } => match action {
-                SystemAction::Info { format } => system_info(format),
-                SystemAction::Reset => system_reset(),
-            },
-            Command::Volume { action } => volume::dispatch(action),
-            Command::Sweep => sweep_cmd(),
-            Command::Disk { action } => disk_cmd(action),
-            Command::Completion { shell } => {
-                clap_complete::generate(shell, &mut Self::command(), "bux", &mut std::io::stdout());
-                Ok(())
-            }
+async fn dispatch(command: Command) -> Result<()> {
+    match command {
+        Command::Run(args) => args.run().await,
+        Command::Create(args) => args.run().await,
+        Command::Exec(args) => vm::exec(args).await,
+        Command::Logs(ref args) => logs::logs(args),
+        Command::Ps(ref args) => vm::ps(args),
+        Command::Stop(args) => vm::stop(args).await,
+        Command::Kill(ref args) => vm::kill(args),
+        Command::Rm(ref args) => vm::rm(args),
+        Command::Inspect(ref args) => vm::inspect(args),
+        Command::Cp(args) => vm::cp(args).await,
+        Command::Wait(args) => vm::wait(args).await,
+        Command::Prune => vm::prune(),
+        Command::Rename(ref args) => vm::rename(args),
+        Command::Restart(args) => vm::restart(args).await,
+        Command::Stats(ref args) => vm::stats(args).await,
+        Command::Snapshot { action } => snapshot_cmd(action).await,
+        Command::Clone(args) => vm::clone_box(args).await,
+        Command::Export(ref args) => vm::export(args),
+        Command::Pull { image } => pull(&image).await,
+        Command::Images { format } => images(format),
+        Command::Rmi { images } => rmi(&images),
+        Command::Info { format } => system_info(format),
+        Command::System { action } => match action {
+            SystemAction::Info { format } => system_info(format),
+            SystemAction::Reset => system_reset(),
+        },
+        Command::Volume { action } => volume::dispatch(action),
+        Command::Sweep => sweep_cmd(),
+        Command::Serve(_) => anyhow::bail!("serve does not run on the current_thread runtime"),
+        Command::Disk { action } => disk_cmd(action),
+        Command::Completion { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "bux", &mut std::io::stdout());
+            Ok(())
         }
     }
 }
@@ -596,6 +668,31 @@ mod log_level_tests {
     #[test]
     fn rejects_invalid_level() {
         assert!(Cli::try_parse_from(["bux", "--log-level", "verbose", "images"]).is_err());
+    }
+
+    #[test]
+    fn serve_start_and_openapi_are_subcommands() {
+        let start = parse(&["serve", "start", "--api-key", "t1:s"]);
+        assert!(
+            matches!(start.command, Command::Serve(Serve::Start(_))),
+            "start"
+        );
+        let openapi = parse(&["serve", "openapi"]);
+        assert!(
+            matches!(openapi.command, Command::Serve(Serve::Openapi)),
+            "openapi"
+        );
+    }
+
+    #[test]
+    fn serve_start_help_mentions_keys() {
+        let help = match Cli::try_parse_from(["bux", "serve", "start", "--help"]) {
+            Ok(_) => panic!("--help should abort parse"),
+            Err(e) => e.to_string(),
+        };
+        assert!(help.contains("--api-key"), "{help}");
+        assert!(help.contains("--api-key-file"), "{help}");
+        assert!(help.contains("--listen"), "{help}");
     }
 
     #[test]
