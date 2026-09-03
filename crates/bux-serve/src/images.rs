@@ -8,7 +8,8 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use bux::ImageInfo;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::error::{ApiError, JsonBody, QueryBody};
 use crate::state::AppState;
@@ -19,32 +20,75 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/v1/images/pull", post(pull_image))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-struct PullRequest {
+pub(crate) struct PullRequest {
     reference: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct ImageInfoBody {
+    reference: String,
+    digest: String,
+    size: u64,
+}
+
+impl From<ImageInfo> for ImageInfoBody {
+    fn from(info: ImageInfo) -> Self {
+        Self {
+            reference: info.reference,
+            digest: info.digest,
+            size: info.size,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
-struct ReferenceQuery {
+pub(crate) struct ReferenceQuery {
     reference: String,
 }
 
-async fn list_images(State(state): State<AppState>) -> Result<Json<Vec<ImageInfo>>, ApiError> {
+#[utoipa::path(
+    get,
+    path = "/v1/images",
+    operation_id = "listImages",
+    tag = "Images",
+    responses(
+        (status = 200, description = "Cached images (worker-global)", body = [ImageInfoBody]),
+        (status = 401, description = "Missing or invalid Bearer token")
+    )
+)]
+pub(crate) async fn list_images(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<ImageInfoBody>>, ApiError> {
     let images = state.runtime.images().map_err(ApiError::from_engine)?;
-    Ok(Json(images))
+    Ok(Json(images.into_iter().map(ImageInfoBody::from).collect()))
 }
 
-async fn pull_image(
+#[utoipa::path(
+    post,
+    path = "/v1/images/pull",
+    operation_id = "pullImage",
+    tag = "Images",
+    request_body = PullRequest,
+    responses(
+        (status = 200, description = "Pulled", body = ImageInfoBody),
+        (status = 400, description = "Invalid reference"),
+        (status = 401, description = "Missing or invalid Bearer token"),
+        (status = 413, description = "Manifest compressed size over max-pull-bytes"),
+        (status = 429, description = "Disk cap")
+    )
+)]
+pub(crate) async fn pull_image(
     State(state): State<AppState>,
     JsonBody(req): JsonBody<PullRequest>,
-) -> Result<Json<ImageInfo>, ApiError> {
+) -> Result<Json<ImageInfoBody>, ApiError> {
     let reference = bux::canonical_reference(&req.reference)
         .map_err(|e| ApiError::invalid_config(e.to_string()))?;
     admit_disk(&state)?;
     let deadline = Duration::from_secs(state.limits.pull_timeout_secs);
     match tokio::time::timeout(deadline, pull_from_registry(&state, &reference)).await {
-        Ok(Ok(info)) => Ok(Json(info)),
+        Ok(Ok(info)) => Ok(Json(ImageInfoBody::from(info))),
         Ok(Err(err)) => Err(err),
         Err(_) => Err(ApiError::oci("pull timed out")),
     }
@@ -68,7 +112,21 @@ async fn pull_from_registry(state: &AppState, reference: &str) -> Result<ImageIn
         .map_err(ApiError::from_engine)
 }
 
-async fn delete_image(
+#[utoipa::path(
+    delete,
+    path = "/v1/images",
+    operation_id = "deleteImage",
+    tag = "Images",
+    params(("reference" = String, Query, description = "OCI reference")),
+    responses(
+        (status = 204, description = "Index entry removed"),
+        (status = 400, description = "Invalid reference"),
+        (status = 401, description = "Missing or invalid Bearer token"),
+        (status = 404, description = "Not in store"),
+        (status = 409, description = "Image is in use")
+    )
+)]
+pub(crate) async fn delete_image(
     State(state): State<AppState>,
     QueryBody(query): QueryBody<ReferenceQuery>,
 ) -> Result<StatusCode, ApiError> {

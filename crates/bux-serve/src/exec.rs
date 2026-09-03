@@ -7,6 +7,7 @@ use axum::routing::post;
 use bux::{ExecHandle, ExecStart};
 use bux_proto::ExecOut;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::auth::Tenant;
 use crate::error::{ApiError, JsonBody};
@@ -20,9 +21,9 @@ pub(crate) fn routes() -> Router<AppState> {
     Router::new().route("/v1/sandboxes/{id}/exec", post(exec_one))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-struct ExecRequest {
+pub(crate) struct ExecRequest {
     cmd: String,
     #[serde(default)]
     args: Vec<String>,
@@ -34,8 +35,8 @@ struct ExecRequest {
     timeout_ms: Option<u64>,
 }
 
-#[derive(Debug, Serialize)]
-struct ExecResponse {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct ExecResponse {
     stdout: String,
     stderr: String,
     code: i32,
@@ -44,7 +45,22 @@ struct ExecResponse {
     truncated: bool,
 }
 
-async fn exec_one(
+#[utoipa::path(
+    post,
+    path = "/v1/sandboxes/{id}/exec",
+    operation_id = "exec",
+    tag = "Exec",
+    params(("id" = String, Path, description = "Exact 12-char hex sandbox id")),
+    request_body = ExecRequest,
+    responses(
+        (status = 200, description = "Collected exec output", body = ExecResponse),
+        (status = 400, description = "Invalid body or timeout_ms"),
+        (status = 401, description = "Missing or invalid Bearer token"),
+        (status = 404, description = "Missing or other tenant"),
+        (status = 409, description = "secrets_required")
+    )
+)]
+pub(crate) async fn exec_one(
     State(state): State<AppState>,
     tenant: Tenant,
     Path(id): Path<String>,

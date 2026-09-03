@@ -51,6 +51,7 @@ tar = "0.4.46"
 ureq = "3.4.0"
 signal-hook = "0.4.4"
 tracing = "0.1.44"
+utoipa = "5.5.0"
 
 [profile.release]
 codegen-units = 1

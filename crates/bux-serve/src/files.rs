@@ -21,13 +21,32 @@ pub(crate) fn routes() -> Router<AppState> {
 }
 
 #[derive(Debug, Deserialize)]
-struct FileQuery {
+pub(crate) struct FileQuery {
     path: String,
     #[serde(default)]
     mode: Option<u32>,
 }
 
-async fn put_file(
+#[utoipa::path(
+    put,
+    path = "/v1/sandboxes/{id}/files",
+    operation_id = "putFile",
+    tag = "Files",
+    params(
+        ("id" = String, Path, description = "Exact 12-char hex sandbox id"),
+        ("path" = String, Query, description = "Absolute guest path"),
+        ("mode" = Option<u32>, Query, description = "Decimal file mode (default 420 = 0644)")
+    ),
+    request_body(content = Vec<u8>, content_type = "application/octet-stream", description = "Raw file bytes"),
+    responses(
+        (status = 204, description = "Written"),
+        (status = 400, description = "Invalid path or mode"),
+        (status = 401, description = "Missing or invalid Bearer token"),
+        (status = 404, description = "Missing or other tenant"),
+        (status = 413, description = "Body over 32 MiB")
+    )
+)]
+pub(crate) async fn put_file(
     State(state): State<AppState>,
     tenant: Tenant,
     Path(id): Path<String>,
@@ -44,7 +63,23 @@ async fn put_file(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn get_file(
+#[utoipa::path(
+    get,
+    path = "/v1/sandboxes/{id}/files",
+    operation_id = "getFile",
+    tag = "Files",
+    params(
+        ("id" = String, Path, description = "Exact 12-char hex sandbox id"),
+        ("path" = String, Query, description = "Absolute guest path")
+    ),
+    responses(
+        (status = 200, description = "File bytes", content_type = "application/octet-stream", body = Vec<u8>),
+        (status = 400, description = "Invalid path"),
+        (status = 401, description = "Missing or invalid Bearer token"),
+        (status = 404, description = "Missing or other tenant")
+    )
+)]
+pub(crate) async fn get_file(
     State(state): State<AppState>,
     tenant: Tenant,
     Path(id): Path<String>,
