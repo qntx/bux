@@ -453,6 +453,7 @@ dependencies = [
  "axum",
  "bux",
  "bux-proto",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",
