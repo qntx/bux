@@ -420,18 +420,35 @@ mod tests {
     #[test]
     fn get_by_id_is_exact_only() {
         let db = open_test_db();
-        db.insert(&test_vm("abc123def456", None)).unwrap();
+        db.insert(&test_vm("abc123def456", Some("alpha"))).unwrap();
         db.insert(&test_vm("abc999000111", None)).unwrap();
 
         assert_eq!(db.get_by_id("abc123def456").unwrap().id, "abc123def456");
-        let err = db.get_by_id("abc").unwrap_err();
+        let ambiguous_prefix = db.get_by_id("abc").unwrap_err();
         assert!(
-            matches!(err, crate::Error::NotFound(_)),
-            "exact id lookup must not prefix-match, got {err:?}"
+            matches!(ambiguous_prefix, crate::Error::NotFound(_)),
+            "exact id lookup must not prefix-match, got {ambiguous_prefix:?}"
         );
         assert!(
-            !matches!(err, crate::Error::Ambiguous(_)),
-            "exact id lookup must not be Ambiguous, got {err:?}"
+            !matches!(ambiguous_prefix, crate::Error::Ambiguous(_)),
+            "exact id lookup must not be Ambiguous, got {ambiguous_prefix:?}"
+        );
+
+        let unique_prefix = db.get_by_id("abc123def").unwrap_err();
+        assert!(
+            matches!(unique_prefix, crate::Error::NotFound(_)),
+            "unique prefix must not match, got {unique_prefix:?}"
+        );
+        assert_eq!(
+            db.get_by_id_prefix("abc123def").unwrap().id,
+            "abc123def456",
+            "prefix API still resolves a unique prefix"
+        );
+
+        let by_name = db.get_by_id("alpha").unwrap_err();
+        assert!(
+            matches!(by_name, crate::Error::NotFound(_)),
+            "exact id lookup must not use vms.name, got {by_name:?}"
         );
     }
 

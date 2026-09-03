@@ -341,11 +341,6 @@ impl Vm {
     ///
     /// Returns an error if the database update fails.
     pub fn touch_activity(&self) -> Result<()> {
-        self.touch_activity_local()
-    }
-
-    /// Persist activity timestamp for idle auto-stop / auto-delete.
-    fn touch_activity_local(&self) -> Result<()> {
         let mut cfg = self.state.config.clone();
         cfg.last_activity_at = Some(SystemTime::now());
         cfg.last_error = None;
@@ -463,7 +458,7 @@ impl Vm {
         let req = self.with_workload_defaults(req);
         let cmd = req.cmd.clone();
         let handle = self.client.exec(req).await?;
-        drop(self.touch_activity_local());
+        drop(self.touch_activity());
         self.events
             .emit(AuditEvent::now(AuditEventKind::ExecStarted {
                 vm_id: self.state.id.clone(),
@@ -482,7 +477,7 @@ impl Vm {
         let req = self.with_workload_defaults(req);
         let cmd = req.cmd.clone();
         let output = self.client.exec_output(req).await?;
-        drop(self.touch_activity_local());
+        drop(self.touch_activity());
         self.events
             .emit(AuditEvent::now(AuditEventKind::ExecStarted {
                 vm_id: self.state.id.clone(),
