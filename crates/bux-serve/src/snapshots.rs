@@ -89,10 +89,20 @@ async fn create_snapshot(
 ) -> Result<(StatusCode, Json<SnapshotBody>), ApiError> {
     let vm = load_owned(&state.runtime, &tenant.id, &id)?;
     let name = req.name.as_deref().filter(|n| !n.is_empty());
-    let info = vm
-        .create_snapshot(name)
-        .await
-        .map_err(ApiError::from_engine)?;
+    if let Some(n) = name {
+        reject_snapshot_name(&vm, n)?;
+    }
+    let info = match vm.create_snapshot(name).await {
+        Ok(info) => info,
+        Err(err) => {
+            if let Some(n) = name
+                && snapshot_name_taken(&vm, n)?
+            {
+                return Err(duplicate_snapshot_name());
+            }
+            return Err(ApiError::from_engine(err));
+        }
+    };
     tracing::info!(
         tenant_id = %tenant.id,
         vm_id = %id,
@@ -124,11 +134,10 @@ async fn restore_snapshot(
     let snap = owned_snapshot(&vm, &id, &sid)?;
     let info = vm.info();
     let name = prepare_spawn(&state, &tenant.id, &req.agent_id, info.ram_mib, info.vcpus)?;
-    let restored = state
-        .runtime
-        .restore(&snap.id, Some(name))
-        .await
-        .map_err(ApiError::from_engine)?;
+    let restored = match state.runtime.restore(&snap.id, Some(name.clone())).await {
+        Ok(created) => created,
+        Err(err) => return Err(spawn_create_error(&state.runtime, &name, err)),
+    };
     finish_spawn(&state.runtime, &tenant, &req.agent_id, &restored)
 }
 
@@ -142,9 +151,10 @@ async fn clone_one(
     let vm = load_owned(&state.runtime, &tenant.id, &id)?;
     let info = vm.info();
     let name = prepare_spawn(&state, &tenant.id, &req.agent_id, info.ram_mib, info.vcpus)?;
-    let cloned = Runtime::clone(&state.runtime, &info.id, Some(name))
-        .await
-        .map_err(ApiError::from_engine)?;
+    let cloned = match Runtime::clone(&state.runtime, &info.id, Some(name.clone())).await {
+        Ok(created) => created,
+        Err(err) => return Err(spawn_create_error(&state.runtime, &name, err)),
+    };
     finish_spawn(&state.runtime, &tenant, &req.agent_id, &cloned)
 }
 
@@ -197,6 +207,36 @@ fn reject_occupied(runtime: &Runtime, name: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// UNIQUE `vms.name` after a racing clone/restore is occupancy, not 500.
+fn spawn_create_error(runtime: &Runtime, name: &str, err: bux::Error) -> ApiError {
+    match runtime.get_named(name) {
+        Ok(Some(vm)) => ApiError::name_occupied(vm.info().id),
+        Ok(None) => ApiError::from_engine(err),
+        Err(lookup) => ApiError::from_engine(lookup),
+    }
+}
+
+fn reject_snapshot_name(vm: &Vm, name: &str) -> Result<(), ApiError> {
+    if snapshot_name_taken(vm, name)? {
+        return Err(duplicate_snapshot_name());
+    }
+    Ok(())
+}
+
+fn snapshot_name_taken(vm: &Vm, name: &str) -> Result<bool, ApiError> {
+    Ok(vm
+        .list_snapshots()
+        .map_err(ApiError::from_engine)?
+        .iter()
+        .any(|s| s.name.as_deref() == Some(name)))
+}
+
+fn duplicate_snapshot_name() -> ApiError {
+    ApiError::from_engine(bux::Error::InvalidState(
+        "snapshot name already exists".into(),
+    ))
+}
+
 /// Engine clone/restore do not copy source volumes. HTTP clones always have a
 /// unique agent, so attach `ws-{tenant}-{agent}` after create if create did not.
 fn attach_workspace(
@@ -228,6 +268,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::header::AUTHORIZATION;
     use axum::http::{Request, header};
+    use axum::response::IntoResponse;
     use rusqlite::params;
     use tower::ServiceExt;
 
@@ -489,6 +530,30 @@ mod tests {
                 .and_then(serde_json::Value::as_u64)
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn create_snapshot_duplicate_name_is_409() {
+        let h = harness(Limits::default());
+        plant_owned_stopped(&h, SRC, "a1");
+        plant_snapshot(
+            h.dir.path(),
+            SNAP,
+            SRC,
+            Some("checkpoint"),
+            "/tmp/s.qcow2",
+            1,
+        );
+        let res = send(
+            h.app,
+            "POST",
+            &format!("/v1/sandboxes/{SRC}/snapshots"),
+            Some("secret1"),
+            Body::from(r#"{"name":"checkpoint"}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::CONFLICT, "duplicate name");
+        assert_eq!(error_code(&json_body(res).await), Some("invalid_state"));
     }
 
     #[tokio::test]
@@ -858,6 +923,41 @@ mod tests {
         )
         .await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST, "unknown field");
+    }
+
+    #[tokio::test]
+    async fn spawn_create_error_occupied_is_409_not_500() {
+        let h = harness(Limits::default());
+        plant_owned_stopped(&h, SRC, "a1");
+        let err = spawn_create_error(
+            &h.runtime,
+            "a-tenant1-a1",
+            bux::Error::InvalidConfig("UNIQUE".into()),
+        );
+        let res = err.into_response();
+        assert_eq!(res.status(), StatusCode::CONFLICT, "occupied");
+        let v = json_body(res).await;
+        assert_eq!(error_code(&v), Some("name_occupied"));
+        assert_eq!(
+            v.pointer("/error/existing_id")
+                .and_then(serde_json::Value::as_str),
+            Some(SRC)
+        );
+    }
+
+    #[test]
+    fn spawn_create_error_missing_keeps_engine_status() {
+        let h = harness(Limits::default());
+        let err = spawn_create_error(
+            &h.runtime,
+            "a-tenant1-missing",
+            bux::Error::SecurityUnavailable("no hardware virtualization".into()),
+        );
+        assert_eq!(
+            err.into_response().status(),
+            StatusCode::PRECONDITION_FAILED,
+            "still 412 when name is free"
+        );
     }
 
     #[test]
