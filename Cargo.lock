@@ -449,6 +449,7 @@ version = "0.8.0"
 dependencies = [
  "axum",
  "bux",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
