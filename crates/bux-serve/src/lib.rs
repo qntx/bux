@@ -625,6 +625,25 @@ mod tests {
                 .is_some(),
             "clone path"
         );
+        let clone_codes = v.pointer("/paths/~1v1~1sandboxes~1{id}~1clone/post/responses");
+        assert!(
+            clone_codes.and_then(|r| r.get("409")).is_some(),
+            "clone 409"
+        );
+        assert!(
+            clone_codes.and_then(|r| r.get("412")).is_some(),
+            "clone 412"
+        );
+        let restore_codes =
+            v.pointer("/paths/~1v1~1sandboxes~1{id}~1snapshots~1{sid}~1restore/post/responses");
+        assert!(
+            restore_codes.and_then(|r| r.get("409")).is_some(),
+            "restore 409"
+        );
+        assert!(
+            restore_codes.and_then(|r| r.get("412")).is_some(),
+            "restore 412"
+        );
     }
 
     #[test]
