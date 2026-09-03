@@ -2,9 +2,10 @@
 //!
 //! `bux serve start` opens one [`bux::Runtime`] (exclusive flock on `BUX_HOME`),
 //! binds a TCP loopback address, and serves `/v1/health` (public) plus
-//! Bearer-protected sandbox CRUD. At least one API key is required to start.
-//! Identifiers use the alphabet `[A-Za-z0-9._]`; `-` is only a separator in
-//! formatted sandbox and volume names.
+//! Bearer-protected sandbox CRUD, collect exec, files, and images. At least
+//! one API key is required to start. Identifiers use the alphabet
+//! `[A-Za-z0-9._]`; `-` is only a separator in formatted sandbox and volume
+//! names.
 
 #![allow(
     clippy::missing_docs_in_private_items,
@@ -13,7 +14,10 @@
 
 mod auth;
 mod error;
+mod exec;
+mod files;
 mod ids;
+mod images;
 mod router;
 mod sandboxes;
 mod state;
@@ -353,6 +357,87 @@ const OPENAPI_JSON: &str = concat!(
     "          \"404\": { \"description\": \"Missing or other tenant\" }\n",
     "        }\n",
     "      }\n",
+    "    },\n",
+    "    \"/v1/sandboxes/{id}/exec\": {\n",
+    "      \"post\": {\n",
+    "        \"operationId\": \"exec\",\n",
+    "        \"security\": [{ \"bearer\": [] }],\n",
+    "        \"parameters\": [{ \"name\": \"id\", \"in\": \"path\", \"required\": true, \"schema\": { \"type\": \"string\" } }],\n",
+    "        \"responses\": {\n",
+    "          \"200\": { \"description\": \"Collected exec output\" },\n",
+    "          \"400\": { \"description\": \"Invalid body or timeout_ms\" },\n",
+    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" },\n",
+    "          \"404\": { \"description\": \"Missing or other tenant\" },\n",
+    "          \"409\": { \"description\": \"secrets_required\" }\n",
+    "        }\n",
+    "      }\n",
+    "    },\n",
+    "    \"/v1/sandboxes/{id}/files\": {\n",
+    "      \"get\": {\n",
+    "        \"operationId\": \"getFile\",\n",
+    "        \"security\": [{ \"bearer\": [] }],\n",
+    "        \"parameters\": [\n",
+    "          { \"name\": \"id\", \"in\": \"path\", \"required\": true, \"schema\": { \"type\": \"string\" } },\n",
+    "          { \"name\": \"path\", \"in\": \"query\", \"required\": true, \"schema\": { \"type\": \"string\" } }\n",
+    "        ],\n",
+    "        \"responses\": {\n",
+    "          \"200\": { \"description\": \"File bytes\" },\n",
+    "          \"400\": { \"description\": \"Invalid path\" },\n",
+    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" },\n",
+    "          \"404\": { \"description\": \"Missing or other tenant\" }\n",
+    "        }\n",
+    "      },\n",
+    "      \"put\": {\n",
+    "        \"operationId\": \"putFile\",\n",
+    "        \"security\": [{ \"bearer\": [] }],\n",
+    "        \"parameters\": [\n",
+    "          { \"name\": \"id\", \"in\": \"path\", \"required\": true, \"schema\": { \"type\": \"string\" } },\n",
+    "          { \"name\": \"path\", \"in\": \"query\", \"required\": true, \"schema\": { \"type\": \"string\" } },\n",
+    "          { \"name\": \"mode\", \"in\": \"query\", \"required\": false, \"schema\": { \"type\": \"integer\" }, \"description\": \"Decimal file mode (default 420 = 0644)\" }\n",
+    "        ],\n",
+    "        \"responses\": {\n",
+    "          \"204\": { \"description\": \"Written\" },\n",
+    "          \"400\": { \"description\": \"Invalid path or mode\" },\n",
+    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" },\n",
+    "          \"404\": { \"description\": \"Missing or other tenant\" },\n",
+    "          \"413\": { \"description\": \"Body over 32 MiB\" }\n",
+    "        }\n",
+    "      }\n",
+    "    },\n",
+    "    \"/v1/images\": {\n",
+    "      \"get\": {\n",
+    "        \"operationId\": \"listImages\",\n",
+    "        \"security\": [{ \"bearer\": [] }],\n",
+    "        \"responses\": {\n",
+    "          \"200\": { \"description\": \"Cached images (worker-global)\" },\n",
+    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" }\n",
+    "        }\n",
+    "      },\n",
+    "      \"delete\": {\n",
+    "        \"operationId\": \"deleteImage\",\n",
+    "        \"security\": [{ \"bearer\": [] }],\n",
+    "        \"parameters\": [{ \"name\": \"reference\", \"in\": \"query\", \"required\": true, \"schema\": { \"type\": \"string\" } }],\n",
+    "        \"responses\": {\n",
+    "          \"204\": { \"description\": \"Index entry removed\" },\n",
+    "          \"400\": { \"description\": \"Invalid reference\" },\n",
+    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" },\n",
+    "          \"404\": { \"description\": \"Not in store\" },\n",
+    "          \"409\": { \"description\": \"Image is in use\" }\n",
+    "        }\n",
+    "      }\n",
+    "    },\n",
+    "    \"/v1/images/pull\": {\n",
+    "      \"post\": {\n",
+    "        \"operationId\": \"pullImage\",\n",
+    "        \"security\": [{ \"bearer\": [] }],\n",
+    "        \"responses\": {\n",
+    "          \"200\": { \"description\": \"Pulled\" },\n",
+    "          \"400\": { \"description\": \"Invalid reference\" },\n",
+    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" },\n",
+    "          \"413\": { \"description\": \"Manifest compressed size over max-pull-bytes\" },\n",
+    "          \"429\": { \"description\": \"Disk cap\" }\n",
+    "        }\n",
+    "      }\n",
     "    }\n",
     "  },\n",
     "  \"components\": {\n",
@@ -442,6 +527,28 @@ mod tests {
                 .and_then(|p| p.get("/v1/sandboxes"))
                 .is_some(),
             "sandboxes path"
+        );
+        assert!(
+            v.get("paths")
+                .and_then(|p| p.get("/v1/sandboxes/{id}/exec"))
+                .is_some(),
+            "exec path"
+        );
+        assert!(
+            v.get("paths")
+                .and_then(|p| p.get("/v1/sandboxes/{id}/files"))
+                .is_some(),
+            "files path"
+        );
+        assert!(
+            v.get("paths").and_then(|p| p.get("/v1/images")).is_some(),
+            "images path"
+        );
+        assert!(
+            v.get("paths")
+                .and_then(|p| p.get("/v1/images/pull"))
+                .is_some(),
+            "pull path"
         );
     }
 

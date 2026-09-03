@@ -5,8 +5,11 @@ use std::net::SocketAddr;
 
 use axum::Json;
 use axum::extract::FromRequest;
-use axum::extract::rejection::JsonRejection;
+use axum::extract::FromRequestParts;
+use axum::extract::Query;
+use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::http::StatusCode;
+use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -102,10 +105,14 @@ impl ApiError {
     }
 
     pub(crate) fn payload_too_large() -> Self {
+        Self::payload_too_large_msg("request body too large")
+    }
+
+    pub(crate) fn payload_too_large_msg(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::PAYLOAD_TOO_LARGE,
             code: "payload_too_large",
-            message: "request body too large".into(),
+            message: message.into(),
             existing_id: None,
             field: None,
         }
@@ -122,10 +129,34 @@ impl ApiError {
     }
 
     pub(crate) fn not_found() -> Self {
+        Self::not_found_msg("sandbox not found")
+    }
+
+    pub(crate) fn not_found_msg(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
             code: "not_found",
-            message: "sandbox not found".into(),
+            message: message.into(),
+            existing_id: None,
+            field: None,
+        }
+    }
+
+    pub(crate) fn image_in_use() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "busy",
+            message: "image is in use".into(),
+            existing_id: None,
+            field: None,
+        }
+    }
+
+    pub(crate) fn oci(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: "oci",
+            message: message.into(),
             existing_id: None,
             field: None,
         }
@@ -229,14 +260,10 @@ fn map_oci(err: impl std::fmt::Display) -> ApiError {
     let message = err.to_string();
     if message.starts_with("invalid image reference") {
         ApiError::invalid_config(message)
+    } else if message.starts_with("image not found") {
+        ApiError::not_found_msg(message)
     } else {
-        ApiError {
-            status: StatusCode::BAD_GATEWAY,
-            code: "oci",
-            message,
-            existing_id: None,
-            field: None,
-        }
+        ApiError::oci(message)
     }
 }
 
@@ -268,6 +295,31 @@ where
 }
 
 fn json_rejection(rejection: &JsonRejection) -> ApiError {
+    ApiError::invalid_config(rejection.body_text())
+}
+
+/// Query string that maps extractor failures to the error envelope (400).
+pub(crate) struct QueryBody<T>(pub T);
+
+impl<S, T> FromRequestParts<S> for QueryBody<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &S,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        match Query::<T>::from_request_parts(parts, state).await {
+            Ok(Query(value)) => Ok(Self(value)),
+            Err(rejection) => Err(query_rejection(&rejection)),
+        }
+    }
+}
+
+fn query_rejection(rejection: &QueryRejection) -> ApiError {
     ApiError::invalid_config(rejection.body_text())
 }
 

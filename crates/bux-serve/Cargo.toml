@@ -10,8 +10,9 @@ keywords = ["ai", "sandbox", "vm", "http"]
 categories = ["web-programming::http-server", "virtualization"]
 
 [dependencies]
-axum.workspace = true
+axum = { workspace = true, features = ["query"] }
 bux.workspace = true
+bux-proto.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
