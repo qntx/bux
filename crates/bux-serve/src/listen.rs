@@ -164,30 +164,31 @@ enum Bound {
 #[derive(Debug)]
 struct UnixSocketGuard {
     path: PathBuf,
+    dev: u64,
+    ino: u64,
 }
 
 #[cfg(unix)]
 impl UnixSocketGuard {
-    fn prepare(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent)?;
-        }
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
-        }
-        Ok(Self {
-            path: path.to_path_buf(),
-        })
+    fn from_bound(path: PathBuf) -> Result<Self> {
+        // Darwin fstat() on a unix socket fd is not the bind-path inode
+        // (`st_dev` is -1). Identify the name by lstat after bind.
+        let (dev, ino) = path_dev_ino(&path)?;
+        Ok(Self { path, dev, ino })
     }
 }
 
 #[cfg(unix)]
 impl Drop for UnixSocketGuard {
     fn drop(&mut self) {
+        // Only unlink if this path still names the inode we bound. A later
+        // worker may have stolen the name; unlinking it would drop their socket.
+        let Ok((dev, ino)) = path_dev_ino(&self.path) else {
+            return;
+        };
+        if dev != self.dev || ino != self.ino {
+            return;
+        }
         match std::fs::remove_file(&self.path) {
             Ok(()) => {}
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
@@ -198,6 +199,55 @@ impl Drop for UnixSocketGuard {
                     "failed to unlink unix socket"
                 );
             }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn prepare_unix_path(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+#[cfg(unix)]
+fn path_dev_ino(path: &Path) -> io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(path)?;
+    Ok((meta.dev(), meta.ino()))
+}
+
+#[cfg(unix)]
+fn bind_unix(path: &Path) -> Result<Bound> {
+    prepare_unix_path(path)?;
+    let listener = tokio::net::UnixListener::bind(path)?;
+    match UnixSocketGuard::from_bound(path.to_path_buf()) {
+        Ok(guard) => Ok(Bound::Unix {
+            listener,
+            _guard: guard,
+        }),
+        Err(err) => {
+            // Bound, but we cannot identify the inode; drop our name so a
+            // failed start does not leave a socket without a guard.
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(unlink_err) if unlink_err.kind() == io::ErrorKind::NotFound => {}
+                Err(unlink_err) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %unlink_err,
+                        "failed to unlink unix socket after fstat error"
+                    );
+                }
+            }
+            Err(err)
         }
     }
 }
@@ -228,13 +278,9 @@ async fn bind_one(addr: &ListenAddr) -> Result<Bound> {
         }
         #[cfg(unix)]
         ListenAddr::Unix(path) => {
-            let guard = UnixSocketGuard::prepare(path)?;
-            let listener = tokio::net::UnixListener::bind(&guard.path)?;
+            let bound = bind_unix(path)?;
             tracing::info!(listen = %addr, "listening");
-            Ok(Bound::Unix {
-                listener,
-                _guard: guard,
-            })
+            Ok(bound)
         }
     }
 }
@@ -424,5 +470,34 @@ mod tests {
             default_unix_path_from(Some(OsStr::new("")), 7),
             PathBuf::from("/tmp/bux-7.sock")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_guard_drop_unlinks_own_inode() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s");
+        let listener = UnixListener::bind(&path).unwrap();
+        let guard = UnixSocketGuard::from_bound(path.clone()).unwrap();
+        drop(guard);
+        assert!(!path.exists(), "own name unlinked");
+        drop(listener);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_guard_drop_skips_replaced_inode() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s");
+        let first = UnixListener::bind(&path).unwrap();
+        let guard = UnixSocketGuard::from_bound(path.clone()).unwrap();
+        drop(first);
+        std::fs::remove_file(&path).unwrap();
+        let second = UnixListener::bind(&path).unwrap();
+        drop(guard);
+        assert!(path.exists(), "replacement kept");
+        drop(second);
     }
 }
