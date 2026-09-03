@@ -797,6 +797,43 @@ mod tests {
         i32::try_from(child.id()).unwrap()
     }
 
+    fn dummy_offline_runtime() -> (tempfile::TempDir, Runtime, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join("dummy-shim");
+        fs::write(&shim, b"#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+        let overlay = dir.path().join("overlay.raw");
+        fs::write(&overlay, b"not-qcow").unwrap();
+        let rt = Runtime::open_with(RuntimeOptions {
+            data_dir: dir.path().join("rt"),
+            shim_path: Some(shim),
+            guest_path: None,
+            registry_auth: RegistryAuth::Anonymous,
+        })
+        .unwrap();
+        (dir, rt, overlay)
+    }
+
+    fn insert_idle_stopped(rt: &Runtime, overlay: &Path, id: &str) {
+        insert_cfg(
+            rt,
+            id,
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig {
+                auto_stop_secs: Some(1),
+                last_activity_at: Some(SystemTime::UNIX_EPOCH),
+                detach: true,
+                network: NetworkSpec::Disabled,
+                root_disk: Some(overlay.to_string_lossy().into_owned()),
+                security: crate::security::SecurityOptions::default()
+                    .jailer(false)
+                    .landlock(false),
+                ..VmConfig::default()
+            },
+        );
+    }
+
     #[test]
     fn list_preserves_live_pid() {
         let dir = tempfile::tempdir().unwrap();
@@ -1491,6 +1528,7 @@ mod tests {
             Status::Stopped,
             VmConfig::default(),
         );
+        rt.db.update_name("abc123def456", Some("alpha")).unwrap();
 
         let hit = rt.get_exact("abc123def456").unwrap();
         assert_eq!(hit.info().id, "abc123def456", "full id must resolve");
@@ -1505,13 +1543,31 @@ mod tests {
             "get_exact must never be Ambiguous, got {prefix}"
         );
 
-        let unique = rt.get("abc123def456").unwrap();
-        assert_eq!(unique.info().id, "abc123def456");
+        let unique_prefix = rt.get_exact("abc123def").unwrap_err();
+        assert!(
+            matches!(unique_prefix, crate::Error::NotFound(_)),
+            "get_exact must not accept a unique prefix, got {unique_prefix}"
+        );
+        assert!(
+            !matches!(unique_prefix, crate::Error::Ambiguous(_)),
+            "unique prefix must be NotFound, not Ambiguous, got {unique_prefix}"
+        );
         let via_prefix = rt.get("abc123def").unwrap();
         assert_eq!(
             via_prefix.info().id,
             "abc123def456",
             "Runtime::get still prefix-matches unique ids"
+        );
+
+        let by_name = rt.get_exact("alpha").unwrap_err();
+        assert!(
+            matches!(by_name, crate::Error::NotFound(_)),
+            "get_exact must not look up vms.name, got {by_name}"
+        );
+        assert_eq!(
+            rt.get("alpha").unwrap().info().id,
+            "abc123def456",
+            "Runtime::get still resolves exact names"
         );
     }
 
@@ -1545,58 +1601,31 @@ mod tests {
     fn data_dir_usage_counts_volumes_file_disk_usage_misses() {
         let dir = tempfile::tempdir().unwrap();
         let rt = Runtime::open(dir.path()).unwrap();
+        let disk_before = rt.disk_usage().unwrap();
+        let usage_before = rt.data_dir_usage().unwrap();
+
         let payload = vec![0_u8; 65_536];
         let vol_dir = dir.path().join("volumes").join("ws-t-a");
         fs::create_dir_all(&vol_dir).unwrap();
         fs::write(vol_dir.join("blob"), &payload).unwrap();
 
-        let disk = rt.disk_usage().unwrap();
-        let usage = rt.data_dir_usage().unwrap();
-        assert!(
-            usage >= disk + payload.len() as u64,
-            "data_dir_usage={usage} must include volumes/ blob; disk_usage={disk}"
+        let disk_after = rt.disk_usage().unwrap();
+        let usage_after = rt.data_dir_usage().unwrap();
+        assert_eq!(
+            disk_after, disk_before,
+            "disk_usage must not count volumes/ files"
         );
         assert!(
-            usage > disk,
-            "data_dir_usage must exceed non-recursive bases+overlays"
+            usage_after >= usage_before + payload.len() as u64,
+            "data_dir_usage delta must include the volumes/ blob: before={usage_before} after={usage_after}"
         );
     }
 
     #[test]
     fn start_with_stamps_activity_so_sweep_skips_idle_stop() {
-        let dir = tempfile::tempdir().unwrap();
-        let shim = dir.path().join("dummy-shim");
-        fs::write(&shim, b"#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
-        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
-        let overlay = dir.path().join("overlay.raw");
-        fs::write(&overlay, b"not-qcow").unwrap();
-
-        let rt = Runtime::open_with(RuntimeOptions {
-            data_dir: dir.path().join("rt"),
-            shim_path: Some(shim),
-            guest_path: None,
-            registry_auth: RegistryAuth::Anonymous,
-        })
-        .unwrap();
-
+        let (_dir, rt, overlay) = dummy_offline_runtime();
         let id = "idleclock0001";
-        insert_cfg(
-            &rt,
-            id,
-            wait_dead_pid(),
-            Status::Stopped,
-            VmConfig {
-                auto_stop_secs: Some(1),
-                last_activity_at: Some(SystemTime::UNIX_EPOCH),
-                detach: true,
-                network: NetworkSpec::Disabled,
-                root_disk: Some(overlay.to_string_lossy().into_owned()),
-                security: crate::security::SecurityOptions::default()
-                    .jailer(false)
-                    .landlock(false),
-                ..VmConfig::default()
-            },
-        );
+        insert_idle_stopped(&rt, &overlay, id);
 
         let mut vm = rt.get_exact(id).unwrap();
         tokio::runtime::Builder::new_current_thread()
@@ -1616,6 +1645,40 @@ mod tests {
         );
         assert_eq!(report.deleted, 0, "sweep must not delete the restarted VM");
         drop(vm.kill());
+    }
+
+    #[test]
+    fn start_with_failed_ready_does_not_stamp_activity() {
+        let (_dir, rt, overlay) = dummy_offline_runtime();
+        let id = "idlefail00001";
+        insert_idle_stopped(&rt, &overlay, id);
+
+        let mut vm = rt.get_exact(id).unwrap();
+        let err = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(vm.start_with(StartOptions {
+                ready_timeout: Some(Duration::from_millis(50)),
+                secrets: Vec::new(),
+            }))
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::Error::GuestUnavailable(_)),
+            "dummy shim cannot handshake, got {err}"
+        );
+        let last = rt
+            .db
+            .get_by_id(id)
+            .unwrap()
+            .config
+            .last_activity_at
+            .unwrap();
+        assert_eq!(
+            last,
+            SystemTime::UNIX_EPOCH,
+            "failed ready must not persist last_activity_at"
+        );
     }
 
     #[test]
