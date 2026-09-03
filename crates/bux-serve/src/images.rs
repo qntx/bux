@@ -42,9 +42,18 @@ async fn pull_image(
     let reference = bux::canonical_reference(&req.reference)
         .map_err(|e| ApiError::invalid_config(e.to_string()))?;
     admit_disk(&state)?;
+    let deadline = Duration::from_secs(state.limits.pull_timeout_secs);
+    match tokio::time::timeout(deadline, pull_from_registry(&state, &reference)).await {
+        Ok(Ok(info)) => Ok(Json(info)),
+        Ok(Err(err)) => Err(err),
+        Err(_) => Err(ApiError::oci("pull timed out")),
+    }
+}
+
+async fn pull_from_registry(state: &AppState, reference: &str) -> Result<ImageInfo, ApiError> {
     let compressed = state
         .runtime
-        .manifest_compressed_bytes(&reference)
+        .manifest_compressed_bytes(reference)
         .await
         .map_err(ApiError::from_engine)?;
     if compressed > state.limits.max_pull_bytes {
@@ -52,12 +61,11 @@ async fn pull_image(
             "image exceeds max-pull-bytes",
         ));
     }
-    let pull = state.runtime.pull(&reference, |_| {});
-    match tokio::time::timeout(Duration::from_secs(state.limits.pull_timeout_secs), pull).await {
-        Ok(Ok(info)) => Ok(Json(info)),
-        Ok(Err(err)) => Err(ApiError::from_engine(err)),
-        Err(_) => Err(ApiError::oci("pull timed out")),
-    }
+    state
+        .runtime
+        .pull(reference, |_| {})
+        .await
+        .map_err(ApiError::from_engine)
 }
 
 async fn delete_image(
@@ -281,14 +289,18 @@ mod tests {
                 ..Limits::default()
             },
         ));
-        let res = send(
-            app,
-            "POST",
-            "/v1/images/pull",
-            Some("secret1"),
-            Body::from(r#"{"reference":"alpine"}"#),
+        let res = tokio::time::timeout(
+            Duration::from_secs(2),
+            send(
+                app,
+                "POST",
+                "/v1/images/pull",
+                Some("secret1"),
+                Body::from(r#"{"reference":"127.0.0.1:1/bux-no-registry:test"}"#),
+            ),
         )
-        .await;
+        .await
+        .expect("disk admission must return without registry I/O");
         assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS, "disk");
         assert_eq!(
             error_code(&json_body(res).await),
@@ -388,9 +400,19 @@ mod tests {
             .and_then(|rest| rest.split("\nasync fn ").next())
             .expect("pull_image");
         let disk = pull_fn.find("admit_disk").expect("disk");
-        let manifest = pull_fn.find("manifest_compressed_bytes").expect("manifest");
-        let pull = pull_fn.find(".pull(").expect("pull");
-        assert!(disk < manifest, "disk cap before manifest");
+        let timeout = pull_fn.find("tokio::time::timeout").expect("deadline");
+        let registry = pull_fn.find("pull_from_registry").expect("registry work");
+        assert!(disk < timeout, "disk cap before registry deadline");
+        assert!(timeout < registry, "deadline wraps registry work");
+        let admitted = prod
+            .split("async fn pull_from_registry(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nasync fn ").next())
+            .expect("pull_from_registry");
+        let manifest = admitted
+            .find("manifest_compressed_bytes")
+            .expect("manifest");
+        let pull = admitted.find(".pull(").expect("pull");
         assert!(manifest < pull, "manifest cap before pull");
         assert!(!prod.contains("Oci::open"), "no second OCI handle");
         assert!(!prod.contains("open_at"), "no Oci::open_at");
