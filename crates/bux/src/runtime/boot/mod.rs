@@ -158,7 +158,7 @@ async fn resolve_image(
             let oci_cfg = pull.config.clone();
 
             on_progress("building ext4 base disk");
-            let image_label = reference.clone();
+            let image_label = pull.reference.clone();
             let base_path = {
                 let disk = rt.disk().clone();
                 let rootfs = pull.rootfs.clone();
@@ -237,6 +237,8 @@ fn config_from_options(
         auto_delete_secs: opts.auto_delete_secs,
         last_activity_at: Some(std::time::SystemTime::now()),
         detach: opts.detach,
+        agent_id: opts.agent_id.clone(),
+        tenant_id: opts.tenant_id.clone(),
         ..VmConfig::default()
     }
 }
@@ -282,5 +284,23 @@ mod tests {
         assert!(matches!(err, crate::Error::SecurityUnavailable(_)));
         assert_eq!(err.to_string(), "no hardware virtualization (KVM / HVF)");
         assert!(require_virtualization(true).is_ok());
+    }
+
+    #[test]
+    fn config_from_options_copies_identity() {
+        let opts = VmOptions::from_image("alpine")
+            .agent_id("agt")
+            .tenant_id("ten")
+            .vcpus(2)
+            .ram_mib(1024)
+            .env(["A=1"])
+            .workdir("/work");
+        let cfg = config_from_options(&opts, None, None, vec![]);
+        assert_eq!(cfg.agent_id.as_deref(), Some("agt"));
+        assert_eq!(cfg.tenant_id.as_deref(), Some("ten"));
+        assert_eq!(cfg.vcpus, 2);
+        assert_eq!(cfg.ram_mib, 1024);
+        assert_eq!(cfg.workload_env, vec!["A=1"]);
+        assert_eq!(cfg.workload_workdir.as_deref(), Some("/work"));
     }
 }

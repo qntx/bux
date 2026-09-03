@@ -210,6 +210,14 @@ pub(crate) struct VmConfig {
     /// Detached VM: no watchdog, no parent-death, Runtime Drop does not SIGTERM.
     #[serde(default)]
     pub detach: bool,
+
+    /// Optional agent identity.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+
+    /// Optional tenant identity.
+    #[serde(default)]
+    pub tenant_id: Option<String>,
 }
 
 impl Default for VmConfig {
@@ -242,6 +250,8 @@ impl Default for VmConfig {
             last_activity_at: None,
             last_error: None,
             detach: false,
+            agent_id: None,
+            tenant_id: None,
         }
     }
 }
@@ -408,6 +418,24 @@ mod tests {
     }
 
     #[test]
+    fn get_by_id_is_exact_only() {
+        let db = open_test_db();
+        db.insert(&test_vm("abc123def456", None)).unwrap();
+        db.insert(&test_vm("abc999000111", None)).unwrap();
+
+        assert_eq!(db.get_by_id("abc123def456").unwrap().id, "abc123def456");
+        let err = db.get_by_id("abc").unwrap_err();
+        assert!(
+            matches!(err, crate::Error::NotFound(_)),
+            "exact id lookup must not prefix-match, got {err:?}"
+        );
+        assert!(
+            !matches!(err, crate::Error::Ambiguous(_)),
+            "exact id lookup must not be Ambiguous, got {err:?}"
+        );
+    }
+
+    #[test]
     fn ambiguous_prefix() {
         let db = open_test_db();
         db.insert(&test_vm("abc111", None)).unwrap();
@@ -554,5 +582,18 @@ mod tests {
 
         db.delete_base_disk("bd1").unwrap();
         assert!(db.get_base_disk_by_digest("sha256:abc").unwrap().is_none());
+    }
+
+    #[test]
+    fn vmconfig_json_defaults_identity_fields() {
+        let cfg: VmConfig = serde_json::from_str(r#"{"vcpus":1,"ram_mib":512}"#).unwrap();
+        assert!(
+            cfg.agent_id.is_none(),
+            "missing agent_id must deserialize as None"
+        );
+        assert!(
+            cfg.tenant_id.is_none(),
+            "missing tenant_id must deserialize as None"
+        );
     }
 }

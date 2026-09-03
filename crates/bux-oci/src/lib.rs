@@ -237,6 +237,24 @@ impl Oci {
         self.store.list_images()
     }
 
+    /// Sum of compressed layer sizes from the image manifest, before `pull_blob`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reference is invalid or the registry request fails.
+    pub async fn manifest_compressed_bytes(&self, image: &str) -> Result<u64> {
+        let reference = parse_reference(image)?;
+        let (manifest, _digest, _config) = self
+            .client
+            .pull_manifest_and_config(&reference, &self.auth)
+            .await?;
+        Ok(manifest
+            .layers
+            .iter()
+            .map(|layer| u64::try_from(layer.size).unwrap_or(0))
+            .sum())
+    }
+
     /// Removes a locally stored image and its extracted rootfs.
     ///
     /// Layer blobs are ref-counted; only orphaned blobs are deleted.
@@ -256,6 +274,15 @@ fn parse_reference(image: &str) -> Result<Reference> {
     image
         .parse()
         .map_err(|e: oci_client::ParseError| OciError::InvalidReference(e.to_string()))
+}
+
+/// Parse `image` and return the canonical OCI reference string.
+///
+/// # Errors
+///
+/// Returns [`OciError::InvalidReference`] if `image` is not a valid OCI reference.
+pub fn canonical_reference(image: &str) -> Result<String> {
+    Ok(parse_reference(image)?.to_string())
 }
 
 /// Deserializes the raw OCI config JSON blob into our minimal [`ImageConfig`].
@@ -332,4 +359,24 @@ fn dirs_default_store() -> PathBuf {
         }
     }
     PathBuf::from("bux")
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "tests")]
+mod tests {
+    use super::canonical_reference;
+
+    #[test]
+    fn canonical_reference_library_alias() {
+        let short = canonical_reference("python:slim").unwrap();
+        let long = canonical_reference("docker.io/library/python:slim").unwrap();
+        assert_eq!(
+            short, long,
+            "short and fully-qualified python:slim must canonicalize equally"
+        );
+        assert_eq!(
+            short, "docker.io/library/python:slim",
+            "canonical form must be the docker.io library reference"
+        );
+    }
 }

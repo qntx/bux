@@ -110,6 +110,20 @@ pub struct VmInfo {
     pub created_at: SystemTime,
     /// Optional first command (OCI ENTRYPOINT+CMD or CLI override).
     pub workload_cmd: Vec<String>,
+    /// Optional agent identity.
+    pub agent_id: Option<String>,
+    /// Optional tenant identity.
+    pub tenant_id: Option<String>,
+    /// RAM in MiB.
+    pub ram_mib: u32,
+    /// vCPU count.
+    pub vcpus: u8,
+    /// Whether restart/exec needs secret re-supply.
+    pub secrets_required: bool,
+    /// Workload env defaults (`KEY=VALUE`) after OCI merge.
+    pub workload_env: Vec<String>,
+    /// Workload working directory after OCI merge.
+    pub workload_workdir: Option<String>,
 }
 
 impl VmInfo {
@@ -138,6 +152,13 @@ impl VmInfo {
             last_error: state.config.last_error.clone(),
             created_at: state.created_at,
             workload_cmd: state.config.workload_cmd.clone(),
+            agent_id: state.config.agent_id.clone(),
+            tenant_id: state.config.tenant_id.clone(),
+            ram_mib: state.config.ram_mib,
+            vcpus: state.config.vcpus,
+            secrets_required: state.config.secrets_required,
+            workload_env: state.config.workload_env.clone(),
+            workload_workdir: state.config.workload_workdir.clone(),
         }
     }
 }
@@ -312,6 +333,15 @@ impl Vm {
     #[must_use]
     pub fn last_error(&self) -> Option<&str> {
         self.state.config.last_error.as_deref()
+    }
+
+    /// Persist `last_activity_at = now` for idle auto-stop / auto-delete.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database update fails.
+    pub fn touch_activity(&self) -> Result<()> {
+        self.touch_activity_local()
     }
 
     /// Persist activity timestamp for idle auto-stop / auto-delete.
@@ -597,6 +627,7 @@ impl Vm {
             }
             return Err(e);
         }
+        self.touch_activity()?;
         Ok(())
     }
 
@@ -923,5 +954,35 @@ mod tests {
             json["egress"],
             serde_json::json!({ "allow": ["example.com", "10.0.0.0/8"] })
         );
+    }
+
+    #[test]
+    fn from_stored_copies_identity_and_resources() {
+        let info = VmInfo::from_stored(&VmState {
+            id: "aabbccddeeff".into(),
+            name: Some("n1".into()),
+            pid: 1,
+            image: Some("docker.io/library/python:slim".into()),
+            socket: PathBuf::from("/tmp/x.sock"),
+            status: Status::Stopped,
+            config: VmConfig {
+                ram_mib: 1024,
+                vcpus: 2,
+                secrets_required: true,
+                agent_id: Some("agt".into()),
+                tenant_id: Some("ten".into()),
+                workload_env: vec!["A=1".into()],
+                workload_workdir: Some("/work".into()),
+                ..VmConfig::default()
+            },
+            created_at: SystemTime::UNIX_EPOCH,
+        });
+        assert_eq!(info.agent_id.as_deref(), Some("agt"));
+        assert_eq!(info.tenant_id.as_deref(), Some("ten"));
+        assert_eq!(info.ram_mib, 1024);
+        assert_eq!(info.vcpus, 2);
+        assert!(info.secrets_required);
+        assert_eq!(info.workload_env, vec!["A=1"]);
+        assert_eq!(info.workload_workdir.as_deref(), Some("/work"));
     }
 }
