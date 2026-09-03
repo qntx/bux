@@ -1,4 +1,4 @@
-//! HTTP router: public health, Bearer-protected me/config, sandboxes, exec, files, images.
+//! HTTP router: public health, Bearer-protected me/config/metrics, sandboxes, exec, files, images.
 
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
@@ -10,11 +10,12 @@ use serde::Serialize;
 use tower::ServiceBuilder;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
+use utoipa::ToSchema;
 
 use crate::auth::{Tenant, require_bearer};
 use crate::error::ApiError;
 use crate::state::{AppState, Limits};
-use crate::{exec, files, images, sandboxes};
+use crate::{exec, files, images, logs, sandboxes};
 
 /// JSON request body cap.
 pub(crate) const MAX_JSON_BODY_BYTES: usize = 1024 * 1024;
@@ -24,8 +25,10 @@ pub(crate) fn router(state: AppState) -> Router {
     let json = Router::new()
         .route("/v1/config", get(config))
         .route("/v1/me", get(me))
+        .route("/v1/metrics", get(metrics))
         .merge(sandboxes::routes())
         .merge(exec::routes())
+        .merge(logs::routes())
         .merge(images::routes())
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
         .layer(RequestBodyLimitLayer::new(MAX_JSON_BODY_BYTES));
@@ -49,25 +52,89 @@ pub(crate) fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn health() -> StatusCode {
+#[utoipa::path(
+    get,
+    path = "/v1/health",
+    operation_id = "health",
+    tag = "Worker",
+    responses((status = 200, description = "Worker is up")),
+    security(())
+)]
+pub(crate) async fn health() -> StatusCode {
     StatusCode::OK
 }
 
-async fn config(State(state): State<AppState>) -> Json<Limits> {
+#[utoipa::path(
+    get,
+    path = "/v1/config",
+    operation_id = "config",
+    tag = "Worker",
+    responses(
+        (status = 200, description = "Worker config", body = Limits),
+        (status = 401, description = "Missing or invalid Bearer token")
+    )
+)]
+pub(crate) async fn config(State(state): State<AppState>) -> Json<Limits> {
     Json(state.limits)
 }
 
-#[derive(Debug, Serialize)]
-struct MeBody {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct MeBody {
     tenant_id: String,
     max_sandboxes: u32,
 }
 
-async fn me(State(state): State<AppState>, tenant: Tenant) -> Json<MeBody> {
+#[utoipa::path(
+    get,
+    path = "/v1/me",
+    operation_id = "me",
+    tag = "Worker",
+    responses(
+        (status = 200, description = "Bearer tenant_id and max_sandboxes", body = MeBody),
+        (status = 401, description = "Missing or invalid Bearer token")
+    )
+)]
+pub(crate) async fn me(State(state): State<AppState>, tenant: Tenant) -> Json<MeBody> {
     Json(MeBody {
         tenant_id: tenant.id,
         max_sandboxes: state.limits.max_sandboxes,
     })
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct MetricsBody {
+    vms_created_total: u64,
+    num_running_vms: i64,
+    vms_failed_total: u64,
+    total_uptime_ms: u64,
+    disk_bytes_used: u64,
+    data_dir_bytes: u64,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/metrics",
+    operation_id = "metrics",
+    tag = "Worker",
+    responses(
+        (status = 200, description = "RuntimeMetrics getters plus data_dir_bytes", body = MetricsBody),
+        (status = 401, description = "Missing or invalid Bearer token")
+    )
+)]
+pub(crate) async fn metrics(State(state): State<AppState>) -> Result<Json<MetricsBody>, ApiError> {
+    let m = state.runtime.metrics();
+    let data_dir_bytes = state
+        .runtime
+        .data_dir_usage()
+        .map_err(|e| ApiError::from_engine(e.into()))?;
+    Ok(Json(MetricsBody {
+        vms_created_total: m.vms_created_total(),
+        num_running_vms: m.num_running_vms(),
+        vms_failed_total: m.vms_failed_total(),
+        total_uptime_ms: m.total_uptime_ms(),
+        disk_bytes_used: m.disk_bytes_used(),
+        data_dir_bytes,
+    }))
 }
 
 async fn map_payload_too_large(response: Response) -> Response {
@@ -344,6 +411,116 @@ mod tests {
         assert!(prod.contains("files::routes"), "files routes");
         assert!(prod.contains("exec::routes"), "exec routes");
         assert!(prod.contains("images::routes"), "images routes");
+        assert!(prod.contains("logs::routes"), "logs routes");
+        assert!(prod.contains("/v1/metrics"), "metrics");
         assert!(prod.contains("MAX_FILE_BODY_BYTES"), "files body limit");
+    }
+
+    #[tokio::test]
+    async fn metrics_without_bearer_is_401() {
+        let (_dir, app) = sample_app();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "status");
+        let v = json_body(res).await;
+        assert_eq!(
+            v.pointer("/error/code").and_then(serde_json::Value::as_str),
+            Some("unauthorized"),
+            "code"
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_is_worker_global_with_data_dir_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = bux::Runtime::open(dir.path()).unwrap();
+        let data_dir_bytes = runtime.data_dir_usage().unwrap();
+        let disk_bytes_used = runtime.metrics().disk_bytes_used();
+        let overlays = runtime.disk_usage().unwrap();
+        assert!(
+            data_dir_bytes > overlays,
+            "data_dir_usage={data_dir_bytes} must exceed disk_usage={overlays}"
+        );
+        let app = router(AppState::new(
+            vec![
+                ApiKey::new("a", "one").unwrap(),
+                ApiKey::new("b", "two").unwrap(),
+            ],
+            runtime,
+            Limits::default(),
+        ));
+        let a = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/metrics")
+                    .header(AUTHORIZATION, "Bearer one")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let b = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/metrics")
+                    .header(AUTHORIZATION, "Bearer two")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(a.status(), StatusCode::OK, "first key");
+        assert_eq!(b.status(), StatusCode::OK, "second key");
+        let va = json_body(a).await;
+        let vb = json_body(b).await;
+        assert_eq!(va, vb, "worker-global");
+        assert_eq!(va.as_object().map(serde_json::Map::len), Some(6), "keys");
+        assert_eq!(
+            va.get("data_dir_bytes").and_then(serde_json::Value::as_u64),
+            Some(data_dir_bytes),
+            "admission gauge"
+        );
+        assert_eq!(
+            va.get("disk_bytes_used")
+                .and_then(serde_json::Value::as_u64),
+            Some(disk_bytes_used),
+            "overlays+bases gauge"
+        );
+        assert_ne!(
+            data_dir_bytes, disk_bytes_used,
+            "data_dir_bytes is not disk_bytes_used"
+        );
+        assert_eq!(
+            va.get("vms_created_total")
+                .and_then(serde_json::Value::as_u64),
+            Some(0),
+            "vms_created_total"
+        );
+        assert_eq!(
+            va.get("num_running_vms")
+                .and_then(serde_json::Value::as_i64),
+            Some(0),
+            "num_running_vms"
+        );
+        assert_eq!(
+            va.get("vms_failed_total")
+                .and_then(serde_json::Value::as_u64),
+            Some(0),
+            "vms_failed_total"
+        );
+        assert_eq!(
+            va.get("total_uptime_ms")
+                .and_then(serde_json::Value::as_u64),
+            Some(0),
+            "total_uptime_ms"
+        );
     }
 }

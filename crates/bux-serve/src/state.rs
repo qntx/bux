@@ -3,11 +3,12 @@
 use std::sync::Arc;
 
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::ApiKey;
 
 /// Server-enforced create caps and request defaults.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 pub struct Limits {
     /// Maximum sandboxes for one tenant.
     pub max_sandboxes: u32,

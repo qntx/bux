@@ -2,10 +2,10 @@
 //!
 //! `bux serve start` opens one [`bux::Runtime`] (exclusive flock on `BUX_HOME`),
 //! binds TCP (loopback unless `--public`), sweeps idle VMs every 30s, and
-//! serves `/v1/health` (public) plus Bearer-protected `/v1/me`, sandbox
-//! get-or-create, collect exec, files, and images. At least one API key is
-//! required to start. Identifiers use the alphabet `[A-Za-z0-9._]`; `-` is
-//! only a separator in formatted sandbox and volume names.
+//! serves `/v1/health` (public) plus Bearer-protected `/v1/me`, `/v1/metrics`,
+//! sandbox get-or-create, collect exec, files, images, and logs. At least one
+//! API key is required to start. Identifiers use the alphabet `[A-Za-z0-9._]`;
+//! `-` is only a separator in formatted sandbox and volume names.
 
 #![allow(
     clippy::missing_docs_in_private_items,
@@ -18,6 +18,8 @@ mod exec;
 mod files;
 mod ids;
 mod images;
+mod logs;
+mod openapi;
 mod router;
 mod sandboxes;
 mod state;
@@ -333,199 +335,10 @@ fn install_shutdown() -> std::io::Result<impl Future<Output = ()> + Send> {
 }
 
 /// OpenAPI 3.1 document for routes this worker currently serves.
-#[must_use]
-pub const fn openapi_json() -> &'static str {
-    OPENAPI_JSON
-}
-
-const OPENAPI_JSON: &str = concat!(
-    "{\n",
-    "  \"openapi\": \"3.1.0\",\n",
-    "  \"info\": {\n",
-    "    \"title\": \"bux\",\n",
-    "    \"version\": \"",
-    env!("CARGO_PKG_VERSION"),
-    "\"\n",
-    "  },\n",
-    "  \"paths\": {\n",
-    "    \"/v1/health\": {\n",
-    "      \"get\": {\n",
-    "        \"operationId\": \"health\",\n",
-    "        \"responses\": {\n",
-    "          \"200\": { \"description\": \"Worker is up\" }\n",
-    "        }\n",
-    "      }\n",
-    "    },\n",
-    "    \"/v1/config\": {\n",
-    "      \"get\": {\n",
-    "        \"operationId\": \"config\",\n",
-    "        \"security\": [{ \"bearer\": [] }],\n",
-    "        \"responses\": {\n",
-    "          \"200\": { \"description\": \"Worker config\" },\n",
-    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" }\n",
-    "        }\n",
-    "      }\n",
-    "    },\n",
-    "    \"/v1/me\": {\n",
-    "      \"get\": {\n",
-    "        \"operationId\": \"me\",\n",
-    "        \"security\": [{ \"bearer\": [] }],\n",
-    "        \"responses\": {\n",
-    "          \"200\": { \"description\": \"Bearer tenant_id and max_sandboxes\" },\n",
-    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" }\n",
-    "        }\n",
-    "      }\n",
-    "    },\n",
-    "    \"/v1/sandboxes\": {\n",
-    "      \"get\": {\n",
-    "        \"operationId\": \"listSandboxes\",\n",
-    "        \"security\": [{ \"bearer\": [] }],\n",
-    "        \"responses\": {\n",
-    "          \"200\": { \"description\": \"Sandboxes for this tenant\" },\n",
-    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" }\n",
-    "        }\n",
-    "      },\n",
-    "      \"post\": {\n",
-    "        \"operationId\": \"createSandbox\",\n",
-    "        \"security\": [{ \"bearer\": [] }],\n",
-    "        \"responses\": {\n",
-    "          \"201\": { \"description\": \"Created\" },\n",
-    "          \"200\": { \"description\": \"Existing sandbox for this tenant and agent\" },\n",
-    "          \"400\": { \"description\": \"Invalid body or per-sandbox admission\" },\n",
-    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" },\n",
-    "          \"409\": { \"description\": \"Name occupied\" },\n",
-    "          \"412\": { \"description\": \"No hardware virtualization\" },\n",
-    "          \"429\": { \"description\": \"Count, running RAM, or disk cap\" }\n",
-    "        }\n",
-    "      }\n",
-    "    },\n",
-    "    \"/v1/sandboxes/{id}\": {\n",
-    "      \"get\": {\n",
-    "        \"operationId\": \"getSandbox\",\n",
-    "        \"security\": [{ \"bearer\": [] }],\n",
-    "        \"parameters\": [{ \"name\": \"id\", \"in\": \"path\", \"required\": true, \"schema\": { \"type\": \"string\" } }],\n",
-    "        \"responses\": {\n",
-    "          \"200\": { \"description\": \"Sandbox\" },\n",
-    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" },\n",
-    "          \"404\": { \"description\": \"Missing or other tenant\" }\n",
-    "        }\n",
-    "      },\n",
-    "      \"delete\": {\n",
-    "        \"operationId\": \"deleteSandbox\",\n",
-    "        \"security\": [{ \"bearer\": [] }],\n",
-    "        \"parameters\": [{ \"name\": \"id\", \"in\": \"path\", \"required\": true, \"schema\": { \"type\": \"string\" } }],\n",
-    "        \"responses\": {\n",
-    "          \"204\": { \"description\": \"Removed, workspace volume deleted\" },\n",
-    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" },\n",
-    "          \"404\": { \"description\": \"Missing or other tenant\" }\n",
-    "        }\n",
-    "      }\n",
-    "    },\n",
-    "    \"/v1/sandboxes/{id}/start\": {\n",
-    "      \"post\": {\n",
-    "        \"operationId\": \"startSandbox\",\n",
-    "        \"security\": [{ \"bearer\": [] }],\n",
-    "        \"parameters\": [{ \"name\": \"id\", \"in\": \"path\", \"required\": true, \"schema\": { \"type\": \"string\" } }],\n",
-    "        \"responses\": {\n",
-    "          \"200\": { \"description\": \"Started\" },\n",
-    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" },\n",
-    "          \"404\": { \"description\": \"Missing or other tenant\" },\n",
-    "          \"409\": { \"description\": \"secrets_required or not stopped\" }\n",
-    "        }\n",
-    "      }\n",
-    "    },\n",
-    "    \"/v1/sandboxes/{id}/exec\": {\n",
-    "      \"post\": {\n",
-    "        \"operationId\": \"exec\",\n",
-    "        \"security\": [{ \"bearer\": [] }],\n",
-    "        \"parameters\": [{ \"name\": \"id\", \"in\": \"path\", \"required\": true, \"schema\": { \"type\": \"string\" } }],\n",
-    "        \"responses\": {\n",
-    "          \"200\": { \"description\": \"Collected exec output\" },\n",
-    "          \"400\": { \"description\": \"Invalid body or timeout_ms\" },\n",
-    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" },\n",
-    "          \"404\": { \"description\": \"Missing or other tenant\" },\n",
-    "          \"409\": { \"description\": \"secrets_required\" }\n",
-    "        }\n",
-    "      }\n",
-    "    },\n",
-    "    \"/v1/sandboxes/{id}/files\": {\n",
-    "      \"get\": {\n",
-    "        \"operationId\": \"getFile\",\n",
-    "        \"security\": [{ \"bearer\": [] }],\n",
-    "        \"parameters\": [\n",
-    "          { \"name\": \"id\", \"in\": \"path\", \"required\": true, \"schema\": { \"type\": \"string\" } },\n",
-    "          { \"name\": \"path\", \"in\": \"query\", \"required\": true, \"schema\": { \"type\": \"string\" } }\n",
-    "        ],\n",
-    "        \"responses\": {\n",
-    "          \"200\": { \"description\": \"File bytes\" },\n",
-    "          \"400\": { \"description\": \"Invalid path\" },\n",
-    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" },\n",
-    "          \"404\": { \"description\": \"Missing or other tenant\" }\n",
-    "        }\n",
-    "      },\n",
-    "      \"put\": {\n",
-    "        \"operationId\": \"putFile\",\n",
-    "        \"security\": [{ \"bearer\": [] }],\n",
-    "        \"parameters\": [\n",
-    "          { \"name\": \"id\", \"in\": \"path\", \"required\": true, \"schema\": { \"type\": \"string\" } },\n",
-    "          { \"name\": \"path\", \"in\": \"query\", \"required\": true, \"schema\": { \"type\": \"string\" } },\n",
-    "          { \"name\": \"mode\", \"in\": \"query\", \"required\": false, \"schema\": { \"type\": \"integer\" }, \"description\": \"Decimal file mode (default 420 = 0644)\" }\n",
-    "        ],\n",
-    "        \"responses\": {\n",
-    "          \"204\": { \"description\": \"Written\" },\n",
-    "          \"400\": { \"description\": \"Invalid path or mode\" },\n",
-    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" },\n",
-    "          \"404\": { \"description\": \"Missing or other tenant\" },\n",
-    "          \"413\": { \"description\": \"Body over 32 MiB\" }\n",
-    "        }\n",
-    "      }\n",
-    "    },\n",
-    "    \"/v1/images\": {\n",
-    "      \"get\": {\n",
-    "        \"operationId\": \"listImages\",\n",
-    "        \"security\": [{ \"bearer\": [] }],\n",
-    "        \"responses\": {\n",
-    "          \"200\": { \"description\": \"Cached images (worker-global)\" },\n",
-    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" }\n",
-    "        }\n",
-    "      },\n",
-    "      \"delete\": {\n",
-    "        \"operationId\": \"deleteImage\",\n",
-    "        \"security\": [{ \"bearer\": [] }],\n",
-    "        \"parameters\": [{ \"name\": \"reference\", \"in\": \"query\", \"required\": true, \"schema\": { \"type\": \"string\" } }],\n",
-    "        \"responses\": {\n",
-    "          \"204\": { \"description\": \"Index entry removed\" },\n",
-    "          \"400\": { \"description\": \"Invalid reference\" },\n",
-    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" },\n",
-    "          \"404\": { \"description\": \"Not in store\" },\n",
-    "          \"409\": { \"description\": \"Image is in use\" }\n",
-    "        }\n",
-    "      }\n",
-    "    },\n",
-    "    \"/v1/images/pull\": {\n",
-    "      \"post\": {\n",
-    "        \"operationId\": \"pullImage\",\n",
-    "        \"security\": [{ \"bearer\": [] }],\n",
-    "        \"responses\": {\n",
-    "          \"200\": { \"description\": \"Pulled\" },\n",
-    "          \"400\": { \"description\": \"Invalid reference\" },\n",
-    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" },\n",
-    "          \"413\": { \"description\": \"Manifest compressed size over max-pull-bytes\" },\n",
-    "          \"429\": { \"description\": \"Disk cap\" }\n",
-    "        }\n",
-    "      }\n",
-    "    }\n",
-    "  },\n",
-    "  \"components\": {\n",
-    "    \"securitySchemes\": {\n",
-    "      \"bearer\": { \"type\": \"http\", \"scheme\": \"bearer\" }\n",
-    "    }\n",
-    "  }\n",
-    "}"
-);
+pub use openapi::openapi_json;
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "tests")]
+#[allow(clippy::unwrap_used, clippy::shadow_unrelated, reason = "tests")]
 mod tests {
     use super::*;
 
@@ -615,53 +428,48 @@ mod tests {
 
     #[test]
     fn openapi_is_json_object() {
-        let v: serde_json::Value = serde_json::from_str(openapi_json()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&openapi_json()).unwrap();
         assert!(v.get("openapi").is_some(), "openapi field");
+        let paths = v.get("paths").expect("paths");
+        for path in [
+            "/v1/health",
+            "/v1/config",
+            "/v1/me",
+            "/v1/metrics",
+            "/v1/sandboxes",
+            "/v1/sandboxes/{id}",
+            "/v1/sandboxes/{id}/start",
+            "/v1/sandboxes/{id}/logs",
+            "/v1/sandboxes/{id}/exec",
+            "/v1/sandboxes/{id}/files",
+            "/v1/images",
+            "/v1/images/pull",
+        ] {
+            assert!(paths.get(path).is_some(), "{path}");
+        }
         assert!(
-            v.get("paths").and_then(|p| p.get("/v1/health")).is_some(),
-            "health path"
+            paths.get("/v1/sandboxes/{id}/snapshots").is_none(),
+            "snapshots are a later PR"
         );
         assert!(
-            v.get("paths").and_then(|p| p.get("/v1/config")).is_some(),
-            "config path"
+            v.pointer("/components/schemas/MetricsBody").is_some(),
+            "utoipa schema"
         );
-        assert!(
-            v.get("paths").and_then(|p| p.get("/v1/me")).is_some(),
-            "me path"
+        assert_eq!(
+            v.pointer("/components/securitySchemes/bearer/scheme")
+                .and_then(serde_json::Value::as_str),
+            Some("bearer"),
+            "bearer scheme"
         );
-        assert!(
-            v.get("paths")
-                .and_then(|p| p.get("/v1/sandboxes"))
-                .is_some(),
-            "sandboxes path"
+        assert_eq!(
+            v.pointer("/paths/~1v1~1health/get/security"),
+            Some(&serde_json::json!([{}])),
+            "health overrides global bearer"
         );
-        assert!(
-            v.get("paths")
-                .and_then(|p| p.get("/v1/sandboxes/{id}/start"))
-                .is_some(),
-            "start path"
-        );
-        assert!(
-            v.get("paths")
-                .and_then(|p| p.get("/v1/sandboxes/{id}/exec"))
-                .is_some(),
-            "exec path"
-        );
-        assert!(
-            v.get("paths")
-                .and_then(|p| p.get("/v1/sandboxes/{id}/files"))
-                .is_some(),
-            "files path"
-        );
-        assert!(
-            v.get("paths").and_then(|p| p.get("/v1/images")).is_some(),
-            "images path"
-        );
-        assert!(
-            v.get("paths")
-                .and_then(|p| p.get("/v1/images/pull"))
-                .is_some(),
-            "pull path"
+        assert_eq!(
+            v.get("security"),
+            Some(&serde_json::json!([{"bearer": []}])),
+            "global bearer"
         );
     }
 

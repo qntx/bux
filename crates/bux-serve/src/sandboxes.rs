@@ -11,6 +11,7 @@ use bux::{
     EgressClass, NetworkSpec, Runtime, SecurityOptions, Status, Vm, VmInfo, VmOptions, VolumeMount,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::auth::Tenant;
 use crate::error::{ApiError, JsonBody};
@@ -29,9 +30,9 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/v1/sandboxes/{id}/start", post(start_one))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-struct CreateRequest {
+pub(crate) struct CreateRequest {
     agent_id: String,
     image: String,
     #[serde(default)]
@@ -57,8 +58,8 @@ struct CreateSpec {
     network: NetworkSpec,
 }
 
-#[derive(Debug, Serialize)]
-struct SandboxBody {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct SandboxBody {
     id: String,
     name: Option<String>,
     agent_id: Option<String>,
@@ -67,7 +68,9 @@ struct SandboxBody {
     status: &'static str,
     ram_mib: u32,
     vcpus: u8,
+    #[schema(value_type = Object)]
     network: NetworkSpec,
+    #[schema(value_type = Object)]
     egress: EgressClass,
     isolation_note: &'static str,
     secrets_required: bool,
@@ -114,7 +117,17 @@ fn is_vm_id(id: &str) -> bool {
     id.len() == 12 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-async fn list(
+#[utoipa::path(
+    get,
+    path = "/v1/sandboxes",
+    operation_id = "listSandboxes",
+    tag = "Sandboxes",
+    responses(
+        (status = 200, description = "Sandboxes for this tenant", body = [SandboxBody]),
+        (status = 401, description = "Missing or invalid Bearer token")
+    )
+)]
+pub(crate) async fn list(
     State(state): State<AppState>,
     tenant: Tenant,
 ) -> Result<Json<Vec<SandboxBody>>, ApiError> {
@@ -127,7 +140,19 @@ async fn list(
     Ok(Json(body))
 }
 
-async fn get_one(
+#[utoipa::path(
+    get,
+    path = "/v1/sandboxes/{id}",
+    operation_id = "getSandbox",
+    tag = "Sandboxes",
+    params(("id" = String, Path, description = "Exact 12-char hex sandbox id")),
+    responses(
+        (status = 200, description = "Sandbox", body = SandboxBody),
+        (status = 401, description = "Missing or invalid Bearer token"),
+        (status = 404, description = "Missing or other tenant")
+    )
+)]
+pub(crate) async fn get_one(
     State(state): State<AppState>,
     tenant: Tenant,
     Path(id): Path<String>,
@@ -136,7 +161,23 @@ async fn get_one(
     Ok(Json(SandboxBody::from_info(&vm.info())))
 }
 
-async fn create(
+#[utoipa::path(
+    post,
+    path = "/v1/sandboxes",
+    operation_id = "createSandbox",
+    tag = "Sandboxes",
+    request_body = CreateRequest,
+    responses(
+        (status = 201, description = "Created", body = SandboxBody),
+        (status = 200, description = "Existing sandbox for this tenant and agent", body = SandboxBody),
+        (status = 400, description = "Invalid body or per-sandbox admission"),
+        (status = 401, description = "Missing or invalid Bearer token"),
+        (status = 409, description = "Name occupied or spec mismatch"),
+        (status = 412, description = "No hardware virtualization"),
+        (status = 429, description = "Count, running RAM, or disk cap")
+    )
+)]
+pub(crate) async fn create(
     State(state): State<AppState>,
     tenant: Tenant,
     JsonBody(req): JsonBody<CreateRequest>,
@@ -165,7 +206,20 @@ async fn create(
     create_new(&state, &tenant, name, req, &spec).await
 }
 
-async fn start_one(
+#[utoipa::path(
+    post,
+    path = "/v1/sandboxes/{id}/start",
+    operation_id = "startSandbox",
+    tag = "Sandboxes",
+    params(("id" = String, Path, description = "Exact 12-char hex sandbox id")),
+    responses(
+        (status = 200, description = "Started", body = SandboxBody),
+        (status = 401, description = "Missing or invalid Bearer token"),
+        (status = 404, description = "Missing or other tenant"),
+        (status = 409, description = "secrets_required or not stopped")
+    )
+)]
+pub(crate) async fn start_one(
     State(state): State<AppState>,
     tenant: Tenant,
     Path(id): Path<String>,
@@ -180,7 +234,19 @@ async fn start_one(
     Ok(Json(SandboxBody::from_info(&vm.info())))
 }
 
-async fn delete_one(
+#[utoipa::path(
+    delete,
+    path = "/v1/sandboxes/{id}",
+    operation_id = "deleteSandbox",
+    tag = "Sandboxes",
+    params(("id" = String, Path, description = "Exact 12-char hex sandbox id")),
+    responses(
+        (status = 204, description = "Removed, workspace volume deleted"),
+        (status = 401, description = "Missing or invalid Bearer token"),
+        (status = 404, description = "Missing or other tenant")
+    )
+)]
+pub(crate) async fn delete_one(
     State(state): State<AppState>,
     tenant: Tenant,
     Path(id): Path<String>,
@@ -475,7 +541,12 @@ fn remove_workspace_volume(runtime: &Runtime, name: &str) -> Result<(), ApiError
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "tests"
+)]
 mod tests {
     use std::path::Path;
     use std::sync::Arc;
