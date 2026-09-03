@@ -414,8 +414,13 @@ impl Runtime {
     /// detached VM.
     ///
     /// Copied from the source: overlay contents, `vcpus`, `ram_mib`, `network`,
-    /// and `auto_remove`. Always `detach: true` so CLI/`Runtime` Drop does not
-    /// SIGTERM the clone (same process model as `bux create`).
+    /// `auto_remove`, and `tenant_id`. Always `detach: true` so CLI/`Runtime`
+    /// Drop does not SIGTERM the clone (same process model as `bux create`).
+    ///
+    /// `agent_id` is set from `name` when that name is the serve unique form
+    /// `a-{tenant_id}-{agent}`. If `name` is `None` (CLI), `agent_id` stays
+    /// `None`. Source volumes are not copied; a new `ws-{tenant}-{agent}`
+    /// volume is attached when both ids are known.
     ///
     /// Not copied: ports, volumes, secrets, security, command, env, workdir,
     /// user, auto-stop/delete, ready timeout, or name (unless `name` is passed).
@@ -448,7 +453,8 @@ impl Runtime {
     /// base, then boot a detached VM (same disk recipe as [`Self::clone`]).
     ///
     /// Copied from the source VM: overlay contents (via the snapshot file),
-    /// `vcpus`, `ram_mib`, `network`, and `auto_remove`. Always `detach: true`.
+    /// `vcpus`, `ram_mib`, `network`, `auto_remove`, and `tenant_id`. Always
+    /// `detach: true`. `agent_id` follows the same name rule as [`Self::clone`].
     ///
     /// Not copied: ports, volumes, secrets, security, command, env, workdir,
     /// user, auto-stop/delete, ready timeout, or name (unless `name` is passed).
@@ -673,7 +679,13 @@ fn restore_vm_options(
 }
 
 /// Create-options for a disk-clone or snapshot-restore: copy
-/// `vcpus`/`ram_mib`/`network`/`auto_remove`; always detach.
+/// `vcpus`/`ram_mib`/`network`/`auto_remove`/`tenant_id`; always detach.
+///
+/// Serve always passes `a-{tenant}-{agent}`. That form is injective (`-` is
+/// not in the id alphabet), so `agent_id` can be recovered from `name`.
+/// CLI names are optional and unconstrained; missing/`None` leaves `agent_id`
+/// unset. Source volumes are not copied; a new workspace volume is attached
+/// only when tenant and agent are both known so HTTP clones stay isolated.
 #[must_use]
 fn clone_vm_options(config: &VmConfig, name: Option<String>, clone_base: PathBuf) -> VmOptions {
     let mut opts = VmOptions::from_image(ImageRef::BaseDisk(clone_base))
@@ -682,10 +694,29 @@ fn clone_vm_options(config: &VmConfig, name: Option<String>, clone_base: PathBuf
         .auto_remove(config.auto_remove)
         .detach(true) // durable disk-clone; CLI drop must not SIGTERM
         .network(config.network.clone());
+    if let Some(tenant) = config.tenant_id.as_deref() {
+        opts = opts.tenant_id(tenant.to_owned());
+        if let Some(agent) = name
+            .as_deref()
+            .and_then(|n| agent_id_from_sandbox_name(tenant, n))
+        {
+            opts = opts
+                .agent_id(agent.to_owned())
+                .named_volume(format!("ws-{tenant}-{agent}"), "/workspace");
+        }
+    }
     if let Some(n) = name {
         opts = opts.name(n);
     }
     opts
+}
+
+/// Parse `agent` from serve unique name `a-{tenant}-{agent}`.
+fn agent_id_from_sandbox_name<'a>(tenant_id: &str, name: &'a str) -> Option<&'a str> {
+    name.strip_prefix("a-")?
+        .strip_prefix(tenant_id)?
+        .strip_prefix('-')
+        .filter(|agent| !agent.is_empty())
 }
 
 impl Drop for Runtime {
@@ -739,6 +770,7 @@ mod tests {
     use crate::options::NetworkSpec;
     use crate::secrets::{LiveSecrets, StartOptions};
     use crate::state::VmConfig;
+    use crate::volumes::{VolumeMount, VolumeSource};
     use bux_oci::RegistryAuth;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -934,10 +966,77 @@ mod tests {
         assert!(opts.auto_remove);
         assert_eq!(opts.name.as_deref(), Some("n"));
         assert_eq!(opts.network, NetworkSpec::Disabled);
+        assert!(opts.tenant_id.is_none(), "CLI source has no tenant");
+        assert!(opts.agent_id.is_none(), "non-serve name leaves agent unset");
+        assert!(opts.volumes.is_empty(), "source volumes are not copied");
         assert!(
             matches!(&opts.image, ImageRef::BaseDisk(p) if p == Path::new("/tmp/clone.qcow2")),
             "clone image must be the flattened base"
         );
+    }
+
+    #[test]
+    fn clone_vm_options_copies_tenant_and_agent_from_serve_name() {
+        let source = VmConfig {
+            tenant_id: Some("ten1".into()),
+            agent_id: Some("old".into()),
+            vcpus: 2,
+            ram_mib: 1024,
+            network: NetworkSpec::Disabled,
+            ..VmConfig::default()
+        };
+        let opts = clone_vm_options(
+            &source,
+            Some("a-ten1-newagt".into()),
+            PathBuf::from("/tmp/clone.qcow2"),
+        );
+        assert_eq!(opts.tenant_id.as_deref(), Some("ten1"));
+        assert_eq!(opts.agent_id.as_deref(), Some("newagt"));
+        assert_eq!(opts.name.as_deref(), Some("a-ten1-newagt"));
+        assert_eq!(
+            opts.volumes,
+            vec![VolumeMount::named("ws-ten1-newagt", "/workspace")],
+            "new workspace, not the source volume"
+        );
+        assert!(
+            matches!(
+                opts.volumes.first().map(|m| &m.source),
+                Some(VolumeSource::Named { name }) if name == "ws-ten1-newagt"
+            ),
+            "named volume"
+        );
+    }
+
+    #[test]
+    fn clone_vm_options_none_name_leaves_agent_none() {
+        let source = VmConfig {
+            tenant_id: Some("ten1".into()),
+            agent_id: Some("old".into()),
+            ..VmConfig::default()
+        };
+        let opts = clone_vm_options(&source, None, PathBuf::from("/tmp/clone.qcow2"));
+        assert_eq!(opts.tenant_id.as_deref(), Some("ten1"), "tenant is copied");
+        assert!(opts.agent_id.is_none(), "CLI name None keeps agent unset");
+        assert!(opts.name.is_none());
+        assert!(opts.volumes.is_empty(), "no agent → no workspace volume");
+    }
+
+    #[test]
+    fn clone_vm_options_custom_name_does_not_invent_agent() {
+        let source = VmConfig {
+            tenant_id: Some("ten1".into()),
+            agent_id: Some("old".into()),
+            ..VmConfig::default()
+        };
+        let opts = clone_vm_options(
+            &source,
+            Some("custom".into()),
+            PathBuf::from("/tmp/c.qcow2"),
+        );
+        assert_eq!(opts.tenant_id.as_deref(), Some("ten1"));
+        assert!(opts.agent_id.is_none(), "unparseable name");
+        assert_eq!(opts.name.as_deref(), Some("custom"));
+        assert!(opts.volumes.is_empty());
     }
 
     #[test]
