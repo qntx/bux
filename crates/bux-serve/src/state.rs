@@ -21,6 +21,12 @@ pub struct Limits {
     pub max_running_ram_mib: u32,
     /// Maximum recursive data-dir usage (bytes). Exceeded → 429.
     pub max_disk_bytes: u64,
+    /// Maximum compressed pull size (bytes). Exceeded → 413.
+    pub max_pull_bytes: u64,
+    /// Maximum collected stdout or stderr per exec (bytes). Exceeded → truncate.
+    pub max_exec_output_bytes: u64,
+    /// Registry pull deadline (seconds).
+    pub pull_timeout_secs: u64,
     /// `ram_mib` when the create body omits it.
     pub default_ram_mib: u32,
     /// `vcpus` when the create body omits it.
@@ -36,6 +42,9 @@ impl Default for Limits {
             max_vcpus: 4,
             max_running_ram_mib: 8192,
             max_disk_bytes: 32_u64 * 1024 * 1024 * 1024,
+            max_pull_bytes: 4_u64 * 1024 * 1024 * 1024,
+            max_exec_output_bytes: 1024 * 1024,
+            pull_timeout_secs: 300,
             default_ram_mib: 512,
             default_vcpus: 1,
         }
@@ -122,5 +131,13 @@ mod tests {
             Limits::default().max_disk_bytes,
             32_u64 * 1024 * 1024 * 1024
         );
+    }
+
+    #[test]
+    fn default_pull_and_exec_caps() {
+        let limits = Limits::default();
+        assert_eq!(limits.max_pull_bytes, 4_u64 * 1024 * 1024 * 1024);
+        assert_eq!(limits.max_exec_output_bytes, 1024 * 1024);
+        assert_eq!(limits.pull_timeout_secs, 300);
     }
 }

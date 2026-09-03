@@ -244,7 +244,7 @@ fn create_miss_error(err: bux::Error) -> ApiError {
     }
 }
 
-fn load_owned(runtime: &Runtime, tenant: &str, id: &str) -> Result<Vm, ApiError> {
+pub(crate) fn load_owned(runtime: &Runtime, tenant: &str, id: &str) -> Result<Vm, ApiError> {
     if !is_vm_id(id) {
         return Err(ApiError::not_found());
     }

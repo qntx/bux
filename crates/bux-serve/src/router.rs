@@ -1,4 +1,4 @@
-//! HTTP router: public health, Bearer-protected config and sandboxes.
+//! HTTP router: public health, Bearer-protected config, sandboxes, exec, files, images.
 
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
@@ -12,16 +12,29 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::require_bearer;
 use crate::error::ApiError;
-use crate::sandboxes;
 use crate::state::{AppState, Limits};
+use crate::{exec, files, images, sandboxes};
 
-/// JSON and default request body cap.
+/// JSON request body cap.
 pub(crate) const MAX_JSON_BODY_BYTES: usize = 1024 * 1024;
+/// Files PUT body cap.
+pub(crate) const MAX_FILE_BODY_BYTES: usize = 32 * 1024 * 1024;
 
 pub(crate) fn router(state: AppState) -> Router {
-    let protected = Router::new()
+    let json = Router::new()
         .route("/v1/config", get(config))
         .merge(sandboxes::routes())
+        .merge(exec::routes())
+        .merge(images::routes())
+        .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
+        .layer(RequestBodyLimitLayer::new(MAX_JSON_BODY_BYTES));
+
+    let files = files::routes()
+        .layer(DefaultBodyLimit::max(MAX_FILE_BODY_BYTES))
+        .layer(RequestBodyLimitLayer::new(MAX_FILE_BODY_BYTES));
+
+    let protected = json
+        .merge(files)
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_bearer,
@@ -30,12 +43,7 @@ pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(health))
         .merge(protected)
-        .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
-        .layer(
-            ServiceBuilder::new()
-                .layer(TraceLayer::new_for_http())
-                .layer(RequestBodyLimitLayer::new(MAX_JSON_BODY_BYTES)),
-        )
+        .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()))
         .layer(middleware::map_response(map_payload_too_large))
         .with_state(state)
 }
@@ -152,6 +160,17 @@ mod tests {
             Some(2048),
             "max_ram_mib"
         );
+        assert_eq!(
+            v.get("max_exec_output_bytes")
+                .and_then(serde_json::Value::as_u64),
+            Some(1024 * 1024),
+            "max_exec_output_bytes"
+        );
+        assert_eq!(
+            v.get("max_pull_bytes").and_then(serde_json::Value::as_u64),
+            Some(4_u64 * 1024 * 1024 * 1024),
+            "max_pull_bytes"
+        );
     }
 
     #[tokio::test]
@@ -219,5 +238,19 @@ mod tests {
             Some("payload_too_large"),
             "code"
         );
+    }
+
+    #[test]
+    fn files_limit_is_32mib_and_json_is_1mib() {
+        assert_eq!(MAX_JSON_BODY_BYTES, 1024 * 1024, "json");
+        assert_eq!(MAX_FILE_BODY_BYTES, 32 * 1024 * 1024, "files");
+        let prod = include_str!("router.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("prod");
+        assert!(prod.contains("files::routes"), "files routes");
+        assert!(prod.contains("exec::routes"), "exec routes");
+        assert!(prod.contains("images::routes"), "images routes");
+        assert!(prod.contains("MAX_FILE_BODY_BYTES"), "files body limit");
     }
 }

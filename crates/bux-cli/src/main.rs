@@ -240,6 +240,18 @@ struct ServeStartArgs {
     #[arg(long, default_value_t = 32_u64 * 1024 * 1024 * 1024)]
     max_disk_bytes: u64,
 
+    /// Maximum compressed image pull size in bytes (`Runtime::manifest_compressed_bytes`).
+    #[arg(long, default_value_t = 4_u64 * 1024 * 1024 * 1024)]
+    max_pull_bytes: u64,
+
+    /// Maximum collected stdout or stderr per exec, in bytes.
+    #[arg(long, default_value_t = 1024 * 1024)]
+    max_exec_output_bytes: u64,
+
+    /// Registry pull deadline in seconds.
+    #[arg(long, default_value_t = 300)]
+    pull_timeout_secs: u64,
+
     /// Default `ram_mib` when omitted on create.
     #[arg(long, default_value_t = 512)]
     default_ram_mib: u32,
@@ -264,6 +276,9 @@ impl ServeStartArgs {
             max_vcpus: self.max_vcpus,
             max_running_ram_mib: self.max_running_ram_mib,
             max_disk_bytes: self.max_disk_bytes,
+            max_pull_bytes: self.max_pull_bytes,
+            max_exec_output_bytes: self.max_exec_output_bytes,
+            pull_timeout_secs: self.pull_timeout_secs,
             default_ram_mib: self.default_ram_mib,
             default_vcpus: self.default_vcpus,
         };
@@ -744,6 +759,9 @@ mod log_level_tests {
         assert!(help.contains("--max-ram-mib"), "{help}");
         assert!(help.contains("--max-running-ram-mib"), "{help}");
         assert!(help.contains("--max-disk-bytes"), "{help}");
+        assert!(help.contains("--max-pull-bytes"), "{help}");
+        assert!(help.contains("--max-exec-output-bytes"), "{help}");
+        assert!(help.contains("--pull-timeout-secs"), "{help}");
     }
 
     #[test]
