@@ -1,11 +1,11 @@
 //! HTTP worker for hosted bux sandboxes.
 //!
 //! `bux serve start` opens one [`bux::Runtime`] (exclusive flock on `BUX_HOME`),
-//! binds a TCP loopback address, and serves `/v1/health` (public) plus
-//! Bearer-protected sandbox CRUD, collect exec, files, and images. At least
-//! one API key is required to start. Identifiers use the alphabet
-//! `[A-Za-z0-9._]`; `-` is only a separator in formatted sandbox and volume
-//! names.
+//! binds TCP (loopback unless `--public`), sweeps idle VMs every 30s, and
+//! serves `/v1/health` (public) plus Bearer-protected `/v1/me`, sandbox
+//! get-or-create, collect exec, files, and images. At least one API key is
+//! required to start. Identifiers use the alphabet `[A-Za-z0-9._]`; `-` is
+//! only a separator in formatted sandbox and volume names.
 
 #![allow(
     clippy::missing_docs_in_private_items,
@@ -25,6 +25,7 @@ mod state;
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub use error::{Error, Result};
 pub use ids::{
@@ -81,6 +82,9 @@ impl ApiKey {
     }
 }
 
+/// How often the worker calls [`bux::Runtime::sweep`].
+pub(crate) const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+
 /// TCP bind address, API keys, data dir, and admission limits.
 #[derive(Debug)]
 pub struct ServeConfig {
@@ -88,6 +92,7 @@ pub struct ServeConfig {
     keys: Vec<ApiKey>,
     data_dir: PathBuf,
     limits: Limits,
+    allow_unrestricted_net: bool,
 }
 
 impl ServeConfig {
@@ -100,13 +105,26 @@ impl ServeConfig {
     /// Returns [`Error::NoApiKeys`], [`Error::InvalidListen`], or
     /// [`Error::NonLoopback`].
     pub fn new(listen: &str, keys: Vec<ApiKey>) -> Result<Self> {
+        Self::bind(listen, keys, false)
+    }
+
+    /// TCP bind with at least one API key.
+    ///
+    /// `public` is required for a non-loopback address (`--public`). Zero keys
+    /// is always [`Error::NoApiKeys`], including with `public`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoApiKeys`], [`Error::InvalidListen`], or
+    /// [`Error::NonLoopback`].
+    pub fn bind(listen: &str, keys: Vec<ApiKey>, public: bool) -> Result<Self> {
         if keys.is_empty() {
             return Err(Error::NoApiKeys);
         }
         let listen: SocketAddr = listen
             .parse()
             .map_err(|_| Error::InvalidListen(listen.to_owned()))?;
-        if !listen.ip().is_loopback() {
+        if !listen.ip().is_loopback() && !public {
             return Err(Error::NonLoopback(listen));
         }
         Ok(Self {
@@ -114,7 +132,16 @@ impl ServeConfig {
             keys,
             data_dir: bux::default_data_dir(),
             limits: Limits::default(),
+            allow_unrestricted_net: false,
         })
+    }
+
+    /// Permit `"unrestricted": true` on create (`NetworkSpec::Enabled` with an
+    /// empty allow-list).
+    #[must_use]
+    pub const fn allow_unrestricted_net(mut self, allow: bool) -> Self {
+        self.allow_unrestricted_net = allow;
+        self
     }
 
     /// Runtime data directory (`bux.lock` / `bux.db`). Second process → [`bux::Error::Busy`].
@@ -240,13 +267,39 @@ async fn serve(config: ServeConfig) -> Result<()> {
         %listen,
         api_keys = config.keys.len(),
         data_dir = %config.data_dir.display(),
+        allow_unrestricted_net = config.allow_unrestricted_net,
         "listening"
     );
-    let app = router::router(AppState::new(config.keys, runtime, config.limits));
-    axum::serve(listener, app)
+    let state = AppState::new(config.keys, runtime, config.limits)
+        .with_unrestricted_net(config.allow_unrestricted_net);
+    let sweep = tokio::spawn(sweep_loop(state.clone()));
+    let app = router::router(state);
+    let result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
-        .await?;
+        .await;
+    sweep.abort();
+    result?;
     Ok(())
+}
+
+async fn sweep_loop(state: AppState) {
+    let mut interval = tokio::time::interval(SWEEP_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    #[allow(
+        clippy::infinite_loop,
+        reason = "aborted when the HTTP server shuts down"
+    )]
+    loop {
+        interval.tick().await;
+        match state.runtime.sweep() {
+            Ok(report) => {
+                if report.stopped > 0 || report.deleted > 0 {
+                    tracing::info!(stopped = report.stopped, deleted = report.deleted, "sweep");
+                }
+            }
+            Err(err) => tracing::warn!(error = %err, "sweep failed"),
+        }
+    }
 }
 
 /// Install SIGINT/SIGTERM first. A failed install is I/O, not shutdown.
@@ -313,6 +366,16 @@ const OPENAPI_JSON: &str = concat!(
     "        }\n",
     "      }\n",
     "    },\n",
+    "    \"/v1/me\": {\n",
+    "      \"get\": {\n",
+    "        \"operationId\": \"me\",\n",
+    "        \"security\": [{ \"bearer\": [] }],\n",
+    "        \"responses\": {\n",
+    "          \"200\": { \"description\": \"Bearer tenant_id and max_sandboxes\" },\n",
+    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" }\n",
+    "        }\n",
+    "      }\n",
+    "    },\n",
     "    \"/v1/sandboxes\": {\n",
     "      \"get\": {\n",
     "        \"operationId\": \"listSandboxes\",\n",
@@ -355,6 +418,19 @@ const OPENAPI_JSON: &str = concat!(
     "          \"204\": { \"description\": \"Removed, workspace volume deleted\" },\n",
     "          \"401\": { \"description\": \"Missing or invalid Bearer token\" },\n",
     "          \"404\": { \"description\": \"Missing or other tenant\" }\n",
+    "        }\n",
+    "      }\n",
+    "    },\n",
+    "    \"/v1/sandboxes/{id}/start\": {\n",
+    "      \"post\": {\n",
+    "        \"operationId\": \"startSandbox\",\n",
+    "        \"security\": [{ \"bearer\": [] }],\n",
+    "        \"parameters\": [{ \"name\": \"id\", \"in\": \"path\", \"required\": true, \"schema\": { \"type\": \"string\" } }],\n",
+    "        \"responses\": {\n",
+    "          \"200\": { \"description\": \"Started\" },\n",
+    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" },\n",
+    "          \"404\": { \"description\": \"Missing or other tenant\" },\n",
+    "          \"409\": { \"description\": \"secrets_required or not stopped\" }\n",
     "        }\n",
     "      }\n",
     "    },\n",
@@ -462,15 +538,42 @@ mod tests {
 
     #[test]
     fn refuses_non_loopback() {
-        let key = ApiKey::new("t", "s").unwrap();
-        let err = ServeConfig::new("0.0.0.0:8080", vec![key]).unwrap_err();
+        let err =
+            ServeConfig::new("0.0.0.0:8080", vec![ApiKey::new("t", "s").unwrap()]).unwrap_err();
         assert!(matches!(err, Error::NonLoopback(_)), "{err}");
+        let err = ServeConfig::bind("0.0.0.0:8080", vec![ApiKey::new("t", "s").unwrap()], false)
+            .unwrap_err();
+        assert!(matches!(err, Error::NonLoopback(_)), "{err}");
+    }
+
+    #[test]
+    fn public_bind_allows_non_loopback() {
+        let key = ApiKey::new("t", "s").unwrap();
+        ServeConfig::bind("0.0.0.0:8080", vec![key], true).unwrap();
+    }
+
+    #[test]
+    fn public_bind_without_keys_is_hard_error() {
+        let err = ServeConfig::bind("0.0.0.0:8080", vec![], true).unwrap_err();
+        assert!(matches!(err, Error::NoApiKeys), "{err}");
+        assert_eq!(err.exit_code(), 2, "exit");
     }
 
     #[test]
     fn accepts_loopback() {
         let key = ApiKey::new("t", "s").unwrap();
         ServeConfig::new("127.0.0.1:8080", vec![key]).unwrap();
+    }
+
+    #[test]
+    fn sweep_interval_is_30s() {
+        assert_eq!(SWEEP_INTERVAL, Duration::from_secs(30), "30s");
+        let prod = include_str!("lib.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("prod");
+        assert!(prod.contains("sweep_loop"), "sweep task");
+        assert!(prod.contains("runtime.sweep"), "Runtime::sweep");
     }
 
     #[test]
@@ -523,10 +626,20 @@ mod tests {
             "config path"
         );
         assert!(
+            v.get("paths").and_then(|p| p.get("/v1/me")).is_some(),
+            "me path"
+        );
+        assert!(
             v.get("paths")
                 .and_then(|p| p.get("/v1/sandboxes"))
                 .is_some(),
             "sandboxes path"
+        );
+        assert!(
+            v.get("paths")
+                .and_then(|p| p.get("/v1/sandboxes/{id}/start"))
+                .is_some(),
+            "start path"
         );
         assert!(
             v.get("paths")

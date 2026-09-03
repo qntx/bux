@@ -1,4 +1,4 @@
-//! HTTP router: public health, Bearer-protected config, sandboxes, exec, files, images.
+//! HTTP router: public health, Bearer-protected me/config, sandboxes, exec, files, images.
 
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
@@ -6,11 +6,12 @@ use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use serde::Serialize;
 use tower::ServiceBuilder;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::auth::require_bearer;
+use crate::auth::{Tenant, require_bearer};
 use crate::error::ApiError;
 use crate::state::{AppState, Limits};
 use crate::{exec, files, images, sandboxes};
@@ -22,6 +23,7 @@ pub(crate) use crate::files::MAX_FILE_BODY_BYTES;
 pub(crate) fn router(state: AppState) -> Router {
     let json = Router::new()
         .route("/v1/config", get(config))
+        .route("/v1/me", get(me))
         .merge(sandboxes::routes())
         .merge(exec::routes())
         .merge(images::routes())
@@ -53,6 +55,19 @@ async fn health() -> StatusCode {
 
 async fn config(State(state): State<AppState>) -> Json<Limits> {
     Json(state.limits)
+}
+
+#[derive(Debug, Serialize)]
+struct MeBody {
+    tenant_id: String,
+    max_sandboxes: u32,
+}
+
+async fn me(State(state): State<AppState>, tenant: Tenant) -> Json<MeBody> {
+    Json(MeBody {
+        tenant_id: tenant.id,
+        max_sandboxes: state.limits.max_sandboxes,
+    })
 }
 
 async fn map_payload_too_large(response: Response) -> Response {
@@ -169,6 +184,85 @@ mod tests {
             v.get("max_pull_bytes").and_then(serde_json::Value::as_u64),
             Some(4_u64 * 1024 * 1024 * 1024),
             "max_pull_bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn me_without_bearer_is_401() {
+        let (_dir, app) = sample_app();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/me")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "status");
+        let v = json_body(res).await;
+        assert_eq!(
+            v.pointer("/error/code").and_then(serde_json::Value::as_str),
+            Some("unauthorized"),
+            "code"
+        );
+    }
+
+    #[tokio::test]
+    async fn me_returns_tenant_and_max_sandboxes() {
+        let (_dir, app) = sample_app();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/me")
+                    .header(AUTHORIZATION, "Bearer secret1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "me");
+        let v = json_body(res).await;
+        assert_eq!(
+            v.get("tenant_id").and_then(serde_json::Value::as_str),
+            Some("tenant1"),
+            "tenant_id"
+        );
+        assert_eq!(
+            v.get("max_sandboxes").and_then(serde_json::Value::as_u64),
+            Some(32),
+            "max_sandboxes"
+        );
+    }
+
+    #[tokio::test]
+    async fn me_two_keys_are_distinct_tenants() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = bux::Runtime::open(dir.path()).unwrap();
+        let app = router(AppState::new(
+            vec![
+                ApiKey::new("a", "one").unwrap(),
+                ApiKey::new("b", "two").unwrap(),
+            ],
+            runtime,
+            Limits::default(),
+        ));
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/me")
+                    .header(AUTHORIZATION, "Bearer two")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "second key");
+        let v = json_body(res).await;
+        assert_eq!(
+            v.get("tenant_id").and_then(serde_json::Value::as_str),
+            Some("b"),
+            "tenant_id"
         );
     }
 

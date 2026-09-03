@@ -57,6 +57,7 @@ pub(crate) struct AppState {
     keys: Arc<[ApiKey]>,
     pub(crate) runtime: Arc<bux::Runtime>,
     pub(crate) limits: Limits,
+    pub(crate) allow_unrestricted_net: bool,
 }
 
 impl AppState {
@@ -65,7 +66,15 @@ impl AppState {
             keys: keys.into(),
             runtime: Arc::new(runtime),
             limits,
+            allow_unrestricted_net: false,
         }
+    }
+
+    /// Permit `"unrestricted": true` on create.
+    #[must_use]
+    pub(crate) const fn with_unrestricted_net(mut self, allow: bool) -> Self {
+        self.allow_unrestricted_net = allow;
+        self
     }
 
     /// Compare `token` to every key secret (no early return). Last match wins.
