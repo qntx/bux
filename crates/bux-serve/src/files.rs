@@ -13,6 +13,8 @@ use crate::sandboxes::load_owned;
 use crate::state::AppState;
 
 const DEFAULT_FILE_MODE: u32 = 0o644;
+/// Files PUT body and GET response cap.
+pub(crate) const MAX_FILE_BODY_BYTES: usize = 32 * 1024 * 1024;
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new().route("/v1/sandboxes/{id}/files", get(get_file).put(put_file))
@@ -55,6 +57,9 @@ async fn get_file(
         .await
         .map_err(ApiError::from_engine)?;
     vm.touch_activity().map_err(ApiError::from_engine)?;
+    if data.len() > MAX_FILE_BODY_BYTES {
+        return Err(ApiError::payload_too_large());
+    }
     Ok(data)
 }
 
@@ -299,5 +304,15 @@ mod tests {
         assert!(prod.contains("validate_guest_path"), "path check");
         assert!(prod.contains("0o644"), "default mode");
         assert!(prod.contains("contains(\"..\")"), "reject ..");
+        let get_fn = prod
+            .split("async fn get_file(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nasync fn ").next())
+            .expect("get_file");
+        assert!(
+            get_fn.contains("MAX_FILE_BODY_BYTES"),
+            "GET must cap at the files body limit"
+        );
+        assert!(get_fn.contains("payload_too_large"), "oversized GET is 413");
     }
 }

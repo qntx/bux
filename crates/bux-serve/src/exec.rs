@@ -500,6 +500,14 @@ mod tests {
             !prod.contains("tokio::time::timeout"),
             "must not wrap the host future"
         );
+        assert!(
+            !prod.contains("time::timeout"),
+            "must not wrap the host future via time::timeout"
+        );
+        assert!(
+            !prod.contains("tokio::time"),
+            "exec must not import tokio::time"
+        );
         assert!(!prod.contains("/exec/{"), "no exec_id routes");
         assert!(prod.contains("ExecStart::new"), "build ExecStart");
     }

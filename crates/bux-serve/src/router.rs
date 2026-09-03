@@ -17,8 +17,7 @@ use crate::{exec, files, images, sandboxes};
 
 /// JSON request body cap.
 pub(crate) const MAX_JSON_BODY_BYTES: usize = 1024 * 1024;
-/// Files PUT body cap.
-pub(crate) const MAX_FILE_BODY_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) use crate::files::MAX_FILE_BODY_BYTES;
 
 pub(crate) fn router(state: AppState) -> Router {
     let json = Router::new()
