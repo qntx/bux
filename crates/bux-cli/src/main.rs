@@ -202,9 +202,13 @@ enum Serve {
 /// Flags for `bux serve start`.
 #[derive(clap::Args)]
 struct ServeStartArgs {
-    /// TCP listen address (`IP:PORT`).
-    #[arg(long, env = "BUX_LISTEN", default_value = "127.0.0.1:8080")]
-    listen: String,
+    /// Listen spec. Repeatable. `HOST:PORT` or `unix://PATH` (a path starting with `/` is Unix).
+    ///
+    /// When omitted: `127.0.0.1:8080` and `unix://$XDG_RUNTIME_DIR/bux.sock`
+    /// (fallback `/tmp/bux-$UID.sock`). `BUX_LISTEN` is comma-separated using the
+    /// same grammar.
+    #[arg(long, value_name = "ADDR")]
+    listen: Vec<String>,
 
     /// API key as `id:secret`. Repeatable. `id` is the tenant id (`[A-Za-z0-9._]`).
     ///
@@ -260,7 +264,8 @@ struct ServeStartArgs {
     #[arg(long, default_value_t = 1)]
     default_vcpus: u8,
 
-    /// Required to bind a non-loopback TCP address.
+    /// Required to bind a non-loopback TCP address. Unix sockets ignore this.
+    /// Invalid when every `--listen` is a Unix socket.
     #[arg(long)]
     public: bool,
 
@@ -290,7 +295,9 @@ impl ServeStartArgs {
             default_ram_mib: self.default_ram_mib,
             default_vcpus: self.default_vcpus,
         };
-        let config = bux_serve::ServeConfig::bind(&self.listen, keys, self.public)?
+        let env_listen = std::env::var("BUX_LISTEN").ok();
+        let listen = bux_serve::listen_specs(&self.listen, env_listen.as_deref());
+        let config = bux_serve::ServeConfig::bind(listen, keys, self.public)?
             .data_dir(bux::default_data_dir())
             .limits(limits)
             .allow_unrestricted_net(self.allow_unrestricted_net);
@@ -763,6 +770,8 @@ mod log_level_tests {
         assert!(help.contains("--api-key"), "{help}");
         assert!(help.contains("--api-key-file"), "{help}");
         assert!(help.contains("--listen"), "{help}");
+        assert!(help.contains("unix://"), "{help}");
+        assert!(help.contains("BUX_LISTEN"), "{help}");
         assert!(help.contains("BUX_API_KEYS"), "{help}");
         assert!(help.contains("--max-sandboxes"), "{help}");
         assert!(help.contains("--max-ram-mib"), "{help}");
@@ -773,6 +782,30 @@ mod log_level_tests {
         assert!(help.contains("--pull-timeout-secs"), "{help}");
         assert!(help.contains("--public"), "{help}");
         assert!(help.contains("--allow-unrestricted-net"), "{help}");
+    }
+
+    #[test]
+    fn serve_start_listen_repeatable() {
+        let cli = parse(&[
+            "serve",
+            "start",
+            "--api-key",
+            "t1:s",
+            "--listen",
+            "127.0.0.1:8080",
+            "--listen",
+            "unix:///tmp/bux.sock",
+        ]);
+        match cli.command {
+            Command::Serve(Serve::Start(args)) => {
+                assert_eq!(
+                    args.listen,
+                    vec!["127.0.0.1:8080", "unix:///tmp/bux.sock"],
+                    "listen"
+                );
+            }
+            _ => panic!("expected serve start"),
+        }
     }
 
     #[test]

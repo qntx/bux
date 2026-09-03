@@ -21,6 +21,9 @@ tower-http.workspace = true
 tracing.workspace = true
 utoipa.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 rusqlite.workspace = true
 serde_json.workspace = true

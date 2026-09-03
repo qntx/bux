@@ -56,13 +56,17 @@ pub enum Error {
     #[error(transparent)]
     InvalidId(#[from] IdError),
 
-    /// `--listen` was not `IP:PORT`.
+    /// `--listen` was not `HOST:PORT` or `unix://PATH`.
     #[error("invalid listen address {0:?}")]
     InvalidListen(String),
 
     /// TCP bind was not loopback.
     #[error("refusing non-loopback listen {0}")]
     NonLoopback(SocketAddr),
+
+    /// `--public` was set but every listener is a Unix socket.
+    #[error("--public requires a TCP listen address")]
+    PublicRequiresTcp,
 
     /// Bind, file, or runtime I/O.
     #[error(transparent)]
