@@ -207,6 +207,8 @@ struct ServeStartArgs {
     listen: String,
 
     /// API key as `id:secret`. Repeatable. `id` is the tenant id (`[A-Za-z0-9._]`).
+    ///
+    /// Also `BUX_API_KEYS=id:secret,id2:secret2` (comma-separated, merged with this flag).
     #[arg(long = "api-key")]
     api_key: Vec<String>,
 
@@ -693,6 +695,7 @@ mod log_level_tests {
         assert!(help.contains("--api-key"), "{help}");
         assert!(help.contains("--api-key-file"), "{help}");
         assert!(help.contains("--listen"), "{help}");
+        assert!(help.contains("BUX_API_KEYS"), "{help}");
     }
 
     #[test]
