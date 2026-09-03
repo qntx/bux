@@ -11,8 +11,8 @@ categories = ["web-programming::http-server", "virtualization"]
 
 [dependencies]
 axum.workspace = true
+bux.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tower.workspace = true
@@ -20,6 +20,7 @@ tower-http.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]

@@ -215,6 +215,38 @@ struct ServeStartArgs {
     /// File of `id=secret` lines. Blank lines and `#` comments are skipped.
     #[arg(long, env = "BUX_API_KEY_FILE")]
     api_key_file: Option<PathBuf>,
+
+    /// Maximum sandboxes per tenant.
+    #[arg(long, default_value_t = 32)]
+    max_sandboxes: u32,
+
+    /// Maximum sandboxes on this worker (all tenants).
+    #[arg(long, default_value_t = 32)]
+    max_sandboxes_global: u32,
+
+    /// Maximum RAM per sandbox (MiB).
+    #[arg(long, default_value_t = 2048)]
+    max_ram_mib: u32,
+
+    /// Maximum vCPUs per sandbox.
+    #[arg(long, default_value_t = 4)]
+    max_vcpus: u8,
+
+    /// Maximum sum of Running+Stopping RAM plus a new create (MiB).
+    #[arg(long, default_value_t = 8192)]
+    max_running_ram_mib: u32,
+
+    /// Maximum recursive data-dir usage in bytes (`Runtime::data_dir_usage`).
+    #[arg(long, default_value_t = 32_u64 * 1024 * 1024 * 1024)]
+    max_disk_bytes: u64,
+
+    /// Default `ram_mib` when omitted on create.
+    #[arg(long, default_value_t = 512)]
+    default_ram_mib: u32,
+
+    /// Default `vcpus` when omitted on create.
+    #[arg(long, default_value_t = 1)]
+    default_vcpus: u8,
 }
 
 impl ServeStartArgs {
@@ -225,7 +257,19 @@ impl ServeStartArgs {
             self.api_key_file.as_deref(),
             env_keys.as_deref().filter(|s| !s.is_empty()),
         )?;
-        let config = bux_serve::ServeConfig::new(&self.listen, keys)?;
+        let limits = bux_serve::Limits {
+            max_sandboxes: self.max_sandboxes,
+            max_sandboxes_global: self.max_sandboxes_global,
+            max_ram_mib: self.max_ram_mib,
+            max_vcpus: self.max_vcpus,
+            max_running_ram_mib: self.max_running_ram_mib,
+            max_disk_bytes: self.max_disk_bytes,
+            default_ram_mib: self.default_ram_mib,
+            default_vcpus: self.default_vcpus,
+        };
+        let config = bux_serve::ServeConfig::new(&self.listen, keys)?
+            .data_dir(bux::default_data_dir())
+            .limits(limits);
         bux_serve::run(config)
     }
 }
@@ -696,6 +740,10 @@ mod log_level_tests {
         assert!(help.contains("--api-key-file"), "{help}");
         assert!(help.contains("--listen"), "{help}");
         assert!(help.contains("BUX_API_KEYS"), "{help}");
+        assert!(help.contains("--max-sandboxes"), "{help}");
+        assert!(help.contains("--max-ram-mib"), "{help}");
+        assert!(help.contains("--max-running-ram-mib"), "{help}");
+        assert!(help.contains("--max-disk-bytes"), "{help}");
     }
 
     #[test]

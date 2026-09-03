@@ -1,29 +1,34 @@
 //! HTTP worker for hosted bux sandboxes.
 //!
-//! `bux serve start` binds a TCP loopback address and serves `/v1/health`
-//! (public) plus Bearer-protected routes. At least one API key is required
-//! to start. Identifiers use the alphabet `[A-Za-z0-9._]`; `-` is only a
-//! separator in formatted sandbox and volume names.
+//! `bux serve start` opens one [`bux::Runtime`] (exclusive flock on `BUX_HOME`),
+//! binds a TCP loopback address, and serves `/v1/health` (public) plus
+//! Bearer-protected sandbox CRUD. At least one API key is required to start.
+//! Identifiers use the alphabet `[A-Za-z0-9._]`; `-` is only a separator in
+//! formatted sandbox and volume names.
 
 #![allow(
     clippy::missing_docs_in_private_items,
     reason = "internal fields are named for their role"
 )]
 
+mod auth;
 mod error;
 mod ids;
 mod router;
+mod sandboxes;
+mod state;
 
 use std::fmt;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub use error::{Error, Result};
 pub use ids::{
     IdError, sandbox_name, validate_agent_id, validate_tenant_id, workspace_volume_name,
 };
+pub use state::Limits;
 
-use router::AppState;
+use state::AppState;
 
 /// Bearer credential. `id` is the tenant id.
 #[derive(Clone)]
@@ -67,20 +72,24 @@ impl ApiKey {
         self.id.as_str()
     }
 
-    const fn secret_bytes(&self) -> &[u8] {
+    pub(crate) const fn secret_bytes(&self) -> &[u8] {
         self.secret.as_bytes()
     }
 }
 
-/// TCP bind address and loaded API keys.
+/// TCP bind address, API keys, data dir, and admission limits.
 #[derive(Debug)]
 pub struct ServeConfig {
     listen: SocketAddr,
     keys: Vec<ApiKey>,
+    data_dir: PathBuf,
+    limits: Limits,
 }
 
 impl ServeConfig {
     /// Loopback `IP:PORT` and at least one API key.
+    ///
+    /// Data dir defaults to [`bux::default_data_dir`]; limits to [`Limits::default`].
     ///
     /// # Errors
     ///
@@ -96,7 +105,26 @@ impl ServeConfig {
         if !listen.ip().is_loopback() {
             return Err(Error::NonLoopback(listen));
         }
-        Ok(Self { listen, keys })
+        Ok(Self {
+            listen,
+            keys,
+            data_dir: bux::default_data_dir(),
+            limits: Limits::default(),
+        })
+    }
+
+    /// Runtime data directory (`bux.lock` / `bux.db`). Second process → [`bux::Error::Busy`].
+    #[must_use]
+    pub fn data_dir(mut self, data_dir: impl Into<PathBuf>) -> Self {
+        self.data_dir = data_dir.into();
+        self
+    }
+
+    /// Admission caps applied before `Runtime::create`.
+    #[must_use]
+    pub const fn limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
     }
 }
 
@@ -181,11 +209,13 @@ fn warn_if_world_readable(path: &Path) {
 
 /// Bind `config.listen` and serve until SIGINT / SIGTERM.
 ///
+/// Opens [`bux::Runtime`] on `config.data_dir` (exclusive flock) before bind.
 /// Builds a multi-thread tokio runtime. Must not be called from an existing runtime.
 ///
 /// # Errors
 ///
-/// Returns [`Error::Io`] if the address cannot be bound or the server fails.
+/// Returns [`Error::Runtime`] with [`bux::Error::Busy`] if another process holds
+/// the data-dir lock. Returns [`Error::Io`] if the address cannot be bound.
 pub fn run(config: ServeConfig) -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -193,12 +223,22 @@ pub fn run(config: ServeConfig) -> Result<()> {
     rt.block_on(serve(config))
 }
 
+fn open_runtime(data_dir: &Path) -> Result<bux::Runtime> {
+    bux::Runtime::open(data_dir).map_err(Error::from)
+}
+
 async fn serve(config: ServeConfig) -> Result<()> {
     let shutdown = install_shutdown()?;
+    let runtime = open_runtime(&config.data_dir)?;
     let listen = config.listen;
     let listener = tokio::net::TcpListener::bind(listen).await?;
-    tracing::info!(%listen, api_keys = config.keys.len(), "listening");
-    let app = router::router(AppState::new(config.keys));
+    tracing::info!(
+        %listen,
+        api_keys = config.keys.len(),
+        data_dir = %config.data_dir.display(),
+        "listening"
+    );
+    let app = router::router(AppState::new(config.keys, runtime, config.limits));
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await?;
@@ -266,6 +306,51 @@ const OPENAPI_JSON: &str = concat!(
     "        \"responses\": {\n",
     "          \"200\": { \"description\": \"Worker config\" },\n",
     "          \"401\": { \"description\": \"Missing or invalid Bearer token\" }\n",
+    "        }\n",
+    "      }\n",
+    "    },\n",
+    "    \"/v1/sandboxes\": {\n",
+    "      \"get\": {\n",
+    "        \"operationId\": \"listSandboxes\",\n",
+    "        \"security\": [{ \"bearer\": [] }],\n",
+    "        \"responses\": {\n",
+    "          \"200\": { \"description\": \"Sandboxes for this tenant\" },\n",
+    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" }\n",
+    "        }\n",
+    "      },\n",
+    "      \"post\": {\n",
+    "        \"operationId\": \"createSandbox\",\n",
+    "        \"security\": [{ \"bearer\": [] }],\n",
+    "        \"responses\": {\n",
+    "          \"201\": { \"description\": \"Created\" },\n",
+    "          \"200\": { \"description\": \"Existing sandbox for this tenant and agent\" },\n",
+    "          \"400\": { \"description\": \"Invalid body or per-sandbox admission\" },\n",
+    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" },\n",
+    "          \"409\": { \"description\": \"Name occupied\" },\n",
+    "          \"412\": { \"description\": \"No hardware virtualization\" },\n",
+    "          \"429\": { \"description\": \"Count, running RAM, or disk cap\" }\n",
+    "        }\n",
+    "      }\n",
+    "    },\n",
+    "    \"/v1/sandboxes/{id}\": {\n",
+    "      \"get\": {\n",
+    "        \"operationId\": \"getSandbox\",\n",
+    "        \"security\": [{ \"bearer\": [] }],\n",
+    "        \"parameters\": [{ \"name\": \"id\", \"in\": \"path\", \"required\": true, \"schema\": { \"type\": \"string\" } }],\n",
+    "        \"responses\": {\n",
+    "          \"200\": { \"description\": \"Sandbox\" },\n",
+    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" },\n",
+    "          \"404\": { \"description\": \"Missing or other tenant\" }\n",
+    "        }\n",
+    "      },\n",
+    "      \"delete\": {\n",
+    "        \"operationId\": \"deleteSandbox\",\n",
+    "        \"security\": [{ \"bearer\": [] }],\n",
+    "        \"parameters\": [{ \"name\": \"id\", \"in\": \"path\", \"required\": true, \"schema\": { \"type\": \"string\" } }],\n",
+    "        \"responses\": {\n",
+    "          \"204\": { \"description\": \"Removed, workspace volume deleted\" },\n",
+    "          \"401\": { \"description\": \"Missing or invalid Bearer token\" },\n",
+    "          \"404\": { \"description\": \"Missing or other tenant\" }\n",
     "        }\n",
     "      }\n",
     "    }\n",
@@ -352,5 +437,23 @@ mod tests {
             v.get("paths").and_then(|p| p.get("/v1/config")).is_some(),
             "config path"
         );
+        assert!(
+            v.get("paths")
+                .and_then(|p| p.get("/v1/sandboxes"))
+                .is_some(),
+            "sandboxes path"
+        );
+    }
+
+    #[test]
+    fn second_runtime_open_on_same_dir_is_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let _held = bux::Runtime::open(dir.path()).unwrap();
+        let err = open_runtime(dir.path()).unwrap_err();
+        assert!(
+            matches!(err, Error::Runtime(bux::Error::Busy(_))),
+            "exclusive flock: {err}"
+        );
+        assert_eq!(err.exit_code(), 1, "engine Busy is exit 1");
     }
 }
