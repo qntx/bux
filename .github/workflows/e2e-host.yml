@@ -31,3 +31,7 @@ jobs:
         env:
           BUX_E2E_FULL: "0"
         run: ./scripts/e2e/smoke.sh
+      - name: Host-only serve smoke
+        env:
+          BUX_E2E_FULL: "0"
+        run: ./scripts/e2e/serve.sh

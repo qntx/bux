@@ -114,20 +114,23 @@ cargo test -p bux --lib
 cargo test -p bux-proto --lib
 # Host-only smoke (no hypervisor). This is the GitHub-hosted CI gate:
 ./scripts/e2e/smoke.sh
+./scripts/e2e/serve.sh
 # Full VM e2e — documented **manual** gate (HVF recorded; KVM needs /dev/kvm).
 # Never set BUX_E2E_FULL=1 on GitHub-hosted runners.
 BUX_E2E_FULL=1 ./scripts/e2e/smoke.sh
-# Load / chaos — same FULL pin as smoke (cli+shim, guest ELF). Manual HVF/KVM.
+# Load / chaos / serve — same FULL pin as smoke (cli+shim, guest ELF). Manual HVF/KVM.
 # GitHub-hosted CI does not run these; e2e-host.yml stays BUX_E2E_FULL=0.
 BUX_E2E_FULL=1 ./scripts/e2e/load.sh
 BUX_E2E_FULL=1 ./scripts/e2e/chaos.sh
+BUX_E2E_FULL=1 ./scripts/e2e/serve.sh
 ```
 
 `.github/workflows/e2e-host.yml` forces `BUX_E2E_FULL=0` on `ubuntu-latest` and
-`macos-latest`. Host-only is not production proof. `BUX_E2E_FULL=1` is not a CI
-job. GitHub-hosted runners must not set `BUX_E2E_FULL=1`. Self-hosted runners
-can take it later without redesign. `load.sh` and `chaos.sh` are the same
-manual gate, not GitHub-hosted jobs.
+`macos-latest` (`smoke.sh` and `serve.sh` help/openapi). Host-only is not
+production proof. `BUX_E2E_FULL=1` is not a CI job. GitHub-hosted runners must
+not set `BUX_E2E_FULL=1`. Self-hosted runners can take it later without
+redesign. `load.sh`, `chaos.sh`, and `serve.sh` FULL are the same manual gate,
+not GitHub-hosted jobs.
 
 The first green FULL is recorded below on **local HVF (Apple Silicon)**.
 Host CI (`BUX_E2E_FULL=0`) is not that proof. Linux KVM has **no** Layer 1
@@ -320,6 +323,39 @@ Item 17 is not in the Layer 1 or clone FULL rows.
   without `-f`
 - no leftover overlay `$BUX_HOME/disks/vms/{id}.qcow2` for that id
 - no `ulimit` disk-full test
+
+`scripts/e2e/serve.sh` host-only (`BUX_E2E_FULL=0`, GitHub-hosted `e2e-host.yml`):
+
+- `bux serve start --help`
+- `bux serve openapi` (JSON document including `/v1/health` and sandbox routes)
+- no hypervisor, no `bux-shim-bin` / guest ELF
+
+`BUX_E2E_FULL=1 ./scripts/e2e/serve.sh` is the same cli+shim+guest pin as
+`smoke.sh` (Darwin: `BUX_GUEST_PATH` from `scripts/e2e/fetch-guest.sh` of this
+HEAD; Linux: musl-gcc or fetch). Skip FULL when `host.virtualization` is not
+true. Capture binary `./target/debug/bux`. Pin `$BUX_HOME` without substring
+`bux-e2e` if the data dir must survive script exit. Do not invent an HVF/KVM
+sha256 row here — record a real run in a later docs PR.
+
+FULL loop (HTTP, two API keys `t1` / `t2`):
+
+1. `POST /v1/images/pull` alpine (or `$BUX_E2E_IMAGE`)
+2. `POST /v1/sandboxes` twice with the same `agent_id` / image → same exact
+   12-char id (201 then 200)
+3. `POST .../exec` `echo` (stdout `e2e-ok`, code 0)
+4. `PUT`/`GET .../files?path=/workspace/x`
+5. `allow_net: ["127.0.0.1"]` then guest wget example.com **fails**
+6. stop/start: `auto_stop_secs=1` + sweep then `POST .../start`; workspace
+   file persists (HTTP has no stop route; idle sweep is the stop)
+7. `DELETE` removes `{BUX_HOME}/volumes/ws-{tenant}-{agent}`
+8. second tenant GET `{id}` → 404 (same envelope as missing)
+9. SIGTERM the serve process, start again, exec still works (R3 reattach)
+10. after auto-stop, `POST /v1/sandboxes` resume then GET is still `running`
+    (`start_with` idle clock; do not wait a sweep tick with `auto_stop_secs=1`)
+11. `curl --unix-socket` `GET /v1/health` (worker also binds TCP loopback)
+12. snapshot create → restore `{agent_id}` → exec overlay marker
+13. clone `{agent_id}` → exec overlay marker
+14. other tenant 404 on snapshot GET/POST
 
 Schema mismatches require `bux system reset` (or wiping `$BUX_HOME`).
 
