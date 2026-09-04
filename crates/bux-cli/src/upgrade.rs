@@ -4,7 +4,7 @@
 //! Release on the paginated list. GitHub's "latest" pointer is a guest-* tag
 //! on this repo. Cargo-installed binaries are not overwritten.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -29,8 +29,21 @@ pub struct UpgradeArgs {
 impl UpgradeArgs {
     /// Compare this binary to the latest product tag and maybe reinstall.
     pub fn run(self) -> Result<()> {
+        self.run_with(
+            http_get,
+            || std::env::current_exe().context("failed to resolve current executable"),
+            run_official_installer,
+        )
+    }
+
+    fn run_with(
+        self,
+        get: impl FnMut(&str) -> Result<String>,
+        exe: impl FnOnce() -> Result<PathBuf>,
+        install: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
         let current = env!("CARGO_PKG_VERSION");
-        let latest = fetch_latest_version(http_get)?;
+        let latest = fetch_latest_version(get)?;
         let update_available = is_newer(&latest, current);
 
         if self.check {
@@ -47,7 +60,7 @@ impl UpgradeArgs {
             return Ok(());
         }
 
-        if is_cargo_install()? {
+        if is_cargo_install_path(&exe()?) {
             eprintln!("this binary looks cargo-installed; run: cargo install bux-cli --force");
             return Ok(());
         }
@@ -58,7 +71,7 @@ impl UpgradeArgs {
             println!("Reinstalling bux {current} via installer (--force) …");
         }
 
-        run_official_installer()?;
+        install()?;
         println!("installer finished; run `bux --version` to confirm (target {latest})");
         Ok(())
     }
@@ -128,20 +141,12 @@ fn json_bool(value: &serde_json::Value, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// `^v[0-9]`, excluding `guest-v` / `krun-v` / `e2fs-v` / `bwrap-v`. Strips one leading `v`.
 fn product_version(tag: &str) -> Option<&str> {
     let rest = tag.strip_prefix('v')?;
-    if !rest.as_bytes().first().is_some_and(u8::is_ascii_digit) {
-        return None;
-    }
-    if tag.starts_with("guest-v")
-        || tag.starts_with("krun-v")
-        || tag.starts_with("e2fs-v")
-        || tag.starts_with("bwrap-v")
-    {
-        return None;
-    }
-    Some(rest)
+    rest.as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_digit)
+        .then_some(rest)
 }
 
 fn is_newer(latest: &str, current: &str) -> bool {
@@ -210,11 +215,6 @@ fn command_exists(name: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-fn is_cargo_install() -> Result<bool> {
-    let exe = std::env::current_exe().context("failed to resolve current executable")?;
-    Ok(is_cargo_install_path(&exe))
-}
-
 fn is_cargo_install_path(exe: &Path) -> bool {
     exe.to_string_lossy().contains(".cargo/bin")
 }
@@ -223,9 +223,7 @@ fn run_official_installer() -> Result<()> {
     if !command_exists("curl") {
         anyhow::bail!("curl is required to run the official installer");
     }
-    if !command_exists("sh") {
-        anyhow::bail!("sh is required to run the official installer");
-    }
+    // dash (Debian `/bin/sh`) rejects `--version`.
     let status = Command::new("sh")
         .args(["-c", &installer_shell()])
         .status()
@@ -239,6 +237,8 @@ fn run_official_installer() -> Result<()> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, reason = "tests")]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
 
     /// Live 2026-09-04 shape (21 Releases) plus `guest-v0.1.0` so that tag cannot win.
@@ -456,6 +456,10 @@ mod tests {
             !production.contains("INSTALL_PS_URL"),
             "no Windows PowerShell installer constant"
         );
+        assert!(
+            !production.contains("command_exists(\"sh\")"),
+            "dash rejects --version; do not probe sh"
+        );
     }
 
     #[test]
@@ -477,5 +481,83 @@ mod tests {
             "/Users/x/Library/Application Support/bux-pkg/0.8.0-aarch64-apple-darwin/bux"
         )));
         assert!(!is_cargo_install_path(Path::new("/usr/local/bin/bux")));
+    }
+
+    fn run_injected(args: UpgradeArgs, exe: Option<&str>) -> (bool, Result<()>) {
+        let installed = Cell::new(false);
+        let result = args.run_with(
+            |url| {
+                assert!(
+                    !url.contains("/releases/latest"),
+                    "must not call /releases/latest: {url}"
+                );
+                Ok(FIXTURE.to_owned())
+            },
+            || {
+                Ok(PathBuf::from(
+                    exe.expect("--check / noop must not inspect current_exe"),
+                ))
+            },
+            || {
+                installed.set(true);
+                Ok(())
+            },
+        );
+        (installed.get(), result)
+    }
+
+    #[test]
+    fn check_does_not_run_installer() {
+        let (installed, result) = run_injected(
+            UpgradeArgs {
+                check: true,
+                force: true,
+            },
+            None,
+        );
+        result.unwrap();
+        assert!(!installed, "--check must not run the installer");
+    }
+
+    #[test]
+    fn cargo_bin_does_not_run_installer() {
+        let (installed, result) = run_injected(
+            UpgradeArgs {
+                check: false,
+                force: true,
+            },
+            Some("/home/x/.cargo/bin/bux"),
+        );
+        result.unwrap();
+        assert!(!installed, ".cargo/bin must not run the installer");
+    }
+
+    #[test]
+    fn script_install_runs_installer() {
+        let (installed, result) = run_injected(
+            UpgradeArgs {
+                check: false,
+                force: true,
+            },
+            Some("/home/x/.local/bin/bux"),
+        );
+        result.unwrap();
+        assert!(installed, "non-cargo path must run the installer");
+    }
+
+    #[test]
+    fn noop_when_current_is_newest_does_not_run_installer() {
+        let (installed, result) = run_injected(
+            UpgradeArgs {
+                check: false,
+                force: false,
+            },
+            None,
+        );
+        result.unwrap();
+        assert!(
+            !installed,
+            "already-latest without --force must not run the installer"
+        );
     }
 }
