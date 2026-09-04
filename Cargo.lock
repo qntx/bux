@@ -280,7 +280,7 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "bux"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bux-e2fs",
  "bux-jail",
@@ -308,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "bux-bwrap"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "flate2",
  "tar",
@@ -318,7 +318,7 @@ dependencies = [
 
 [[package]]
 name = "bux-cli"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "bux",
@@ -336,7 +336,7 @@ dependencies = [
 
 [[package]]
 name = "bux-e2fs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bindgen",
  "flate2",
@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "bux-guest"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bux-proto",
  "futures",
@@ -364,7 +364,7 @@ dependencies = [
 
 [[package]]
 name = "bux-gvproxy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bux-proto",
  "rcgen",
@@ -379,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "bux-jail"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bux-bwrap",
  "bux-landlock",
@@ -389,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "bux-krun"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bindgen",
  "flate2",
@@ -400,7 +400,7 @@ dependencies = [
 
 [[package]]
 name = "bux-landlock"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "landlock",
  "libc",
@@ -409,7 +409,7 @@ dependencies = [
 
 [[package]]
 name = "bux-oci"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "flate2",
  "oci-client",
@@ -425,7 +425,7 @@ dependencies = [
 
 [[package]]
 name = "bux-proto"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "postcard",
  "serde",
@@ -435,7 +435,7 @@ dependencies = [
 
 [[package]]
 name = "bux-qcow2"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tempfile",
  "thiserror",
@@ -443,7 +443,7 @@ dependencies = [
 
 [[package]]
 name = "bux-seccomp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "thiserror",
@@ -451,7 +451,7 @@ dependencies = [
 
 [[package]]
 name = "bux-serve"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "axum",
  "bux",
@@ -471,7 +471,7 @@ dependencies = [
 
 [[package]]
 name = "bux-shim"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bux-krun",
  "bux-seccomp",
@@ -484,7 +484,7 @@ dependencies = [
 
 [[package]]
 name = "bux-shim-bin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bux-gvproxy",
  "bux-shim",

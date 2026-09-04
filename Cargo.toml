@@ -4,26 +4,26 @@ default-members = ["crates/bux"]
 resolver = "3"
 
 [workspace.package]
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/qntx/bux"
 
 [workspace.dependencies]
-bux = { version = "0.8", path = "crates/bux" }
-bux-oci = { version = "0.8", path = "crates/bux-oci" }
-bux-proto = { version = "0.8", path = "crates/bux-proto" }
-bux-serve = { version = "0.8", path = "crates/bux-serve" }
+bux = { version = "0.9", path = "crates/bux" }
+bux-oci = { version = "0.9", path = "crates/bux-oci" }
+bux-proto = { version = "0.9", path = "crates/bux-proto" }
+bux-serve = { version = "0.9", path = "crates/bux-serve" }
 
-bux-bwrap = { version = "0.2", path = "crates/bux-bwrap" }
-bux-jail = { version = "0.1", path = "crates/bux-jail" }
-bux-krun = { version = "0.2", path = "crates/bux-krun" }
-bux-shim = { version = "0.1", path = "crates/bux-shim", default-features = false }
-bux-e2fs = { version = "0.2", path = "crates/bux-e2fs" }
-bux-gvproxy = { version = "0.1", path = "crates/bux-gvproxy" }
-bux-landlock = { version = "0.1", path = "crates/bux-landlock" }
-bux-qcow2 = { version = "0.1", path = "crates/bux-qcow2" }
-bux-seccomp = { version = "0.1", path = "crates/bux-seccomp" }
+bux-bwrap = { version = "0.3", path = "crates/bux-bwrap" }
+bux-jail = { version = "0.2", path = "crates/bux-jail" }
+bux-krun = { version = "0.3", path = "crates/bux-krun" }
+bux-shim = { version = "0.2", path = "crates/bux-shim", default-features = false }
+bux-e2fs = { version = "0.3", path = "crates/bux-e2fs" }
+bux-gvproxy = { version = "0.2", path = "crates/bux-gvproxy" }
+bux-landlock = { version = "0.2", path = "crates/bux-landlock" }
+bux-qcow2 = { version = "0.2", path = "crates/bux-qcow2" }
+bux-seccomp = { version = "0.2", path = "crates/bux-seccomp" }
 
 anyhow = "1.0.104"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }

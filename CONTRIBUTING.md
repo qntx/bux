@@ -226,7 +226,7 @@ FULL needs python3 for the guest ELF validator and Go for `bux-shim-bin`.
 
 CD `cd.yml` musl guest:
 
-- Release tag: `guest-v{crates/bux-guest version}` (never `v0.8.0`, never `guest-<sha>`)
+- Release tag: `guest-v{crates/bux-guest version}` (never a product `v*`, never `guest-<sha>`)
 - Release asset **file**: `bux-guest-<triple>` and `bux-guest-<triple>.sha256`
 - GHA artifact **name**: `guest-<triple>` (never `bux-guest-*`)
 - **file** inside the artifact: `bux-guest-<triple>`
@@ -234,14 +234,14 @@ CD `cd.yml` musl guest:
 - in-tree Linux musl-gcc sibling: `target/debug/bux-guest-<triple>`
 
 After this merge is on `main`, tag the guest of that commit (`guest-v` plus
-`crates/bux-guest/Cargo.toml` `version`; `0.1.0` today):
+`crates/bux-guest/Cargo.toml` `version`; `0.2.0` today):
 
 ```bash
 git fetch origin
 git checkout main
 git pull --ff-only origin main
-git tag guest-v0.1.0
-git push origin guest-v0.1.0
+git tag guest-v0.2.0
+git push origin guest-v0.2.0
 ```
 
 Do not vendor the ELF in git. Do not invent a FULL sha256 row.
