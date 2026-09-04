@@ -292,7 +292,7 @@ fn build_command(
 
     #[cfg(target_os = "linux")]
     {
-        return Err(Error::BwrapUnavailable);
+        Err(Error::BwrapUnavailable)
     }
 
     #[cfg(not(target_os = "linux"))]
