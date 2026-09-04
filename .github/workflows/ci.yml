@@ -27,6 +27,23 @@ jobs:
         with:
           command: check
 
+  engine-no-krun:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - name: crates/bux does not depend on bux-krun
+        run: |
+          set -euo pipefail
+          cargo tree -p bux --prefix none -f '{p}' | tee /tmp/bux-tree.txt
+          if grep -E '^bux-krun ' /tmp/bux-tree.txt; then
+            echo "crates/bux must not depend on bux-krun" >&2
+            cargo tree -p bux -i bux-krun
+            exit 1
+          fi
+
   test:
     strategy:
       fail-fast: false

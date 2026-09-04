@@ -16,6 +16,7 @@ pub enum Error {
     InvalidConfig(String),
 
     /// libkrun FFI failure.
+    #[cfg(feature = "krun")]
     #[error(transparent)]
     Krun(#[from] bux_krun::Error),
 

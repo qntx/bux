@@ -75,9 +75,8 @@ LICENSE-MIT
 LICENSE-APACHE
 ```
 
-Linux binaries stamp `DT_RPATH` `$ORIGIN` (this repo’s `.cargo/config.toml`).
-Downstream Linux embedders must set the same rustflag. Darwin uses
-`@loader_path`; embedders do not need rpath rustflags.
+Linux `bux-shim` stamps `DT_RPATH` `$ORIGIN` (this repo’s `.cargo/config.toml`).
+Darwin uses `@loader_path`. The engine (`crates/bux`) does not link libkrun.
 
 Operator path, 412, Busy flock, data-dir sizing, rollback:
 [docs/serve.md](docs/serve.md).

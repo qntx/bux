@@ -18,7 +18,7 @@ bux-serve = { version = "0.8", path = "crates/bux-serve" }
 bux-bwrap = { version = "0.2", path = "crates/bux-bwrap" }
 bux-jail = { version = "0.1", path = "crates/bux-jail" }
 bux-krun = { version = "0.2", path = "crates/bux-krun" }
-bux-shim = { version = "0.1", path = "crates/bux-shim" }
+bux-shim = { version = "0.1", path = "crates/bux-shim", default-features = false }
 bux-e2fs = { version = "0.2", path = "crates/bux-e2fs" }
 bux-gvproxy = { version = "0.1", path = "crates/bux-gvproxy" }
 bux-landlock = { version = "0.1", path = "crates/bux-landlock" }

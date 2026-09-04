@@ -48,17 +48,11 @@ Darwin: `bux-krun` copies `libkrun.dylib` and `libkrunfw.dylib` into
 `@loader_path/libkrunfw.dylib`, adds `LC_RPATH @loader_path` on
 `libkrun.dylib` so `dlopen("libkrunfw.5.dylib")` searches the dylib's
 directory, ad-hoc codesigns those copies, and link-searches only `link-lib`.
-Linked binaries record `@loader_path/libkrun.dylib`. Downstream Darwin
-embedders do not need rpath rustflags.
+The `bux-shim` binary records `@loader_path/libkrun.dylib`. `crates/bux`
+does not link libkrun.
 
-Linux: `DT_NEEDED` stays the soname. This workspace stamps
-`-Wl,-rpath,$ORIGIN` via `.cargo/config.toml`. Downstream embedders must set:
-
-```toml
-# embedder .cargo/config.toml (Linux)
-[target.'cfg(target_os = "linux")']
-rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN"]
-```
+Linux: `DT_NEEDED` on `bux-shim` stays the soname. This workspace stamps
+`-Wl,-rpath,$ORIGIN` via `.cargo/config.toml` for in-tree bins.
 
 `crates/bux-shim-bin/build.rs` emits `-Wl,-rpath,@executable_path` (Darwin)
 or `-Wl,-rpath,$ORIGIN` (Linux) so this repo's shim does not depend solely
