@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::util::push_unique_path;
+use crate::util::{current_exe_for_sidecars, push_unique_path};
 use crate::{Error, Result};
 
 const GUEST_EXEC_PATH: &str = "/bux/bin/bux-guest";
@@ -22,6 +22,7 @@ const EM_X86_64: u16 = 0x3E;
 const EM_AARCH64: u16 = 0xB7;
 const PT_INTERP: u32 = 3;
 const IMAGE_INJECTION_MARGIN_BYTES: u64 = 8 * 1024 * 1024;
+const ELF_PROTOCOL_STAMP: &[u8] = b"bux-guest-protocol-v10";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ManagedGuestBinary {
@@ -162,33 +163,25 @@ fn candidate_paths() -> Vec<PathBuf> {
         push_unique_path(&mut paths, PathBuf::from(explicit));
     }
 
-    let names = guest_binary_names();
+    let name = guest_binary_name();
 
-    if let Ok(current_exe) = std::env::current_exe()
-        && let Some(dir) = current_exe.parent()
+    if let Ok(exe) = current_exe_for_sidecars()
+        && let Some(dir) = exe.parent()
     {
-        for name in &names {
-            push_unique_path(&mut paths, dir.join(name));
-        }
+        push_unique_path(&mut paths, dir.join(&name));
     }
 
     if let Some(path_var) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path_var) {
-            for name in &names {
-                push_unique_path(&mut paths, dir.join(name));
-            }
+            push_unique_path(&mut paths, dir.join(&name));
         }
     }
 
     paths
 }
 
-fn guest_binary_names() -> [String; 3] {
-    [
-        format!("bux-guest-{}", linux_guest_target()),
-        "bux-guest-linux".to_owned(),
-        "bux-guest".to_owned(),
-    ]
+fn guest_binary_name() -> String {
+    format!("bux-guest-{}", linux_guest_target())
 }
 
 fn linux_guest_target() -> &'static str {
@@ -249,6 +242,16 @@ fn validate_guest_binary(path: &Path, data: &[u8]) -> Result<()> {
             "guest binary {} is dynamically linked; rebuild bux-guest as a static {} binary",
             path.display(),
             linux_guest_target()
+        )));
+    }
+
+    if !data
+        .windows(ELF_PROTOCOL_STAMP.len())
+        .any(|w| w == ELF_PROTOCOL_STAMP)
+    {
+        return Err(Error::InvalidConfig(format!(
+            "guest binary {} is missing bux-guest-protocol-v10",
+            path.display()
         )));
     }
 
@@ -351,6 +354,7 @@ pub(crate) fn test_static_guest_elf(tag: &[u8; 16]) -> Vec<u8> {
     data[6] = 1;
     data[18..20].copy_from_slice(&machine.to_le_bytes());
     data[64..80].copy_from_slice(tag);
+    data.extend_from_slice(ELF_PROTOCOL_STAMP);
     data
 }
 
@@ -436,7 +440,9 @@ pub(crate) mod sidecar_env {
 
     impl Planted {
         pub(crate) fn sibling(name: &str, data: &[u8]) -> Self {
-            let path = std::env::current_exe().unwrap().with_file_name(name);
+            let path = crate::util::current_exe_for_sidecars()
+                .unwrap()
+                .with_file_name(name);
             let backup = fs::read(&path).ok();
             fs::write(&path, data).unwrap();
             Self { path, backup }
@@ -481,6 +487,7 @@ mod tests {
             data[56..58].copy_from_slice(&1_u16.to_le_bytes());
             data[64..68].copy_from_slice(&PT_INTERP.to_le_bytes());
         }
+        data.extend_from_slice(ELF_PROTOCOL_STAMP);
         data
     }
 
@@ -529,6 +536,25 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("dynamically linked"));
+    }
+
+    #[test]
+    fn rejects_static_elf_missing_protocol_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bux-guest");
+        let mut data = make_elf(expected_machine().unwrap(), false);
+        data.truncate(data.len() - ELF_PROTOCOL_STAMP.len());
+        assert!(
+            !data
+                .windows(ELF_PROTOCOL_STAMP.len())
+                .any(|w| w == ELF_PROTOCOL_STAMP),
+            "precondition: fixture has no protocol stamp"
+        );
+        fs::write(&path, data).unwrap();
+        let err = ManagedGuestBinary::from_path(&path)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bux-guest-protocol-v10"), "{err}");
     }
 
     #[test]
@@ -674,8 +700,81 @@ mod tests {
         let mut env = sidecar_env::lock();
         env.unset("BUX_GUEST_PATH");
         let planted_bytes = test_static_guest_elf(b"SIBLING-GUEST-OK");
-        let planted = sidecar_env::Planted::sibling("bux-guest", &planted_bytes);
+        let planted = sidecar_env::Planted::sibling(&guest_binary_name(), &planted_bytes);
         let guest = ManagedGuestBinary::resolve(None).unwrap();
         assert_eq!(guest.host_path, planted.path());
+        assert_eq!(
+            planted.path(),
+            current_exe_for_sidecars()
+                .unwrap()
+                .with_file_name(guest_binary_name()),
+            "planted sibling must sit next to the canonical executable"
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "env lock must outlive resolve"
+    )]
+    fn resolve_none_ignores_bux_guest_and_bux_guest_linux_aliases() {
+        let mut env = sidecar_env::lock();
+        env.unset("BUX_GUEST_PATH");
+        let empty = tempfile::tempdir().unwrap();
+        env.set("PATH", empty.path());
+        let bytes = test_static_guest_elf(b"ALIAS-GUEST-ELF!");
+        let alias = sidecar_env::Planted::sibling("bux-guest", &bytes);
+        let alias_linux = sidecar_env::Planted::sibling("bux-guest-linux", &bytes);
+        match ManagedGuestBinary::resolve(None) {
+            Ok(guest) => {
+                assert_ne!(
+                    guest.host_path,
+                    alias.path(),
+                    "must not resolve bux-guest alias"
+                );
+                assert_ne!(
+                    guest.host_path,
+                    alias_linux.path(),
+                    "must not resolve bux-guest-linux alias"
+                );
+                assert_eq!(
+                    guest.host_path.file_name().map(std::ffi::OsStr::to_owned),
+                    Some(std::ffi::OsString::from(guest_binary_name())),
+                    "production guest name is bux-guest-<musl-triple>"
+                );
+            }
+            Err(err) => {
+                assert!(
+                    matches!(err, Error::NotFound(_) | Error::InvalidConfig(_)),
+                    "{err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "env lock must outlive candidate_paths"
+    )]
+    fn candidate_paths_only_musl_triple_name() {
+        let mut env = sidecar_env::lock();
+        env.unset("BUX_GUEST_PATH");
+        let empty = tempfile::tempdir().unwrap();
+        env.set("PATH", empty.path());
+        let expected = current_exe_for_sidecars()
+            .unwrap()
+            .with_file_name(guest_binary_name());
+        let paths = candidate_paths();
+        assert!(
+            paths.contains(&expected),
+            "expected canonical sibling {expected:?} in {paths:?}"
+        );
+        for path in &paths {
+            let name = path.file_name().unwrap().to_string_lossy();
+            assert_ne!(&*name, "bux-guest", "{path:?}");
+            assert_ne!(&*name, "bux-guest-linux", "{path:?}");
+            assert_eq!(&*name, guest_binary_name(), "{path:?}");
+        }
     }
 }

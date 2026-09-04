@@ -449,7 +449,7 @@ pub(crate) fn find_shim(explicit: Option<&Path>) -> Result<PathBuf> {
         }
     }
 
-    if let Ok(exe) = std::env::current_exe() {
+    if let Ok(exe) = crate::util::current_exe_for_sidecars() {
         let sibling = exe.with_file_name(NAME);
         if sibling.is_file() {
             return Ok(sibling);
@@ -575,6 +575,13 @@ mod tests {
         let planted = crate::guest::sidecar_env::Planted::sibling("bux-shim", b"planted-shim");
         let found = find_shim(None).unwrap();
         assert_eq!(found, planted.path());
+        assert_eq!(
+            found,
+            crate::util::current_exe_for_sidecars()
+                .unwrap()
+                .with_file_name("bux-shim"),
+            "sibling shim must sit next to the canonical executable"
+        );
     }
 
     #[test]
