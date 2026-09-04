@@ -430,6 +430,15 @@ fn map_jail_error(e: bux_jail::Error, shim: &Path) -> crate::Error {
 ///
 /// Returns [`crate::Error::NotFound`] if the shim cannot be located.
 pub(crate) fn find_shim(explicit: Option<&Path>) -> Result<PathBuf> {
+    find_shim_from(explicit, std::env::current_exe().ok().as_deref())
+}
+
+/// Same search as [`find_shim`], with `current_exe` supplied for sibling joins.
+///
+/// # Errors
+///
+/// Returns [`crate::Error::NotFound`] if the shim cannot be located.
+fn find_shim_from(explicit: Option<&Path>, current_exe: Option<&Path>) -> Result<PathBuf> {
     const NAME: &str = "bux-shim";
 
     if let Some(path) = explicit {
@@ -449,11 +458,11 @@ pub(crate) fn find_shim(explicit: Option<&Path>) -> Result<PathBuf> {
         }
     }
 
-    if let Ok(exe) = std::env::current_exe() {
-        let sibling = exe.with_file_name(NAME);
-        if sibling.is_file() {
-            return Ok(sibling);
-        }
+    if let Some(exe) = current_exe
+        && let Some(sibling) = crate::util::sidecar_path(exe, NAME)
+        && sibling.is_file()
+    {
+        return Ok(sibling);
     }
 
     if let Ok(path_var) = std::env::var("PATH") {
@@ -575,6 +584,63 @@ mod tests {
         let planted = crate::guest::sidecar_env::Planted::sibling("bux-shim", b"planted-shim");
         let found = find_shim(None).unwrap();
         assert_eq!(found, planted.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "env lock must outlive find_shim_from"
+    )]
+    fn find_shim_from_symlink_exe_uses_real_dir() {
+        let mut env = crate::guest::sidecar_env::lock();
+        env.unset("BUX_SHIM_PATH");
+        let empty = tempfile::tempdir().unwrap();
+        env.set("PATH", empty.path());
+
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real");
+        let link_dir = dir.path().join("link");
+        fs::create_dir(&real_dir).unwrap();
+        fs::create_dir(&link_dir).unwrap();
+        let real = real_dir.join("bux");
+        fs::write(&real, b"exe").unwrap();
+        let link = link_dir.join("bux");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let planted = real.canonicalize().unwrap().with_file_name("bux-shim");
+        fs::write(&planted, b"planted-shim").unwrap();
+        fs::write(link_dir.join("bux-shim"), b"leftover-shim").unwrap();
+
+        let found = find_shim_from(None, Some(&link)).unwrap();
+        assert_eq!(
+            found, planted,
+            "sibling shim must sit next to the real executable"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "env lock must outlive find_shim_from"
+    )]
+    fn find_shim_from_dangling_symlink_skips_sibling() {
+        let mut env = crate::guest::sidecar_env::lock();
+        env.unset("BUX_SHIM_PATH");
+        let empty = tempfile::tempdir().unwrap();
+        env.set("PATH", empty.path());
+
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("bux");
+        std::os::unix::fs::symlink(dir.path().join("missing"), &link).unwrap();
+        fs::write(dir.path().join("bux-shim"), b"leftover-shim").unwrap();
+
+        let err = find_shim_from(None, Some(&link)).unwrap_err();
+        assert!(
+            matches!(err, crate::Error::NotFound(_)),
+            "unresolved symlink exe must not pick leftover sibling: {err}"
+        );
     }
 
     #[test]
