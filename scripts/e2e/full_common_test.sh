@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Host-only tests for full_common.sh guest ELF stamp. No hypervisor.
+# Host-only tests for full_common.sh guest ELF stamp and fake-ip helper.
+# No hypervisor. Fake-ip cases use injected addresses (no live DNS).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -86,6 +87,22 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     pin_full_guest
   ) && rc=0 || rc=$?
   [[ "${rc}" -ne 0 ]] || fail "Darwin leftover ELF must not pin without BUX_GUEST_PATH"
+fi
+
+if refuse_fake_ip_example_com "198.18.0.160"; then
+  fail "198.18.0.160 must fail refuse_fake_ip_example_com"
+fi
+if refuse_fake_ip_example_com "::ffff:198.18.0.160"; then
+  fail "::ffff:198.18.0.160 must fail refuse_fake_ip_example_com"
+fi
+if refuse_fake_ip_example_com "::ffff:0:c612:a0"; then
+  fail "::ffff:0:c612:a0 must fail refuse_fake_ip_example_com"
+fi
+if ! refuse_fake_ip_example_com "93.184.216.34"; then
+  fail "93.184.216.34 must pass refuse_fake_ip_example_com"
+fi
+if ! refuse_fake_ip_example_com "::ffff:93.184.216.34"; then
+  fail "::ffff:93.184.216.34 must pass refuse_fake_ip_example_com"
 fi
 
 echo OK

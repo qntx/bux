@@ -209,6 +209,14 @@ ELF must fail before `bux create`. Before fetch, unset `BUX_GUEST_PATH` **and**
 delete leftover `target/debug/bux-guest-*`. Darwin does not compile the guest
 and does not use zig cc.
 
+Before any FULL `bux create`, `pin_full_binaries` calls
+`refuse_fake_ip_example_com`: Python `getaddrinfo("example.com", 443,
+type=SOCK_STREAM)`, log every record, fail if any address's IPv4 form is in
+`198.18.0.0/15` (IPv4; else `ipv4_mapped`; else last 4 bytes of the AAAA
+packed form — macOS translated `::ffff:0:c612:a0` is not
+`::ffff:198.18.0.0/111`). Fake-ip / MacPacket is hygiene, not a recorded 502.
+Disable fake-ip for the HVF v10 record. Do not invent FULL sha256.
+
 Linux FULL when `BUX_GUEST_PATH` is unset: musl-gcc build of this tree (when
 `musl-gcc` and that rustc target are already present) **or**
 `scripts/e2e/fetch-guest.sh`. Do not silently accept a leftover v9 ELF. After
@@ -245,7 +253,9 @@ Release download.
 `scripts/e2e/fetch-guest.sh` prefers the `guest-<sha>` Release asset, else
 polls the `guest-<triple>` workflow artifact for this `HEAD`, and copies the
 file next to `target/debug/bux`. Dest is `chmod 0755` after copy; the script
-exits 1 if not `-x`. Do not `gh run download -n bux-guest-*`.
+exits 1 if not `-x`. The same `bux-guest-protocol-v10` bytes check as
+`full_common.sh` applies: a v9 ELF is rejected even if `guest-<sha>` exists.
+Do not `gh run download -n bux-guest-*`.
 
 Pin `$BUX_E2E_IMAGE` if alpine wget/httpd is missing. There is no in-repo
 custom e2e image.
