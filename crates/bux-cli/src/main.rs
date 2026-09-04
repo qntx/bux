@@ -561,30 +561,30 @@ fn rmi(refs: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Environment variables that affect host capture / paths (documented for operators).
+/// Operator environment documented by `bux system info`.
 const CAPTURE_ENV: &[(&str, &str)] = &[
     (
         "BUX_HOME",
         "Runtime data directory (default: platform data dir / bux)",
     ),
-    ("BUX_SHIM_PATH", "Override path to the bux-shim binary"),
     (
-        "BUX_GUEST_PATH",
-        "Absolute path to a static Linux bux-guest ELF (Runtime inject)",
+        "BUX_LISTEN",
+        "Serve listen specs, comma-separated (HOST:PORT or unix://PATH)",
     ),
     (
-        "BUX_GUEST_DIR",
-        "Directory containing prebuilt bux-guest Linux binaries (CLI build)",
+        "BUX_API_KEYS",
+        "Serve API keys as id:secret pairs, comma-separated",
     ),
     (
         "PATH",
-        "Used to locate bux-shim, bwrap, sandbox-exec, go (gvproxy build)",
+        "Used to locate bwrap (Linux jailer), sandbox-exec (macOS), go (gvproxy build)",
     ),
 ];
 
 fn system_info(format: OutputFormat) -> Result<()> {
     let host = bux::HostInfo::probe();
     let data_dir = bux::default_data_dir();
+    let payload_dir = bux::default_payload_dir();
 
     if matches!(format, OutputFormat::Json) {
         let env: serde_json::Map<String, serde_json::Value> = CAPTURE_ENV
@@ -601,6 +601,7 @@ fn system_info(format: OutputFormat) -> Result<()> {
             .collect();
         let obj = serde_json::json!({
             "data_dir": data_dir,
+            "payload_dir": payload_dir,
             "host": host,
             "env": env,
             "protocol_version": bux_proto::PROTOCOL_VERSION,
@@ -610,6 +611,7 @@ fn system_info(format: OutputFormat) -> Result<()> {
     }
 
     println!("data dir:     {}", data_dir.display());
+    println!("payload dir:  {}", payload_dir.display());
     if let Some(n) = host.max_vcpus {
         println!("max vCPUs:    {n}");
     }
@@ -751,6 +753,20 @@ mod log_level_tests {
     #[test]
     fn rejects_invalid_level() {
         assert!(Cli::try_parse_from(["bux", "--log-level", "verbose", "images"]).is_err());
+    }
+
+    #[test]
+    fn capture_env_is_operator_config_only() {
+        let keys: Vec<&str> = CAPTURE_ENV.iter().map(|(k, _)| *k).collect();
+        assert_eq!(
+            keys,
+            ["BUX_HOME", "BUX_LISTEN", "BUX_API_KEYS", "PATH"],
+            "sidecar env is not operator config"
+        );
+        for (k, _) in CAPTURE_ENV {
+            assert!(!k.contains("SHIM"), "{k}");
+            assert!(!k.contains("GUEST"), "{k}");
+        }
     }
 
     #[test]

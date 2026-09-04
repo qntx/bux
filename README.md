@@ -123,9 +123,9 @@ verbs on that `BUX_HOME` work.
 | Variable | Purpose |
 |----------|---------|
 | `BUX_HOME` | Runtime data directory (lock, SQLite, disks, volumes, socks) |
-| `BUX_SHIM_PATH` | Absolute path to `bux-shim` |
-| `BUX_GUEST_PATH` | Absolute path to a static Linux `bux-guest` ELF |
-| `BUX_GUEST_DIR` | Build-time directory of a prebuilt Linux guest ELF |
+| `BUX_LISTEN` | Serve listen specs, comma-separated (`HOST:PORT` or `unix://PATH`) |
+| `BUX_API_KEYS` | Serve API keys as `id:secret` pairs, comma-separated |
+| `PATH` | Locates `bwrap` (Linux jailer fallback), `sandbox-exec` (macOS) |
 
 `bux system info --format json` is flock-free.
 
@@ -135,5 +135,5 @@ verbs on that `BUX_HOME` work.
 |-----|----------|
 | [docs/architecture.md](docs/architecture.md) | Crate map, worker process, isolation layers, native/guest/product tags |
 | [docs/security-model.md](docs/security-model.md) | Current engine isolation + hosted threat model |
-| [docs/serve.md](docs/serve.md) | Tarball, `/dev/kvm`, rpath, flags, data dir, rollback |
+| [docs/serve.md](docs/serve.md) | Payload fetch, `/dev/kvm`, rpath, flags, data dir, rollback |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Build, capture env, FULL procedure, recorded runs |

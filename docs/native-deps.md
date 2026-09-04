@@ -268,11 +268,13 @@ Same for e2fs (`e2fs-v1.47.4`). bwrap verify is Linux-only.
 
 ## Guest ELF / FULL
 
-Darwin guest fetch: [`scripts/e2e/fetch-guest.sh`](../scripts/e2e/fetch-guest.sh)
-(procedure in [`CONTRIBUTING.md`](../CONTRIBUTING.md)). Release tag
-`guest-<40-char-sha>` attaches `bux-guest-<triple>`. Darwin does not compile
-musl. FULL needs `BUX_GUEST_PATH` from that script or a Linux
-`aarch64-unknown-linux-musl` / `x86_64-unknown-linux-musl` build.
+Guest tag is `guest-v{crates/bux-guest version}` (asset `bux-guest-<triple>`
+plus `.sha256`). Darwin does not compile musl. Darwin FULL builds `bux-cli` +
+`bux-shim-bin`; first create fetches `guest-v*` when a sibling shim exists.
+Linux FULL musl-gccs in-tree when that toolchain is present, else the same
+engine fetch. Leftover `target/debug/bux-guest-<triple>` pins via sibling
+lookup; stamp `bux-guest-protocol-v10` rejects v9. Procedure:
+[`CONTRIBUTING.md`](../CONTRIBUTING.md).
 
 This Apple Silicon host (2026-08-26): `kern.hv_support=1`, **no** musl
 `bux-guest` ELF. Host CI (`.github/workflows/e2e-host.yml`) forces

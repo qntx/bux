@@ -1,32 +1,36 @@
 # Serve
 
 Operator page for `bux serve`: one process, one `Runtime`, many per-agent
-VMs. Extract the GitHub tarball. Do not expect a fourth artifact.
+VMs.
 
-Workspace is **0.8.0**. Tag `v1.0.0` only when the hosted worker is in that
-tarball and FULL proof is recorded. Rollback is the **previous extract**.
+Workspace is **0.8.0**. Tag `v1.0.0` only when the hosted worker ships with
+recorded FULL proof. Rollback is the **previous payload / previous binary**.
 There is no `v0.8.0` GitHub Release. Schema `user_version` stays **5**;
 rollback does not wipe `BUX_HOME` unless a later release bumps schema.
 
-## Extract tarball
+## Payload
 
-```bash
-tar xf bux-<ver>-x86_64-unknown-linux-gnu.tar.gz
-./bux system info --format json
-./bux serve start --help
-```
+Serve does not fetch at `serve start`. The first `POST /v1/sandboxes` after a
+cold `bux-pkg` may download the GitHub product tarball (or `guest-v*` when a
+sibling `bux-shim` already exists). That GET uses a minutes-scale timeout,
+not 30s. Subsequent creates `stat` payload files and do not hit the network.
+`bux system info` is flock-free and does not fetch.
 
-Members are at archive root (`cd.yml` packs with `tar czf … -C "$staging" .`).
-Run `./bux` from the directory that received the extract.
+Resolution: `RuntimeOptions.{shim,guest}_path`, canonical sibling of the
+running executable (`bux-shim`, `bux-guest-<musl-triple>`), complete
+`bux-pkg/{ver}-{target}`, `bux-pkg/guest-v{GUEST_VERSION}`, then
+checksum-verified GitHub fetch. Guest tag is `guest-v*`. Missing payload
+fails with the install URL.
 
 Targets: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
-`aarch64-apple-darwin`. Layout:
+`aarch64-apple-darwin`. Layout of a complete product dir:
 
 ```text
 bux
 bux-shim
 bux-guest-<linux-musl-triple>
 libkrun* / libkrunfw*     # .so + soname aliases on Linux; .dylib on Darwin
+bwrap                     # Linux only
 LICENSE-MIT
 LICENSE-APACHE
 ```
@@ -38,10 +42,7 @@ Darwin `bux-shim` records `@loader_path/libkrun.dylib`. The engine
 (`crates/bux`) does not link libkrun. libkrun `dlopen`s `libkrunfw.5.dylib` /
 `libkrunfw.so.5`; versioned aliases are required.
 
-Capture env: `BUX_HOME`, `BUX_SHIM_PATH`, `BUX_GUEST_PATH`, `BUX_GUEST_DIR`
-(see root README). Guest resolution: `BUX_GUEST_PATH`, then a sibling of the
-running executable (`bux-guest-<triple>`, `bux-guest-linux`, `bux-guest`),
-then `$PATH`. There is no download protocol.
+Capture env: `BUX_HOME`, `BUX_LISTEN`, `BUX_API_KEYS`.
 
 ## `/dev/kvm` and 412
 
@@ -190,10 +191,10 @@ Serve process restart: live **detached** VMs reattach; the worker must not
 SIGTERM them on Drop. `secrets_required` VMs are 409 on start/exec until
 secrets are re-supplied (CLI path). HTTP does not expose MITM secrets.
 
-Rollback: previous extract (previous `main` binary or previous tarball).
-There is no `v0.8.0` GitHub Release. Schema v5 is unchanged; replacing the
-binary and restarting serve does not wipe. A later schema bump refuses
-`Runtime::open` until `bux system reset` (or deleting `BUX_HOME`).
+Rollback: previous payload directory or previous binary. There is no
+`v0.8.0` GitHub Release. Schema v5 is unchanged; replacing the binary and
+restarting serve does not wipe. A later schema bump refuses `Runtime::open`
+until `bux system reset` (or deleting `BUX_HOME`).
 
 Native pins (`krun-v1.19.4` / `e2fs-v1.47.4` / `bwrap-v0.12.0`) are
 independent of product tags. Serve does not retag them.

@@ -33,7 +33,7 @@ and FULL procedure: [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 | `volume create` / `list` / `rm` | Named volumes under `{data_dir}/volumes/` |
 | `disk create` / `list` / `rm` | Ext4 base images |
 | `sweep` | Apply idle auto-stop / auto-delete policies |
-| `system info` | Host capabilities, data dir, capture env (flock-free) |
+| `system info` | Host capabilities, data dir, payload dir, capture env (flock-free) |
 | `system reset` | Delete the runtime data directory (requires flock) |
 | `info` | Alias of `system info` |
 
@@ -54,7 +54,6 @@ remains unrestricted (`Enabled { allow_net: [] }`).
 | Variable | Purpose |
 |----------|---------|
 | `BUX_HOME` | Runtime data directory |
-| `BUX_SHIM_PATH` | Absolute path to `bux-shim` |
-| `BUX_GUEST_PATH` | Absolute path to a static Linux `bux-guest` ELF |
-| `BUX_GUEST_DIR` | Build-time directory of a prebuilt Linux guest ELF |
-| `PATH` | Locates `bux-shim`, `bwrap`, `sandbox-exec`, `go` |
+| `BUX_LISTEN` | Serve listen specs, comma-separated |
+| `BUX_API_KEYS` | Serve API keys as `id:secret` pairs, comma-separated |
+| `PATH` | Locates `bwrap` (Linux jailer fallback), `sandbox-exec` (macOS), `go` |

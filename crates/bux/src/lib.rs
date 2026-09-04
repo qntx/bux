@@ -5,7 +5,9 @@
 //! egress at the host gvproxy boundary. Sidecar `bux-shim` and `bux-guest`
 //! are [`RuntimeOptions::shim_path`] / [`RuntimeOptions::guest_path`], else a
 //! canonical sibling of the running executable, else `bux-pkg`, else a
-//! checksum-verified GitHub fetch. Missing payload: `curl -fsSL https://sh.qntx.org/bux | sh`.
+//! checksum-verified GitHub fetch (`v{CARGO_PKG_VERSION}` tarball, or
+//! `guest-v{GUEST_VERSION}` when a shim already exists). Missing payload:
+//! `curl -fsSL https://sh.qntx.org/bux | sh`.
 //!
 //! # Quick start
 //!
