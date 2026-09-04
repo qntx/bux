@@ -195,6 +195,7 @@ CURL
 
 run_install() {
     # `|| return` so set -e does not abort the test shell on expected failures.
+    _ri_sh=${INSTALL_UNDER_TEST:-$INSTALL_SH}
     env -i \
         HOME="$HOME" \
         PATH="$PATH" \
@@ -205,7 +206,19 @@ run_install() {
         NO_COLOR=1 \
         DRY_RUN="${DRY_RUN:-}" \
         UNINSTALL="${UNINSTALL:-}" \
-        /bin/sh "$INSTALL_SH" "$@" || return $?
+        /bin/sh "$_ri_sh" "$@" || return $?
+}
+
+# True when inspect rejected ../evil before extract (dest unchanged, no sibling evil).
+dotdot_rejected() {
+    _dd_err=$1
+    _dd_pkg=$2
+    _dd_dest=$3
+    grep -q 'illegal archive path' "$_dd_err" || return 1
+    grep -q '\.\./evil' "$_dd_err" || return 1
+    [ -e "$_dd_pkg/evil" ] && return 1
+    grep -q first "$_dd_dest/bux" || return 1
+    return 0
 }
 
 # --- parser ---
@@ -422,7 +435,59 @@ write_sha "$T/www/bux-9.9.9-aarch64-apple-darwin.tar.gz" "$T/www/bux-9.9.9-aarch
 st=0
 run_install 2>"$T/dotdot.err" || st=$?
 [ "$st" != 0 ] || fail "dotdot member must err"
-grep -q first "$dest/bux" || fail "dotdot member replaced dest"
+dotdot_rejected "$T/dotdot.err" "$pkg" "$dest" || fail "inspect must reject ../evil before extract (no $pkg/evil)"
+
+# Stub inspect_archive: the same assertions must fail (otherwise they are not load-bearing).
+awk '
+    /^inspect_archive\(\) \{/ {
+        print
+        print "    return 0"
+        skip=1
+        next
+    }
+    skip && /^}/ { print; skip=0; next }
+    skip { next }
+    { print }
+' "$INSTALL_SH" >"$T/install.stub.sh"
+grep -q 'illegal archive path' "$INSTALL_SH" || fail "production inspect_archive missing"
+if grep -q 'illegal archive path' "$T/install.stub.sh"; then
+    fail "awk did not stub inspect_archive"
+fi
+INSTALL_UNDER_TEST="$T/install.stub.sh"
+st=0
+run_install 2>"$T/dotdot.stub.err" || st=$?
+unset INSTALL_UNDER_TEST
+if dotdot_rejected "$T/dotdot.stub.err" "$pkg" "$dest"; then
+    fail "inspect_archive stubbed to return 0 must fail traversal assertions"
+fi
+grep -q 'illegal archive path' "$T/dotdot.stub.err" && fail "stubbed inspect_archive still emitted inspect error"
+rm -f "$pkg/evil"
+rm -rf "$pkg/9.9.9-aarch64-apple-darwin.new"
+
+# AppleDouble ._* (Darwin CD without COPYFILE_DISABLE) stays rejected.
+make_staging "$T/stage-ad" Darwin bux-guest-aarch64-unknown-linux-musl 0
+printf '%s\n' 'first' >"$T/stage-ad/bux"
+chmod 0755 "$T/stage-ad/bux"
+pack_tar "$T/stage-ad" "$T/www/valid-ad.tar.gz"
+python3 - "$T/www/valid-ad.tar.gz" "$T/www/bux-9.9.9-aarch64-apple-darwin.tar.gz" <<'PY'
+import io, sys, tarfile
+src, dst = sys.argv[1], sys.argv[2]
+with tarfile.open(src, "r:gz") as inn, tarfile.open(dst, "w:gz") as out:
+    for m in inn.getmembers():
+        f = inn.extractfile(m) if m.isfile() else None
+        out.addfile(m, f)
+    info = tarfile.TarInfo("._bux")
+    data = b"appledouble"
+    info.size = len(data)
+    out.addfile(info, io.BytesIO(data))
+PY
+write_sha "$T/www/bux-9.9.9-aarch64-apple-darwin.tar.gz" "$T/www/bux-9.9.9-aarch64-apple-darwin.tar.gz.sha256"
+st=0
+run_install 2>"$T/appledouble.err" || st=$?
+[ "$st" != 0 ] || fail "._bux member must err"
+grep -q 'unexpected archive member' "$T/appledouble.err" || fail "._bux message missing"
+grep -q '\._bux' "$T/appledouble.err" || fail "._bux not named in error"
+grep -q first "$dest/bux" || fail "._bux member replaced dest"
 
 # --- Linux bwrap required ---
 
