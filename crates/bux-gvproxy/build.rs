@@ -17,6 +17,7 @@
     clippy::unwrap_used,
     clippy::unwrap_in_result,
     clippy::let_underscore_must_use,
+    clippy::missing_docs_in_private_items,
     missing_docs,
     unsafe_code,
     reason = "build scripts may panic/expect on unrecoverable setup failures"
