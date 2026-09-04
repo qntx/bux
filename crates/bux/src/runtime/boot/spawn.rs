@@ -691,14 +691,16 @@ mod tests {
     fn spawn_shim_missing_bwrap_does_not_write_json_or_stderr() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("vm.json");
-        let cfg = crate::state::VmConfig {
+        let cfg = VmConfig {
             network: NetworkSpec::Disabled,
             security: crate::security::SecurityOptions::default()
                 .jailer(true)
                 .landlock(false),
-            ..crate::state::VmConfig::default()
+            ..VmConfig::default()
         };
-        let err = spawn_shim(&cfg, &config_path, dir.path(), None, None, None, None).unwrap_err();
+        let err = spawn_shim(&cfg, &config_path, dir.path(), None, None, None, None)
+            .err()
+            .unwrap();
         assert!(
             matches!(err, crate::Error::SecurityUnavailable(_)),
             "linux jailer without bwrap must fail closed: {err}"

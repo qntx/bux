@@ -292,7 +292,7 @@ fn build_command(
 
     #[cfg(target_os = "linux")]
     {
-        return Err(Error::BwrapUnavailable);
+        Err(Error::BwrapUnavailable)
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -373,9 +373,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn fd_count() -> usize {
-        std::fs::read_dir("/proc/self/fd")
-            .map(|d| d.count())
-            .unwrap_or(0)
+        std::fs::read_dir("/proc/self/fd").map_or(0, Iterator::count)
     }
 
     #[cfg(target_os = "linux")]
