@@ -41,8 +41,6 @@ tags attach assets only. Do not re-add `cargo publish` to these workflows.
   `disable-library-validation` so the shim can load ad-hoc libkrun.
 - Linux `patchelf` only in GHA (`krun-build.yml`), not on the operator laptop.
 
-Linux embedder `$ORIGIN` rustflags: [`CONTRIBUTING.md`](../CONTRIBUTING.md).
-
 ## URL scheme
 
 One scheme. No crate-version URL. No dual GET.
@@ -77,8 +75,9 @@ These are local paths, not a second URL. Air-gapped / iterating on a local
 ## Compile from cold
 
 Unset `BUX_DEPS_DIR` / `BUX_E2FS_DIR` / `BUX_BWRAP_DIR`. First
-`cargo build -p bux-cli -p bux-shim-bin` downloads `krun-v1.19.4` and
-`e2fs-v1.47.4` and compiles gvproxy from Go.
+`cargo build -p bux-cli` downloads `e2fs-v1.47.4`. Then
+`cargo build -p bux-shim-bin` downloads `krun-v1.19.4` and compiles gvproxy
+from Go. Separate `-p` so `bux` does not DT_NEEDED libkrun.
 
 Measured on this machine, 2026-08-26, Darwin arm64, after `krun-v1.19.4` /
 `e2fs-v1.47.4` assets existed:
@@ -96,7 +95,7 @@ otool -L target/debug/libkrun.dylib
 [bux-e2fs 0.2.0] bux-e2fs: downloading https://github.com/qntx/bux/releases/download/e2fs-v1.47.4/bux-e2fs-aarch64-apple-darwin.tar.gz
 ```
 
-`cargo build -p bux-cli -p bux-shim-bin` Finished after the krun 1.19 fetch.
+`cargo build -p bux-shim-bin` Finished after the krun 1.19 fetch.
 Cargo warned that no Linux `bux-guest` binary was found
 (`aarch64-unknown-linux-musl`). No musl guest ELF on this host. Darwin does
 not compile the guest. That is not a `BUX_E2E_FULL` record.
@@ -249,7 +248,8 @@ cargo build -p bux-krun -vv
 # must log:
 # bux-krun: downloading https://github.com/qntx/bux/releases/download/krun-v1.19.4/bux-deps-{target}.tar.gz
 # Darwin: otool -L target/debug/libkrun.dylib  → current version 1.19.x, not 1.17
-cargo build -p bux-cli -p bux-shim-bin
+cargo build -p bux-cli
+cargo build -p bux-shim-bin
 ```
 
 Same for e2fs (`e2fs-v1.47.4`). bwrap verify is Linux-only.

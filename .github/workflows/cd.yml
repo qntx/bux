@@ -136,9 +136,34 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu libcap-ng-dev:arm64
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
 
-      - run: cargo build --release --target ${{ matrix.target }} -p bux-cli -p bux-shim-bin
+      # Separate -p so feature unification does not DT_NEEDED libkrun on bux.
+      - name: Build bux-cli
+        run: cargo build --release --target ${{ matrix.target }} -p bux-cli
         env:
           BUX_GUEST_DIR: ${{ github.workspace }}/.guest
+
+      - name: Build bux-shim
+        run: cargo build --release --target ${{ matrix.target }} -p bux-shim-bin
+
+      - name: bux does not DT_NEEDED libkrun
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/bux"
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            libs=$(otool -L "$bin")
+            printf '%s\n' "$libs"
+            if printf '%s\n' "$libs" | grep -qi krun; then
+              echo "bux DT_NEEDED libkrun" >&2
+              exit 1
+            fi
+          else
+            needed=$(readelf -d "$bin")
+            printf '%s\n' "$needed"
+            if printf '%s\n' "$needed" | grep NEEDED | grep -qi krun; then
+              echo "bux DT_NEEDED libkrun" >&2
+              exit 1
+            fi
+          fi
 
       - name: Sign bux-shim (macOS)
         if: runner.os == 'macOS'

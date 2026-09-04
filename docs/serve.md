@@ -31,20 +31,12 @@ LICENSE-MIT
 LICENSE-APACHE
 ```
 
-Keep `libkrun*` in the **same directory** as `./bux`. Linux `DT_NEEDED` is
-the soname (`libkrun.so.1`, `libkrunfw.so.5`). This repo stamps
+Keep `libkrun*` in the **same directory** as `bux-shim`. Linux `DT_NEEDED` on
+`bux-shim` is the soname (`libkrun.so.1`, `libkrunfw.so.5`). This repo stamps
 `-Wl,-rpath,$ORIGIN` (`.cargo/config.toml` and `bux-shim-bin` `build.rs`).
-Downstream Linux embedders must set:
-
-```toml
-# embedder .cargo/config.toml (Linux)
-[target.'cfg(target_os = "linux")']
-rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN"]
-```
-
-Darwin records `@loader_path/libkrun.dylib`. Embedders on Darwin do not need
-rpath rustflags. libkrun `dlopen`s `libkrunfw.5.dylib` / `libkrunfw.so.5`;
-versioned aliases are required.
+Darwin `bux-shim` records `@loader_path/libkrun.dylib`. The engine
+(`crates/bux`) does not link libkrun. libkrun `dlopen`s `libkrunfw.5.dylib` /
+`libkrunfw.so.5`; versioned aliases are required.
 
 Capture env: `BUX_HOME`, `BUX_SHIM_PATH`, `BUX_GUEST_PATH`, `BUX_GUEST_DIR`
 (see root README). Guest resolution: `BUX_GUEST_PATH`, then a sibling of the

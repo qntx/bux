@@ -183,7 +183,8 @@ PY
 # Build cli+shim, Darwin codesign, pin guest, fake-ip preflight, PATH.
 pin_full_binaries() {
   echo "building bux-cli and bux-shim-bin (FULL pin)..."
-  cargo build -p bux-cli -p bux-shim-bin --manifest-path "${ROOT}/Cargo.toml"
+  cargo build -p bux-cli --manifest-path "${ROOT}/Cargo.toml"
+  cargo build -p bux-shim-bin --manifest-path "${ROOT}/Cargo.toml"
   if [[ "$(uname -s)" == "Darwin" ]]; then
     codesign --entitlements "${ROOT}/crates/bux-shim/bux-shim.entitlements" \
       -s - --force "${ROOT}/target/debug/bux-shim"

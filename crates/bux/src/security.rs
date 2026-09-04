@@ -108,7 +108,7 @@ const fn map_layer(s: bux_jail::LayerStatus) -> LayerStatus {
     }
 }
 
-/// Host isolation and libkrun capabilities for `Runtime::host_info`.
+/// Host isolation for `Runtime::host_info`. libkrun fields are unused (engine does not load libkrun).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[allow(
@@ -204,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn probe_does_not_load_libkrun() {
+    fn probe_krun_fields_are_empty() {
         let h = HostInfo::probe();
         assert!(
             h.krun_features.is_empty(),

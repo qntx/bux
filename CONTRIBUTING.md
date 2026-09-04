@@ -12,7 +12,9 @@ Operator docs: root `README.md`, `docs/architecture.md`,
 ## Build
 
 ```bash
-cargo build -p bux-cli -p bux-shim-bin
+# Separate invocations: one `-p` pair unifies `krun` onto `bux`.
+cargo build -p bux-cli
+cargo build -p bux-shim-bin
 # Linux guest agent (static musl recommended for rootfs injection):
 cargo build -p bux-guest --target aarch64-unknown-linux-musl   # or x86_64-...
 ```

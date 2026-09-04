@@ -75,7 +75,8 @@ pub enum ShimNetConn {
     UnixDgram,
 }
 
-/// Data for the `bux-shim` binary to start gvproxy. Ignored by [`crate::prepare`].
+/// Data for the `bux-shim` binary (`bux-shim-bin`) to start gvproxy.
+/// Ignored by libkrun apply.
 ///
 /// Types live here so the `bux-shim` library does not depend on `bux-gvproxy`.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]

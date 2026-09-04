@@ -34,15 +34,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@v2
       - name: crates/bux does not depend on bux-krun
         run: |
           set -euo pipefail
-          cargo tree -p bux --prefix none -f '{p}' | tee /tmp/bux-tree.txt
-          if grep -E '^bux-krun ' /tmp/bux-tree.txt; then
+          if cargo tree -p bux -i bux-krun --locked; then
             echo "crates/bux must not depend on bux-krun" >&2
-            cargo tree -p bux -i bux-krun
             exit 1
           fi
+          cargo check -p bux --all-targets --locked
+          cargo check -p bux-shim --no-default-features --all-targets --locked
 
   test:
     strategy:
