@@ -823,7 +823,8 @@ mod tests {
     }
 
     fn wait_dead_pid() -> i32 {
-        let mut child = std::process::Command::new("true").spawn().unwrap();
+        // Sidecar tests empty PATH under a mutex.
+        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
         let pid = child_pid(&child);
         drop(child.wait());
         pid
@@ -840,7 +841,7 @@ mod tests {
     }
 
     fn spawn_sleep() -> std::process::Child {
-        std::process::Command::new("sleep")
+        std::process::Command::new("/bin/sleep")
             .arg("30")
             .spawn()
             .unwrap()

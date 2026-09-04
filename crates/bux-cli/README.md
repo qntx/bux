@@ -37,6 +37,7 @@ and FULL procedure: [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 | `system info` | Host capabilities, data dir, payload dir, capture env (flock-free) |
 | `system reset` | Delete the runtime data directory (requires flock) |
 | `info` | Alias of `system info` |
+| `upgrade` / `update` | Reinstall via `https://sh.qntx.org/bux` |
 
 List/info commands take `--format table|json` where present.
 
