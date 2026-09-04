@@ -483,7 +483,14 @@ mod tests {
         assert!(!is_cargo_install_path(Path::new("/usr/local/bin/bux")));
     }
 
-    fn run_injected(args: UpgradeArgs, exe: Option<&str>) -> (bool, Result<()>) {
+    fn newer_product_page() -> String {
+        let current = env!("CARGO_PKG_VERSION");
+        let (major, ..) = parse_semver(current).expect("crate version is X.Y.Z");
+        let tag = format!("v{}.0.0", major + 1);
+        format!(r#"[{{"tag_name":"{tag}","draft":false,"prerelease":false}}]"#)
+    }
+
+    fn run_injected(args: UpgradeArgs, exe: Option<&str>, page: &str) -> (bool, Result<()>) {
         let installed = Cell::new(false);
         let result = args.run_with(
             |url| {
@@ -491,7 +498,7 @@ mod tests {
                     !url.contains("/releases/latest"),
                     "must not call /releases/latest: {url}"
                 );
-                Ok(FIXTURE.to_owned())
+                Ok(page.to_owned())
             },
             || {
                 Ok(PathBuf::from(
@@ -514,6 +521,7 @@ mod tests {
                 force: true,
             },
             None,
+            FIXTURE,
         );
         result.unwrap();
         assert!(!installed, "--check must not run the installer");
@@ -527,6 +535,7 @@ mod tests {
                 force: true,
             },
             Some("/home/x/.cargo/bin/bux"),
+            FIXTURE,
         );
         result.unwrap();
         assert!(!installed, ".cargo/bin must not run the installer");
@@ -540,6 +549,7 @@ mod tests {
                 force: true,
             },
             Some("/home/x/.local/bin/bux"),
+            FIXTURE,
         );
         result.unwrap();
         assert!(installed, "non-cargo path must run the installer");
@@ -547,17 +557,80 @@ mod tests {
 
     #[test]
     fn noop_when_current_is_newest_does_not_run_installer() {
+        assert!(
+            !is_newer("0.4.1", env!("CARGO_PKG_VERSION")),
+            "FIXTURE product tag must stay older than the crate for this noop"
+        );
         let (installed, result) = run_injected(
             UpgradeArgs {
                 check: false,
                 force: false,
             },
             None,
+            FIXTURE,
         );
         result.unwrap();
         assert!(
             !installed,
             "already-latest without --force must not run the installer"
+        );
+    }
+
+    #[test]
+    fn newer_release_installs_without_force() {
+        let page = newer_product_page();
+        let PageHit::Version(latest) = parse_product_page(&page).unwrap() else {
+            panic!("newer page must yield a product version");
+        };
+        assert!(
+            is_newer(&latest, env!("CARGO_PKG_VERSION")),
+            "injected tag {latest} must be newer than the crate"
+        );
+        let (installed, result) = run_injected(
+            UpgradeArgs {
+                check: false,
+                force: false,
+            },
+            Some("/home/x/.local/bin/bux"),
+            &page,
+        );
+        result.unwrap();
+        assert!(
+            installed,
+            "newer product tag without --force must run the installer"
+        );
+    }
+
+    #[test]
+    fn check_does_not_install_when_newer() {
+        let page = newer_product_page();
+        let (installed, result) = run_injected(
+            UpgradeArgs {
+                check: true,
+                force: false,
+            },
+            None,
+            &page,
+        );
+        result.unwrap();
+        assert!(!installed, "--check must not run the installer when newer");
+    }
+
+    #[test]
+    fn cargo_bin_does_not_install_when_newer() {
+        let page = newer_product_page();
+        let (installed, result) = run_injected(
+            UpgradeArgs {
+                check: false,
+                force: false,
+            },
+            Some("/home/x/.cargo/bin/bux"),
+            &page,
+        );
+        result.unwrap();
+        assert!(
+            !installed,
+            ".cargo/bin must not run the installer when a newer tag exists"
         );
     }
 }
