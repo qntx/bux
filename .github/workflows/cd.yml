@@ -193,6 +193,10 @@ jobs:
             exit 1
           fi
 
+          if [ "${{ matrix.cross }}" != "true" ]; then
+            ( cd "$staging" && ./bux serve start --help | grep -q -- '--api-key' )
+          fi
+
           tar czf "$staging.tar.gz" -C "$staging" .
 
           # SHA-256 checksum
