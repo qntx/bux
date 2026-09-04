@@ -34,8 +34,9 @@ Releases tagged `krun-v{LIBKRUN_VERSION}` (not crate versions).
 | `BUX_GUEST_DIR` | Build-time directory of a prebuilt Linux guest ELF (`bux-cli` stages a sibling copy) |
 | `PATH` | Locates `bux-shim`, `bwrap` (Linux), `sandbox-exec` (macOS), `go` |
 
-Release packaging ships `bux`, `bux-shim`, `bux-guest-*`, and
-`libkrun*`/`libkrunfw*` (including soname aliases) in the same directory.
+Release packaging ships `bux`, `bux-shim`, `bux-guest-*`,
+`libkrun*`/`libkrunfw*` (including soname aliases), and Linux `bwrap` in the
+same directory.
 `cargo build` stages those dylibs into the cargo profile directory next to
 `bux` / `bux-shim`. Versioned aliases (`libkrun.1.dylib` /
 `libkrunfw.5.dylib`, Linux `libkrun.so.1` / `libkrunfw.so.5`) are required:
@@ -227,27 +228,27 @@ no `PT_INTERP`, plus that stamp.
 
 FULL needs python3 for the guest ELF validator and Go for `bux-shim-bin`;
 Darwin FULL still needs `BUX_GUEST_PATH` and `gh` authenticated to `qntx/bux`
-with `workflow` if they must dispatch; `gh release download guest-<sha>` is
+with `workflow` if they must dispatch; `gh release download guest-v0.1.0` is
 enough when that Release exists; `gh run download` is enough when a matching
 run already exists.
 
 CD `cd.yml` musl guest:
 
-- Release tag: `guest-<40-char-sha>` of that commit (never `v0.4.1`)
-- Release asset **file**: `bux-guest-<triple>`
+- Release tag: `guest-v{crates/bux-guest version}` (never `v0.8.0`, never `guest-<sha>`)
+- Release asset **file**: `bux-guest-<triple>` and `bux-guest-<triple>.sha256`
 - GHA artifact **name**: `guest-<triple>` (never `bux-guest-*`)
 - **file** inside the artifact: `bux-guest-<triple>`
 - sibling after fetch: `target/debug/bux-guest-<triple>`
 
-After this merge is on `main`, tag the guest of that commit:
+After this merge is on `main`, tag the guest of that commit (`guest-v` plus
+`crates/bux-guest/Cargo.toml` `version`; `0.1.0` today):
 
 ```bash
 git fetch origin
 git checkout main
 git pull --ff-only origin main
-SHA="$(git rev-parse HEAD)"
-git tag "guest-${SHA}" "${SHA}"
-git push origin "guest-${SHA}"
+git tag guest-v0.1.0
+git push origin guest-v0.1.0
 ```
 
 Do not vendor the ELF in git. Do not fill the FULL record above from a

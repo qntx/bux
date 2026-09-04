@@ -2,7 +2,7 @@ name: CD
 
 on:
   push:
-    tags: ["v*.*.*", "guest-*"]
+    tags: ["v*.*.*", "guest-v*.*.*"]
   workflow_dispatch:
 
 permissions:
@@ -10,6 +10,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Keep in sync with crates/bux-bwrap/build.rs BUBBLEWRAP_VERSION.
+  BWRAP_VERSION: "0.12.0"
 
 jobs:
   guest:
@@ -83,7 +85,7 @@ jobs:
 
   build:
     needs: guest
-    if: ${{ !startsWith(github.ref, 'refs/tags/guest-') }}
+    if: ${{ !startsWith(github.ref, 'refs/tags/guest-v') }}
     strategy:
       fail-fast: false
       matrix:
@@ -193,6 +195,23 @@ jobs:
             exit 1
           fi
 
+          # Matrix target, not runner arch: the aarch64 Linux job is cross on x86_64.
+          if [[ "$target" != *apple-darwin* ]]; then
+            bwrap_url="https://github.com/qntx/bux/releases/download/bwrap-v${BWRAP_VERSION}/bux-bwrap-${target}.tar.gz"
+            mkdir -p .bwrap
+            curl -fsSL "$bwrap_url" | tar xz -C .bwrap
+            if [ ! -f .bwrap/bwrap ]; then
+              echo "missing bwrap in $bwrap_url"
+              exit 1
+            fi
+            cp -a .bwrap/bwrap "$staging/"
+            chmod 0755 "$staging/bwrap"
+            if [ ! -f "$staging/bwrap" ]; then
+              echo "missing bwrap"
+              exit 1
+            fi
+          fi
+
           if [ "${{ matrix.cross }}" != "true" ]; then
             ( cd "$staging" && ./bux serve start --help | grep -q -- '--api-key' )
           fi
@@ -237,13 +256,27 @@ jobs:
   guest-release:
     needs: guest
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/guest-')
+    if: startsWith(github.ref, 'refs/tags/guest-v')
     steps:
-      - name: Assert tag is guest-<this-commit-sha>
-        if: github.ref_name != format('guest-{0}', github.sha)
+      - uses: actions/checkout@v7
+
+      - name: Assert tag is guest-v{bux-guest version}
         run: |
-          echo "tag ${{ github.ref_name }} is not guest-${{ github.sha }}" >&2
-          exit 1
+          ver="$(python3 - <<'PY'
+          from pathlib import Path
+          for line in Path("crates/bux-guest/Cargo.toml").read_text().splitlines():
+              s = line.strip()
+              if s.startswith("version") and "=" in s:
+                  print(s.split("=", 1)[1].strip().strip('"'))
+                  raise SystemExit(0)
+          raise SystemExit("no version in crates/bux-guest/Cargo.toml")
+          PY
+          )"
+          expected="guest-v${ver}"
+          if [[ "${GITHUB_REF_NAME}" != "${expected}" ]]; then
+            echo "tag ${GITHUB_REF_NAME} is not ${expected}" >&2
+            exit 1
+          fi
 
       - uses: actions/download-artifact@v8
         with:
@@ -314,11 +347,33 @@ jobs:
           PY
           chmod 0755 bux-guest-x86_64-unknown-linux-musl bux-guest-aarch64-unknown-linux-musl
 
+      - name: Checksum guest ELFs
+        run: |
+          for triple in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            elf="bux-guest-${triple}"
+            if [ ! -f "$elf" ]; then
+              echo "missing $elf"
+              exit 1
+            fi
+            if command -v sha256sum &>/dev/null; then
+              sha256sum "$elf" > "${elf}.sha256"
+            else
+              shasum -a 256 "$elf" > "${elf}.sha256"
+            fi
+            if [ ! -s "${elf}.sha256" ]; then
+              echo "missing ${elf}.sha256"
+              exit 1
+            fi
+          done
+
       - uses: softprops/action-gh-release@v2
         with:
+          prerelease: true
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          body: Static musl guest at ${{ github.sha }}. Not a product release. Not FULL proof.
+          body: Static musl guest ${{ github.ref_name }} built at ${{ github.sha }}. Not a product `v*` release. Not FULL proof.
           files: |
             bux-guest-x86_64-unknown-linux-musl
+            bux-guest-x86_64-unknown-linux-musl.sha256
             bux-guest-aarch64-unknown-linux-musl
+            bux-guest-aarch64-unknown-linux-musl.sha256

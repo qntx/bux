@@ -159,5 +159,6 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
+          prerelease: true
           files: bux-e2fs-*.tar.gz
           generate_release_notes: true

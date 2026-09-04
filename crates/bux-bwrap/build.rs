@@ -53,6 +53,7 @@ fn main() {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
     let bwrap_path = obtain_binary(&target, &out_dir);
+    stage_bwrap_beside_binaries(&bwrap_path, &out_dir);
 
     // Expose the bwrap path to dependent crates' build scripts
     // (available as DEP_BUBBLEWRAP_BWRAP_PATH) and to lib.rs at compile time.
@@ -60,6 +61,59 @@ fn main() {
     println!(
         "cargo:rustc-env=BUX_BWRAP_BUILD_PATH={}",
         bwrap_path.display()
+    );
+}
+
+/// `OUT_DIR` ancestor named `$PROFILE` is the cargo bin dir (native or `--target`).
+fn profile_bin_dir(out_dir: &Path, profile: &str) -> PathBuf {
+    out_dir
+        .ancestors()
+        .find(|path| path.file_name().is_some_and(|name| name == profile))
+        .map_or_else(
+            || {
+                panic!(
+                    "bux-bwrap: cannot resolve profile bin dir from OUT_DIR={} PROFILE={profile}",
+                    out_dir.display()
+                )
+            },
+            Path::to_path_buf,
+        )
+}
+
+/// Copy `bwrap` into the cargo profile dir so sibling lookup finds it for `cargo run`.
+fn stage_bwrap_beside_binaries(bwrap: &Path, out_dir: &Path) {
+    let profile = env::var("PROFILE").expect("PROFILE not set");
+    let dest_dir = profile_bin_dir(out_dir, &profile);
+    fs::create_dir_all(&dest_dir).unwrap_or_else(|e| {
+        panic!(
+            "bux-bwrap: failed to create profile dir {}: {e}",
+            dest_dir.display()
+        )
+    });
+    let dest = dest_dir.join("bwrap");
+    if dest.symlink_metadata().is_ok() {
+        fs::remove_file(&dest).unwrap_or_else(|e| {
+            panic!("bux-bwrap: failed to replace {}: {e}", dest.display());
+        });
+    }
+    fs::copy(bwrap, &dest).unwrap_or_else(|e| {
+        panic!(
+            "bux-bwrap: failed to copy {} -> {}: {e}",
+            bwrap.display(),
+            dest.display()
+        );
+    });
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dest, fs::Permissions::from_mode(0o755)).unwrap_or_else(|e| {
+            panic!("bux-bwrap: failed to chmod 0755 {}: {e}", dest.display());
+        });
+    }
+    assert!(
+        dest.is_file(),
+        "bux-bwrap: bwrap missing next to binaries at {}",
+        dest.display()
     );
 }
 
