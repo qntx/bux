@@ -35,7 +35,7 @@ Engine (this workspace):
 | Crate | Role |
 |-------|------|
 | `bux` | `Runtime` / `Vm` / `VmOptions`. Exclusive `bux.lock`. Schema v5. Daemonless. |
-| `bux-cli` | Operator CLI (`run`/`create`/`exec`/…). Binary name `bux`. `serve` is 1.0, not in 0.8.0. |
+| `bux-cli` | Operator CLI (`run`/`create`/`exec`/`serve`). Binary name `bux`. Serve is in this 0.8.0 workspace; the product tag is not 1.0. |
 | `bux-shim` | `ShimConfig` apply to libkrun. Never starts gvproxy. |
 | `bux-shim-bin` | Process that `krun_start_enter`. gvproxy in-process when networked. Seccomp **after** `GvproxyInstance::new`. |
 | `bux-guest` | Static musl ELF, PID 1, protocol stamp `bux-guest-protocol-v10`. |
@@ -47,9 +47,10 @@ Engine (this workspace):
 | `bux-gvproxy` | gvisor-tap-vsock **0.8.9**. Virtio-net + MITM. |
 | `bux-jail` / `bux-bwrap` / `bux-landlock` / `bux-seccomp` | Linux: bwrap PID/IPC/UTS + Landlock fail-closed + seccomp TSYNC. Darwin: seatbelt. `bux-bwrap` crate **0.2.0** downloads bubblewrap **0.12.0**. |
 
-HTTP lives in `bux-serve`, **not** in `crates/bux`. Embedders keep
-`Runtime::open` without an HTTP stack. Serve is a client of the public
-`Runtime` / `Vm` API the same way the CLI is.
+HTTP lives in `bux-serve` (this 0.8.0 workspace; the product tag is not
+1.0), **not** in `crates/bux`. Embedders keep `Runtime::open` without an
+HTTP stack. Serve is a client of the public `Runtime` / `Vm` API the same
+way the CLI is.
 
 Not in this product: dashboard, NestJS control plane, Go FFI runner,
 OpenTelemetry collector, language SDKs, GPU/VNC, Windows, in-guest OCI
@@ -191,4 +192,5 @@ Workers remain `bux serve`. Image bases are per-worker.
 
 - [security-model.md](security-model.md)
 - [serve.md](serve.md)
+- [native-deps.md](native-deps.md)
 - [CONTRIBUTING.md](../CONTRIBUTING.md)

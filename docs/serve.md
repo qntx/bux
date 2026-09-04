@@ -4,9 +4,9 @@ Operator page for `bux serve`: one process, one `Runtime`, many per-agent
 VMs. Extract the GitHub tarball. Do not expect a fourth artifact.
 
 Workspace is **0.8.0**. Tag `v1.0.0` only when the hosted worker is in that
-tarball and FULL proof is recorded. Rollback target is **`v0.8.x`**. Schema
-`user_version` stays **5**; rollback does not wipe `BUX_HOME` unless a later
-release bumps schema.
+tarball and FULL proof is recorded. Rollback is the **previous extract**.
+There is no `v0.8.0` GitHub Release. Schema `user_version` stays **5**;
+rollback does not wipe `BUX_HOME` unless a later release bumps schema.
 
 ## Extract tarball
 
@@ -200,8 +200,9 @@ Serve process restart: live **detached** VMs reattach; the worker must not
 SIGTERM them on Drop. `secrets_required` VMs are 409 on start/exec until
 secrets are re-supplied (CLI path). HTTP does not expose MITM secrets.
 
-Rollback: previous **`v0.8.x`** tarball. Schema v5 is unchanged; replacing
-the binary and restarting serve does not wipe. A later schema bump refuses
+Rollback: previous extract (previous `main` binary or previous tarball).
+There is no `v0.8.0` GitHub Release. Schema v5 is unchanged; replacing the
+binary and restarting serve does not wipe. A later schema bump refuses
 `Runtime::open` until `bux system reset` (or deleting `BUX_HOME`).
 
 Native pins (`krun-v1.19.4` / `e2fs-v1.47.4` / `bwrap-v0.12.0`) are
