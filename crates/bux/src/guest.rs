@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::util::{current_exe_for_sidecars, push_unique_path};
+use crate::util::{push_unique_path, sidecar_path};
 use crate::{Error, Result};
 
 const GUEST_EXEC_PATH: &str = "/bux/bin/bux-guest";
@@ -54,15 +54,15 @@ impl ManagedGuestBinary {
             }
         }
 
-        let target = linux_guest_target();
+        let name = guest_binary_name();
         if invalid.is_empty() {
             return Err(Error::NotFound(format!(
-                "bux-guest not found (set RuntimeOptions.guest_path, BUX_GUEST_PATH, place a static {target} bux-guest next to the running executable, or on PATH)"
+                "bux-guest not found (set RuntimeOptions.guest_path, BUX_GUEST_PATH, place {name} next to the running executable, or on PATH)"
             )));
         }
 
         Err(Error::InvalidConfig(format!(
-            "failed to find a usable Linux bux-guest binary; set RuntimeOptions.guest_path or BUX_GUEST_PATH to a static {target} build. Candidates: {}",
+            "failed to find a usable Linux bux-guest binary; set RuntimeOptions.guest_path or BUX_GUEST_PATH to a static {name}. Candidates: {}",
             invalid.join("; ")
         )))
     }
@@ -157,6 +157,10 @@ fn stage_executable_copy(src: &Path, beside: &Path) -> Result<PathBuf> {
 }
 
 fn candidate_paths() -> Vec<PathBuf> {
+    candidate_paths_from(std::env::current_exe().ok().as_deref())
+}
+
+fn candidate_paths_from(exe: Option<&Path>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
     if let Some(explicit) = std::env::var_os("BUX_GUEST_PATH") {
@@ -165,10 +169,10 @@ fn candidate_paths() -> Vec<PathBuf> {
 
     let name = guest_binary_name();
 
-    if let Ok(exe) = current_exe_for_sidecars()
-        && let Some(dir) = exe.parent()
+    if let Some(exe) = exe
+        && let Some(sibling) = sidecar_path(exe, &name)
     {
-        push_unique_path(&mut paths, dir.join(&name));
+        push_unique_path(&mut paths, sibling);
     }
 
     if let Some(path_var) = std::env::var_os("PATH") {
@@ -440,9 +444,9 @@ pub(crate) mod sidecar_env {
 
     impl Planted {
         pub(crate) fn sibling(name: &str, data: &[u8]) -> Self {
-            let path = crate::util::current_exe_for_sidecars()
-                .unwrap()
-                .with_file_name(name);
+            let exe = std::env::current_exe().unwrap();
+            let path =
+                crate::util::sidecar_path(&exe, name).unwrap_or_else(|| exe.with_file_name(name));
             let backup = fs::read(&path).ok();
             fs::write(&path, data).unwrap();
             Self { path, backup }
@@ -703,13 +707,6 @@ mod tests {
         let planted = sidecar_env::Planted::sibling(&guest_binary_name(), &planted_bytes);
         let guest = ManagedGuestBinary::resolve(None).unwrap();
         assert_eq!(guest.host_path, planted.path());
-        assert_eq!(
-            planted.path(),
-            current_exe_for_sidecars()
-                .unwrap()
-                .with_file_name(guest_binary_name()),
-            "planted sibling must sit next to the canonical executable"
-        );
     }
 
     #[test]
@@ -744,9 +741,15 @@ mod tests {
                 );
             }
             Err(err) => {
+                let msg = err.to_string();
                 assert!(
                     matches!(err, Error::NotFound(_) | Error::InvalidConfig(_)),
-                    "{err}"
+                    "{msg}"
+                );
+                assert!(
+                    msg.contains(&guest_binary_name()),
+                    "not-found must name {name}: {msg}",
+                    name = guest_binary_name()
                 );
             }
         }
@@ -762,9 +765,8 @@ mod tests {
         env.unset("BUX_GUEST_PATH");
         let empty = tempfile::tempdir().unwrap();
         env.set("PATH", empty.path());
-        let expected = current_exe_for_sidecars()
-            .unwrap()
-            .with_file_name(guest_binary_name());
+        let exe = std::env::current_exe().unwrap();
+        let expected = sidecar_path(&exe, &guest_binary_name()).unwrap();
         let paths = candidate_paths();
         assert!(
             paths.contains(&expected),
@@ -776,5 +778,69 @@ mod tests {
             assert_ne!(&*name, "bux-guest-linux", "{path:?}");
             assert_eq!(&*name, guest_binary_name(), "{path:?}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "env lock must outlive candidate_paths_from"
+    )]
+    fn candidate_paths_from_symlink_exe_uses_real_dir() {
+        let mut env = sidecar_env::lock();
+        env.unset("BUX_GUEST_PATH");
+        let empty = tempfile::tempdir().unwrap();
+        env.set("PATH", empty.path());
+
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real");
+        let link_dir = dir.path().join("link");
+        fs::create_dir(&real_dir).unwrap();
+        fs::create_dir(&link_dir).unwrap();
+        let real = real_dir.join("bux");
+        fs::write(&real, b"exe").unwrap();
+        let link = link_dir.join("bux");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let name = guest_binary_name();
+        let planted = real.canonicalize().unwrap().with_file_name(&name);
+        fs::write(&planted, b"guest").unwrap();
+        let leftover = link_dir.join(&name);
+        fs::write(&leftover, b"leftover").unwrap();
+
+        let paths = candidate_paths_from(Some(&link));
+        assert!(
+            paths.contains(&planted),
+            "expected sibling next to the real executable in {paths:?}"
+        );
+        assert!(
+            !paths.contains(&leftover),
+            "must not join against the invocation path: {paths:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "env lock must outlive candidate_paths_from"
+    )]
+    fn candidate_paths_from_dangling_symlink_skips_sibling() {
+        let mut env = sidecar_env::lock();
+        env.unset("BUX_GUEST_PATH");
+        let empty = tempfile::tempdir().unwrap();
+        env.set("PATH", empty.path());
+
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("bux");
+        std::os::unix::fs::symlink(dir.path().join("missing"), &link).unwrap();
+        let leftover = dir.path().join(guest_binary_name());
+        fs::write(&leftover, b"leftover").unwrap();
+
+        let paths = candidate_paths_from(Some(&link));
+        assert!(
+            !paths.contains(&leftover),
+            "unresolved symlink exe must skip sibling lookup: {paths:?}"
+        );
     }
 }

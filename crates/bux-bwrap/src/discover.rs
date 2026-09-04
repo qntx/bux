@@ -45,19 +45,30 @@ pub const fn path() -> Option<&'static Path> {
     None
 }
 
-/// Follows symlinks so a `~/.local/bin` install still finds `bwrap` next to the payload.
+/// Follows symlinks so `bwrap` is joined next to the real executable, not the invocation path.
+///
+/// `None` if `exe` is a symlink that cannot be resolved: do not join against the link.
 #[cfg(any(test, target_os = "linux"))]
 #[must_use]
-fn canonicalize_exe(exe: PathBuf) -> PathBuf {
-    exe.canonicalize().unwrap_or(exe)
+fn real_exe(exe: PathBuf) -> Option<PathBuf> {
+    exe.canonicalize().ok().or_else(|| {
+        let symlink = std::fs::symlink_metadata(&exe).is_ok_and(|m| m.file_type().is_symlink());
+        (!symlink).then_some(exe)
+    })
+}
+
+/// Sidecar next to [`real_exe`] when that path is a file.
+#[cfg(any(test, target_os = "linux"))]
+#[must_use]
+fn sibling_of(exe: PathBuf, name: &str) -> Option<PathBuf> {
+    let sibling = real_exe(exe)?.with_file_name(name);
+    sibling.is_file().then_some(sibling)
 }
 
 /// Check for a binary next to the current executable.
 #[cfg(target_os = "linux")]
 fn sibling_path(name: &str) -> Option<PathBuf> {
-    let exe = canonicalize_exe(std::env::current_exe().ok()?);
-    let sibling = exe.with_file_name(name);
-    sibling.is_file().then_some(sibling)
+    sibling_of(std::env::current_exe().ok()?, name)
 }
 
 /// Search `$PATH` for a binary.
@@ -80,46 +91,62 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn canonicalize_exe_missing_path_stays_uncanonicalized() {
+    fn real_exe_missing_path_stays_uncanonicalized() {
         let missing = PathBuf::from("/definitely-not-a-bwrap-exe");
         assert_eq!(
-            canonicalize_exe(missing.clone()),
-            missing,
+            real_exe(missing.clone()).as_deref(),
+            Some(missing.as_path()),
             "missing path must stay uncanonicalized"
         );
     }
 
     #[cfg(unix)]
     #[test]
-    fn canonicalize_exe_sibling_is_in_real_dir() {
+    fn sibling_of_symlink_exe_uses_real_dir() {
         let dir = std::env::temp_dir().join(format!("bux-bwrap-canon-{}", std::process::id()));
         drop(fs::remove_dir_all(&dir));
-        fs::create_dir_all(dir.join("payload")).unwrap();
-        fs::create_dir_all(dir.join("bin")).unwrap();
+        fs::create_dir_all(dir.join("real")).unwrap();
+        fs::create_dir_all(dir.join("link")).unwrap();
         let _guard = DirGuard(dir.clone());
-        let real = dir.join("payload").join("bux");
+        let real = dir.join("real").join("bux");
         fs::write(&real, b"exe").unwrap();
-        let link = dir.join("bin").join("bux");
+        let link = dir.join("link").join("bux");
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
-        let canon = canonicalize_exe(link);
+        let planted = real.canonicalize().unwrap().with_file_name("bwrap");
+        fs::write(&planted, b"planted-bwrap").unwrap();
+        fs::write(dir.join("link").join("bwrap"), b"leftover-bwrap").unwrap();
+
         assert_eq!(
-            canon,
-            real.canonicalize().unwrap(),
-            "symlink current_exe must resolve to the payload file"
+            sibling_of(link, "bwrap").as_deref(),
+            Some(planted.as_path()),
+            "sibling bwrap must sit next to the real executable"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sibling_of_dangling_symlink_skips_leftover() {
+        let dir = std::env::temp_dir().join(format!("bux-bwrap-dangle-{}", std::process::id()));
+        drop(fs::remove_dir_all(&dir));
+        fs::create_dir_all(&dir).unwrap();
+        let _guard = DirGuard(dir.clone());
+        let link = dir.join("bux");
+        std::os::unix::fs::symlink(dir.join("missing"), &link).unwrap();
+        fs::write(dir.join("bwrap"), b"leftover-bwrap").unwrap();
+
         assert_eq!(
-            canon.with_file_name("bwrap"),
-            real.canonicalize().unwrap().with_file_name("bwrap"),
-            "sidecar join must land in the payload directory"
+            sibling_of(link, "bwrap"),
+            None,
+            "unresolved symlink exe must not pick leftover sibling"
         );
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn sibling_path_finds_planted_bwrap() {
-        let exe = canonicalize_exe(std::env::current_exe().unwrap());
-        let path = exe.with_file_name("bwrap");
+        let exe = std::env::current_exe().unwrap();
+        let path = real_exe(exe.clone()).unwrap_or(exe).with_file_name("bwrap");
         let backup = fs::read(&path).ok();
         fs::write(&path, b"planted-bwrap").unwrap();
         let _restore = RestorePlanted {
@@ -130,7 +157,7 @@ mod tests {
         assert_eq!(
             found.as_deref(),
             Some(path.as_path()),
-            "sibling bwrap must sit next to the canonical executable"
+            "sibling bwrap must sit next to the running executable"
         );
     }
 
