@@ -698,9 +698,9 @@ mod tests {
                 .landlock(false),
             ..VmConfig::default()
         };
-        let Err(err) = spawn_shim(&cfg, &config_path, dir.path(), None, None, None, None) else {
-            panic!("linux jailer without bwrap must fail closed");
-        };
+        let err = spawn_shim(&cfg, &config_path, dir.path(), None, None, None, None)
+            .err()
+            .unwrap();
         assert!(
             matches!(err, crate::Error::SecurityUnavailable(_)),
             "linux jailer without bwrap must fail closed: {err}"
