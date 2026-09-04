@@ -23,6 +23,10 @@ pub enum Error {
     )]
     LandlockUnavailable,
 
+    /// Linux jailer is on but `bwrap` was not provided / could not wrap.
+    #[error("bwrap required (jailer); install with: curl -fsSL https://sh.qntx.org/bux | sh")]
+    BwrapUnavailable,
+
     /// Landlock ruleset construction failed (kernel error, not mere unavailability).
     #[error("landlock ruleset failed: {0}")]
     Landlock(String),

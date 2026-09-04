@@ -139,7 +139,7 @@ impl DiskManager {
     /// Creates a managed base ext4 image with guest binary injected.
     ///
     /// `guest_path`: `Some` must be a regular file or [`crate::Error::NotFound`];
-    /// `None` searches env / sibling / `PATH`.
+    /// `None` searches a canonical sibling of the running executable.
     ///
     /// # Errors
     ///

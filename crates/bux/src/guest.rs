@@ -56,18 +56,19 @@ impl ManagedGuestBinary {
 
         let name = guest_binary_name();
         if invalid.is_empty() {
-            return Err(Error::NotFound(format!(
-                "bux-guest not found (set RuntimeOptions.guest_path, BUX_GUEST_PATH, place {name} next to the running executable, or on PATH)"
-            )));
+            return Err(Error::NotFound(
+                "bux payload not found; install with: curl -fsSL https://sh.qntx.org/bux | sh"
+                    .into(),
+            ));
         }
 
         Err(Error::InvalidConfig(format!(
-            "failed to find a usable Linux bux-guest binary; set RuntimeOptions.guest_path or BUX_GUEST_PATH to a static {name}. Candidates: {}",
+            "failed to find a usable Linux bux-guest binary ({name}). Candidates: {}",
             invalid.join("; ")
         )))
     }
 
-    fn from_path(path: &Path) -> Result<Self> {
+    pub(crate) fn from_path(path: &Path) -> Result<Self> {
         let data = fs::read(path)?;
         validate_guest_binary(path, &data)?;
         #[allow(clippy::cast_possible_truncation, reason = "file sizes fit in u64")]
@@ -162,11 +163,6 @@ fn candidate_paths() -> Vec<PathBuf> {
 
 fn candidate_paths_from(exe: Option<&Path>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-
-    if let Some(explicit) = std::env::var_os("BUX_GUEST_PATH") {
-        push_unique_path(&mut paths, PathBuf::from(explicit));
-    }
-
     let name = guest_binary_name();
 
     if let Some(exe) = exe
@@ -175,20 +171,14 @@ fn candidate_paths_from(exe: Option<&Path>) -> Vec<PathBuf> {
         push_unique_path(&mut paths, sibling);
     }
 
-    if let Some(path_var) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path_var) {
-            push_unique_path(&mut paths, dir.join(&name));
-        }
-    }
-
     paths
 }
 
-fn guest_binary_name() -> String {
+pub(crate) fn guest_binary_name() -> String {
     format!("bux-guest-{}", linux_guest_target())
 }
 
-fn linux_guest_target() -> &'static str {
+pub(crate) fn linux_guest_target() -> &'static str {
     match std::env::consts::ARCH {
         "x86_64" => "x86_64-unknown-linux-musl",
         "aarch64" => "aarch64-unknown-linux-musl",
@@ -747,8 +737,8 @@ mod tests {
                     "{msg}"
                 );
                 assert!(
-                    msg.contains(&guest_binary_name()),
-                    "not-found must name {name}: {msg}",
+                    msg.contains(&guest_binary_name()) || msg.contains("sh.qntx.org/bux"),
+                    "not-found must name {name} or the install URL: {msg}",
                     name = guest_binary_name()
                 );
             }

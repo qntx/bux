@@ -151,7 +151,7 @@ impl HostInfo {
             let caps = bux_jail::checks::check_host();
             Self {
                 virtualization: caps.virtualization,
-                namespaces: caps.namespaces,
+                namespaces: crate::payload::namespaces_available(),
                 seccomp: caps.seccomp,
                 mandatory_access_control: caps.mandatory_access_control,
                 cgroups: caps.cgroups,
@@ -214,6 +214,17 @@ mod tests {
         assert_eq!(
             h.nested_virt, None,
             "engine must not probe libkrun nested_virt"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_namespaces_uses_engine_bwrap_lookup() {
+        let h = HostInfo::probe();
+        assert_eq!(
+            h.namespaces,
+            crate::payload::namespaces_available(),
+            "HostInfo.namespaces is overwritten in bux, not bux-jail"
         );
     }
 }

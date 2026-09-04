@@ -42,9 +42,9 @@ pub struct RuntimeOptions {
     /// Data dir (`bux.lock`, `bux.db`, disks, volumes, socks). Required.
     pub data_dir: PathBuf,
     /// If `Some`, must be a regular file at first use or [`crate::Error::NotFound`] (no search fallthrough).
-    /// If `None` → `BUX_SHIM_PATH` (fall through if not a file) → sibling of the running executable → `$PATH`.
+    /// If `None` → canonical sibling of the running executable → `bux-pkg` → fetch.
     pub shim_path: Option<PathBuf>,
-    /// Same contract as `shim_path` for the static Linux `bux-guest` ELF (`BUX_GUEST_PATH`).
+    /// Same contract as `shim_path` for the static Linux `bux-guest` ELF.
     pub guest_path: Option<PathBuf>,
     /// Registry credentials for this Runtime's OCI handle (pull and [`crate::ImageRef::Oci`]).
     pub registry_auth: RegistryAuth,
@@ -121,6 +121,8 @@ pub struct Runtime {
     pub(crate) shim_path: Option<PathBuf>,
     /// Unresolved guest ELF override from [`RuntimeOptions`].
     pub(crate) guest_path: Option<PathBuf>,
+    /// Cached payload paths from the last [`crate::payload::ensure_blocking`].
+    payload: Mutex<Option<crate::payload::ResolvedPayload>>,
 }
 
 // Runtime is Send + Sync because:
@@ -193,6 +195,7 @@ impl Runtime {
             events: Arc::new(EventDispatcher::new()),
             shim_path: opts.shim_path,
             guest_path: opts.guest_path,
+            payload: Mutex::new(None),
         };
 
         rt.recover();
@@ -328,6 +331,22 @@ impl Runtime {
     #[allow(clippy::unused_self, reason = "instance API for Runtime symmetry")]
     pub fn host_info(&self) -> crate::security::HostInfo {
         crate::security::HostInfo::probe()
+    }
+
+    /// Cache sidecar paths so later spawn / ext4 inject do not fetch again.
+    pub(crate) fn store_payload(&self, payload: crate::payload::ResolvedPayload) {
+        *self
+            .payload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(payload);
+    }
+
+    /// Last successful payload resolution, if `create` already ran `ensure`.
+    pub(crate) fn cached_payload(&self) -> Option<crate::payload::ResolvedPayload> {
+        self.payload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Named volume manager (`{data_dir}/volumes/`).

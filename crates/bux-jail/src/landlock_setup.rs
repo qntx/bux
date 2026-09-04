@@ -153,6 +153,7 @@ mod tests {
             allow_degraded_security: false,
             die_with_parent: true,
             network_host: false,
+            bwrap_path: None,
         };
         let r = path_restrictions(
             &jail,
@@ -182,6 +183,7 @@ mod tests {
             allow_degraded_security: false,
             die_with_parent: true,
             network_host: true,
+            bwrap_path: None,
         };
         let r = path_restrictions(
             &jail,
@@ -219,6 +221,7 @@ mod tests {
             allow_degraded_security: false,
             die_with_parent: true,
             network_host: false,
+            bwrap_path: None,
         };
         let assembled = path_restrictions(
             &jail,

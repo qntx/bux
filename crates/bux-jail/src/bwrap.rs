@@ -20,10 +20,9 @@ pub(crate) struct BwrapSandbox;
 
 impl Sandbox for BwrapSandbox {
     fn wrap(&self, shim: &Path, config_path: &Path, jail: &JailConfig) -> Option<Command> {
-        let mut builder =
-            BwrapCommand::new()
-                .ok()?
-                .unshare([Namespace::Pid, Namespace::Ipc, Namespace::Uts]);
+        let mut builder = BwrapCommand::from_path(jail.bwrap_path.as_ref()?)
+            .ok()?
+            .unshare([Namespace::Pid, Namespace::Ipc, Namespace::Uts]);
         if jail.die_with_parent {
             builder = builder.die_with_parent();
         }
@@ -83,6 +82,7 @@ mod tests {
             allow_degraded_security: false,
             die_with_parent,
             network_host: false,
+            bwrap_path: Some(PathBuf::from("/bin/true")),
         }
     }
 

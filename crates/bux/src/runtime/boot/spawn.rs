@@ -105,7 +105,12 @@ pub(crate) fn spawn_config(
     reject_long_unix_path(&socket)?;
     let socket_str = socket.to_string_lossy().into_owned();
 
-    prepare_managed_config(&mut config, rt.guest_path.as_deref())?;
+    let payload = rt.cached_payload();
+    let guest = payload
+        .as_ref()
+        .map(|p| p.guest.as_path())
+        .or(rt.guest_path.as_deref());
+    prepare_managed_config(&mut config, guest)?;
     config.auto_remove = auto_remove;
     config.vsock_ports.push(VsockPort {
         port: AGENT_PORT,
@@ -155,13 +160,19 @@ pub(crate) fn spawn_config(
     }
 
     let config_path = rt.socks_dir.join(format!("{id}.json"));
+    let shim_override = payload
+        .as_ref()
+        .map(|p| p.shim.as_path())
+        .or(rt.shim_path.as_deref());
+    let bwrap = payload.as_ref().and_then(|p| p.bwrap.as_deref());
     let shim = spawn_shim(
         &config,
         &config_path,
         &rt.socks_dir,
         network,
         gvproxy,
-        rt.shim_path.as_deref(),
+        shim_override,
+        bwrap,
     )?;
     abort.pid = Some(shim.pid);
 
@@ -281,6 +292,11 @@ pub(super) const fn spawn_policy(config: &VmConfig) -> SpawnPolicy {
 /// Writes config JSON (mode 0o600), creates watchdog pipe, and spawns `bux-shim`.
 ///
 /// `network` / `gvproxy` are both `Some` (virtio-net) or both `None` (offline).
+/// `bwrap_path` is required on Linux when `config.security.jailer` is true.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "spawn wires isolation flags that cannot fold without hiding fail-closed"
+)]
 pub(crate) fn spawn_shim(
     config: &VmConfig,
     config_path: &Path,
@@ -288,6 +304,7 @@ pub(crate) fn spawn_shim(
     network: Option<ShimNetwork>,
     gvproxy: Option<ShimGvproxy>,
     shim_path: Option<&Path>,
+    bwrap_path: Option<&Path>,
 ) -> Result<ShimSpawnResult> {
     if network.is_some() != gvproxy.is_some() {
         return Err(crate::Error::InvalidConfig(
@@ -323,6 +340,12 @@ pub(crate) fn spawn_shim(
         .unwrap_or_default();
 
     let sec = &config.security;
+    #[cfg(target_os = "linux")]
+    if sec.jailer && bwrap_path.is_none() {
+        return Err(crate::Error::SecurityUnavailable(
+            "bwrap required (jailer); install with: curl -fsSL https://sh.qntx.org/bux | sh".into(),
+        ));
+    }
     let sandbox: Option<Box<dyn bux_jail::Sandbox>> = if sec.jailer {
         None
     } else {
@@ -353,6 +376,7 @@ pub(crate) fn spawn_shim(
         allow_degraded_security: sec.allow_degraded,
         die_with_parent: policy.die_with_parent,
         network_host: policy.network_host,
+        bwrap_path: bwrap_path.map(Path::to_path_buf),
     };
 
     let result =
@@ -406,6 +430,9 @@ fn write_shim_json(path: &Path, json: &[u8]) -> io::Result<()> {
 /// Map jail errors to product errors (preserve K22 fail-closed).
 fn map_jail_error(e: bux_jail::Error, shim: &Path) -> crate::Error {
     match e {
+        bux_jail::Error::BwrapUnavailable => crate::Error::SecurityUnavailable(
+            "bwrap required (jailer); install with: curl -fsSL https://sh.qntx.org/bux | sh".into(),
+        ),
         bux_jail::Error::LandlockUnavailable => crate::Error::SecurityUnavailable(
             "landlock required but unavailable on this kernel (set SecurityOptions.allow_degraded to proceed)"
                 .into(),
@@ -423,8 +450,8 @@ fn map_jail_error(e: bux_jail::Error, shim: &Path) -> crate::Error {
 
 /// Locates the `bux-shim` binary.
 ///
-/// `Some` must be a regular file or [`crate::Error::NotFound`]; `None` searches
-/// env, then a sibling of the running executable, then `$PATH`.
+/// `Some` must be a regular file or [`crate::Error::NotFound`]; `None` uses the
+/// canonical sibling of the running executable.
 ///
 /// # Errors
 ///
@@ -451,13 +478,6 @@ fn find_shim_from(explicit: Option<&Path>, current_exe: Option<&Path>) -> Result
         )));
     }
 
-    if let Ok(p) = std::env::var("BUX_SHIM_PATH") {
-        let path = PathBuf::from(p);
-        if path.is_file() {
-            return Ok(path);
-        }
-    }
-
     if let Some(exe) = current_exe
         && let Some(sibling) = crate::util::sidecar_path(exe, NAME)
         && sibling.is_file()
@@ -465,17 +485,8 @@ fn find_shim_from(explicit: Option<&Path>, current_exe: Option<&Path>) -> Result
         return Ok(sibling);
     }
 
-    if let Ok(path_var) = std::env::var("PATH") {
-        for dir in std::env::split_paths(&path_var) {
-            let candidate = dir.join(NAME);
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-        }
-    }
-
     Err(crate::Error::NotFound(
-        "bux-shim not found (set RuntimeOptions.shim_path, BUX_SHIM_PATH, place bux-shim next to the running executable, or on PATH)".into(),
+        "bux payload not found; install with: curl -fsSL https://sh.qntx.org/bux | sh".into(),
     ))
 }
 
