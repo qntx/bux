@@ -327,7 +327,8 @@ pub(crate) fn gen_id() -> String {
             .unwrap_or_default()
             .as_nanos(),
     );
-    format!("{:012x}", h.finish())
+    // {:012x} is minimum width; mask to 48 bits so the hex is always exactly 12.
+    format!("{:012x}", h.finish() & 0xffff_ffff_ffff_u64)
 }
 
 #[cfg(unix)]
@@ -611,6 +612,32 @@ mod tests {
         assert!(
             cfg.tenant_id.is_none(),
             "missing tenant_id must deserialize as None"
+        );
+    }
+
+    #[test]
+    fn gen_id_is_exactly_12_lowercase_hex() {
+        for _ in 0..256 {
+            let id = gen_id();
+            assert_eq!(
+                id.len(),
+                12,
+                "gen_id must emit exactly 12 hex chars, got {id:?}"
+            );
+            assert!(
+                id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+                "gen_id must be lowercase hex, got {id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_012x_of_2_pow_48_is_length_13() {
+        // {:012x} of 2^48 is 13 chars; dropping the gen_id mask would emit >12.
+        assert_eq!(
+            format!("{:012x}", 1u64 << 48).len(),
+            13,
+            "unmasked 2^48 must format wider than 12 so the mask stays required"
         );
     }
 }
