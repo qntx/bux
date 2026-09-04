@@ -29,8 +29,8 @@ async fn main() -> bux::Result<()> {
     };
     let rt = Runtime::open_with(RuntimeOptions {
         data_dir: bux::default_data_dir(),
-        shim_path: std::env::var_os("BUX_SHIM_PATH").map(Into::into),
-        guest_path: std::env::var_os("BUX_GUEST_PATH").map(Into::into),
+        shim_path: None,
+        guest_path: None,
         registry_auth: RegistryAuth::Anonymous,
     })?;
     let vm = Arc::new(rt.get(&target)?);

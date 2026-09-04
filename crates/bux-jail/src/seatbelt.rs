@@ -231,6 +231,7 @@ mod tests {
             allow_degraded_security: false,
             die_with_parent: true,
             network_host,
+            bwrap_path: None,
         }
     }
 

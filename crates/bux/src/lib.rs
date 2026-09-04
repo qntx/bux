@@ -3,9 +3,11 @@
 //! `bux` wraps [`libkrun`] into a managed [`Runtime`]: create isolated
 //! machines from OCI images, exec through the guest agent, and control
 //! egress at the host gvproxy boundary. Sidecar `bux-shim` and `bux-guest`
-//! are [`RuntimeOptions::shim_path`] / [`RuntimeOptions::guest_path`], else
-//! `BUX_SHIM_PATH` / `BUX_GUEST_PATH`, a sibling of the running executable,
-//! then `$PATH`.
+//! are [`RuntimeOptions::shim_path`] / [`RuntimeOptions::guest_path`], else a
+//! canonical sibling of the running executable, else `bux-pkg`, else a
+//! checksum-verified GitHub fetch (`v{CARGO_PKG_VERSION}` tarball, or
+//! `guest-v{GUEST_VERSION}` when a shim already exists). Missing payload:
+//! `curl -fsSL https://sh.qntx.org/bux | sh`.
 //!
 //! # Quick start
 //!
@@ -40,6 +42,8 @@ mod lifecycle;
 mod metrics;
 #[cfg(unix)]
 mod options;
+#[cfg(unix)]
+mod payload;
 mod ports;
 #[cfg(unix)]
 mod process;
@@ -71,6 +75,8 @@ pub use lifecycle::SweepReport;
 pub use metrics::{RuntimeMetrics, VmMetrics};
 #[cfg(unix)]
 pub use options::{ImageRef, NetworkSpec, VmOptions};
+#[cfg(unix)]
+pub use payload::{GUEST_VERSION, default_payload_dir};
 pub use ports::{PortSpec, PublishedPort, parse_publish_spec};
 #[cfg(unix)]
 pub use runtime::{

@@ -108,7 +108,7 @@ const fn map_layer(s: bux_jail::LayerStatus) -> LayerStatus {
     }
 }
 
-/// Host isolation and libkrun capabilities for `Runtime::host_info`.
+/// Host isolation for `Runtime::host_info`. libkrun fields are unused (engine does not load libkrun).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[allow(
@@ -128,11 +128,11 @@ pub struct HostInfo {
     pub cgroups: bool,
     /// Landlock LSM (Linux 5.13+).
     pub landlock: bool,
-    /// Hypervisor max vCPUs (`None` if libkrun cannot be probed).
+    /// Hypervisor max vCPUs. Always `None`: the engine does not load libkrun.
     pub max_vcpus: Option<u32>,
-    /// Nested virtualization (`None` if the probe fails).
+    /// Nested virtualization. Always `None`: the engine does not load libkrun.
     pub nested_virt: Option<bool>,
-    /// libkrun build features that are present (e.g. `net`, `blk`, `gpu`).
+    /// libkrun build features. Always empty: the engine does not load libkrun.
     pub krun_features: Vec<String>,
     /// Isolation gaps from the jailer host audit.
     pub isolation_warnings: Vec<String>,
@@ -140,12 +140,16 @@ pub struct HostInfo {
 
 impl HostInfo {
     /// Probe the current host.
+    ///
+    /// `max_vcpus`, `nested_virt`, and `krun_features` are empty: the engine
+    /// does not load libkrun. `virtualization` still comes from the jailer
+    /// host audit (KVM / HVF).
     #[must_use]
     pub fn probe() -> Self {
         #[cfg(unix)]
         {
-            let caps = bux_jail::checks::check_host();
-            let (max_vcpus, nested_virt, krun_features) = probe_krun();
+            let mut caps = bux_jail::checks::check_host();
+            caps.namespaces = crate::payload::namespaces_available();
             Self {
                 virtualization: caps.virtualization,
                 namespaces: caps.namespaces,
@@ -153,9 +157,9 @@ impl HostInfo {
                 mandatory_access_control: caps.mandatory_access_control,
                 cgroups: caps.cgroups,
                 landlock: caps.landlock,
-                max_vcpus,
-                nested_virt,
-                krun_features,
+                max_vcpus: None,
+                nested_virt: None,
+                krun_features: Vec::new(),
                 isolation_warnings: bux_jail::checks::audit_isolation(&caps),
             }
         }
@@ -175,34 +179,6 @@ impl HostInfo {
             }
         }
     }
-}
-
-/// libkrun probes (shim is the only crate that links libkrun).
-#[cfg(unix)]
-fn probe_krun() -> (Option<u32>, Option<bool>, Vec<String>) {
-    use bux_shim::host::{self, Feature};
-
-    let max_vcpus = host::max_vcpus().ok();
-    let nested_virt = host::check_nested_virt().ok();
-    let mut krun_features = Vec::new();
-    for (feature, name) in [
-        (Feature::Net, "net"),
-        (Feature::Blk, "blk"),
-        (Feature::Gpu, "gpu"),
-        (Feature::Snd, "snd"),
-        (Feature::Input, "input"),
-        (Feature::Efi, "efi"),
-        (Feature::Tee, "tee"),
-        (Feature::AmdSev, "amd-sev"),
-        (Feature::IntelTdx, "intel-tdx"),
-        (Feature::AwsNitro, "aws-nitro"),
-        (Feature::VirglResourceMap2, "virgl-resource-map2"),
-    ] {
-        if host::has_feature(feature).unwrap_or(false) {
-            krun_features.push(name.to_owned());
-        }
-    }
-    (max_vcpus, nested_virt, krun_features)
 }
 
 #[cfg(test)]
@@ -226,5 +202,53 @@ mod tests {
         assert!(!s.landlock);
         assert!(s.allow_degraded);
         assert!(!s.jailer);
+    }
+
+    #[test]
+    fn probe_krun_fields_are_empty() {
+        let h = HostInfo::probe();
+        assert!(
+            h.krun_features.is_empty(),
+            "engine must not probe libkrun features"
+        );
+        assert_eq!(h.max_vcpus, None, "engine must not probe libkrun max_vcpus");
+        assert_eq!(
+            h.nested_virt, None,
+            "engine must not probe libkrun nested_virt"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "env lock must outlive probe"
+    )]
+    fn probe_namespaces_uses_engine_bwrap_lookup() {
+        let mut env = crate::guest::sidecar_env::lock();
+        let empty = tempfile::tempdir().unwrap();
+        env.set("PATH", empty.path());
+        let planted = crate::guest::sidecar_env::Planted::sibling("bwrap", b"planted-bwrap");
+        assert!(
+            planted.path().is_file(),
+            "sibling bwrap must exist for the engine lookup"
+        );
+        assert!(
+            !bux_jail::checks::check_host().namespaces,
+            "PATH-only which(bwrap) must miss when PATH is empty"
+        );
+        let h = HostInfo::probe();
+        assert!(
+            h.namespaces,
+            "engine lookup must see sibling bwrap: {}",
+            planted.path().display()
+        );
+        assert!(
+            !h.isolation_warnings
+                .iter()
+                .any(|w| w.contains("bubblewrap not found")),
+            "audit must use overwritten namespaces, got {:?}",
+            h.isolation_warnings
+        );
     }
 }

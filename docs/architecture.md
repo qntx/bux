@@ -152,7 +152,7 @@ Empty overlay is ~256 KiB.
 
 Per-op connection. Concurrent execs do not share a mux. `Hello`: Control,
 Exec, FileRead, FileWrite, CopyIn, CopyOut. A protocol bump is a guest ELF
-rebuild + `guest-<40-char-sha>` Release + Darwin fetch.
+rebuild + `guest-v{crates/bux-guest version}` Release + Darwin engine fetch.
 
 ## Native / guest / product tags
 
@@ -163,7 +163,7 @@ Independent tag families. Serve does not retag libkrun.
 | `krun-v1.19.4` | `bux-deps-{target}.tar.gz` (libkrun 1.19.4 + libkrunfw 5.5.0) |
 | `e2fs-v1.47.4` | `bux-e2fs-{target}.tar.gz` |
 | `bwrap-v0.12.0` | `bux-bwrap-{target}.tar.gz` (Linux) |
-| `guest-<40-char-sha>` | static musl `bux-guest-<triple>` for **that** commit |
+| `guest-v{crates/bux-guest version}` | static musl `bux-guest-<triple>` + `.sha256` |
 | `v*.*.*` | product tarball: `bux`, `bux-shim`, guest ELF, `libkrun*` |
 
 URLs:
@@ -176,7 +176,7 @@ https://github.com/qntx/bux/releases/download/bwrap-v0.12.0/bux-bwrap-{target}.t
 
 A native pin bump retags **that** native tag on the PR SHA, waits for all
 matrix assets, then merges. Never merge-then-tag. `PROTOCOL_VERSION` bump
-tags `guest-<sha>` on that commit before Darwin FULL, then a product `v*`.
+tags `guest-v*` on that commit before Darwin FULL, then a product `v*`.
 
 CD (`cd.yml`) ships three host tarballs: `x86_64-unknown-linux-gnu`,
 `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`. No Windows. Guest
@@ -184,8 +184,8 @@ builds are `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`.
 
 ## Control plane
 
-1.0 live is one Linux machine with `/dev/kvm`, extract the tarball,
-`./bux serve start`. Multi-worker coordinator is after that loop is boring.
+1.0 live is one Linux machine with `/dev/kvm` and `bux serve start`.
+Multi-worker coordinator is after that loop is boring.
 Workers remain `bux serve`. Image bases are per-worker.
 
 ## See also

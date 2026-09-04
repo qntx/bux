@@ -12,7 +12,9 @@ Operator docs: root `README.md`, `docs/architecture.md`,
 ## Build
 
 ```bash
-cargo build -p bux-cli -p bux-shim-bin
+# Separate invocations: one `-p` pair unifies `krun` onto `bux`.
+cargo build -p bux-cli
+cargo build -p bux-shim-bin
 # Linux guest agent (static musl recommended for rootfs injection):
 cargo build -p bux-guest --target aarch64-unknown-linux-musl   # or x86_64-...
 ```
@@ -29,13 +31,13 @@ Releases tagged `krun-v{LIBKRUN_VERSION}` (not crate versions).
 | Variable | Purpose |
 |----------|---------|
 | `BUX_HOME` | Runtime data directory (lock, SQLite, disks, volumes, socks) |
-| `BUX_SHIM_PATH` | Absolute path to `bux-shim` (else next to CLI or `$PATH`) |
-| `BUX_GUEST_PATH` | Absolute path to a static Linux `bux-guest` ELF (Runtime inject) |
-| `BUX_GUEST_DIR` | Build-time directory of a prebuilt Linux guest ELF (`bux-cli` stages a sibling copy) |
-| `PATH` | Locates `bux-shim`, `bwrap` (Linux), `sandbox-exec` (macOS), `go` |
+| `BUX_LISTEN` | Serve listen specs, comma-separated (`HOST:PORT` or `unix://PATH`) |
+| `BUX_API_KEYS` | Serve API keys as `id:secret` pairs, comma-separated |
+| `PATH` | Locates `bwrap` (Linux jailer fallback), `sandbox-exec` (macOS), `go` |
 
-Release packaging ships `bux`, `bux-shim`, `bux-guest-*`, and
-`libkrun*`/`libkrunfw*` (including soname aliases) in the same directory.
+Release packaging ships `bux`, `bux-shim`, `bux-guest-*`,
+`libkrun*`/`libkrunfw*` (including soname aliases), and Linux `bwrap` in the
+same directory.
 `cargo build` stages those dylibs into the cargo profile directory next to
 `bux` / `bux-shim`. Versioned aliases (`libkrun.1.dylib` /
 `libkrunfw.5.dylib`, Linux `libkrun.so.1` / `libkrunfw.so.5`) are required:
@@ -47,26 +49,23 @@ Darwin: `bux-krun` copies `libkrun.dylib` and `libkrunfw.dylib` into
 `@loader_path/libkrunfw.dylib`, adds `LC_RPATH @loader_path` on
 `libkrun.dylib` so `dlopen("libkrunfw.5.dylib")` searches the dylib's
 directory, ad-hoc codesigns those copies, and link-searches only `link-lib`.
-Linked binaries record `@loader_path/libkrun.dylib`. Downstream Darwin
-embedders do not need rpath rustflags.
+The `bux-shim` binary records `@loader_path/libkrun.dylib`. `crates/bux`
+does not link libkrun.
 
-Linux: `DT_NEEDED` stays the soname. This workspace stamps
-`-Wl,-rpath,$ORIGIN` via `.cargo/config.toml`. Downstream embedders must set:
-
-```toml
-# embedder .cargo/config.toml (Linux)
-[target.'cfg(target_os = "linux")']
-rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN"]
-```
+Linux: `DT_NEEDED` on `bux-shim` stays the soname. This workspace stamps
+`-Wl,-rpath,$ORIGIN` via `.cargo/config.toml` for in-tree bins.
 
 `crates/bux-shim-bin/build.rs` emits `-Wl,-rpath,@executable_path` (Darwin)
 or `-Wl,-rpath,$ORIGIN` (Linux) so this repo's shim does not depend solely
 on `.cargo/config.toml`. Keep the workspace rustflags file.
 
-Runtime guest resolution (`ManagedGuestBinary::resolve`) is: `BUX_GUEST_PATH`,
-then a sibling of the running executable (`bux-guest-<triple>`,
-`bux-guest-linux`, `bux-guest`), then `$PATH`. There is no download protocol
-and the ELF is not vendored into the crate.
+Runtime resolution is `RuntimeOptions.{shim,guest}_path`, then a canonical
+sibling of the running executable (`bux-shim`, `bux-guest-<musl-triple>`),
+then a complete `bux-pkg/{ver}-{target}`, then `bux-pkg/guest-v{GUEST_VERSION}`,
+then a checksum-verified GitHub fetch. Guest-only fetch is `guest-v*` when a
+shim already exists. Guest names are `bux-guest-<musl-triple>` only. Missing
+payload fails with the install URL. `BUX_GUEST_DIR` is a CD / `bux-cli`
+`build.rs` input, not operator config.
 
 Tarball layout (Darwin; Linux uses `libkrun.so` / `libkrun.so.1` and
 `libkrunfw.so` / `libkrunfw.so.5`):
@@ -155,7 +154,7 @@ substring). **Pre-v10; not ship proof.**
 | kern.hv_support | 1 |
 | rustc | rustc 1.97.1 (8bab26f4f 2026-07-14) |
 | git | 42f02b0bbfe3c883417ad132f21e025afcc102a0 |
-| BUX_GUEST_PATH triple | aarch64-unknown-linux-musl |
+| guest ELF triple | aarch64-unknown-linux-musl |
 | ELF sha256 | 03ade6fffdc2d7968f5429a2257c14b9c42e2501d6fd14153a7500dceb2157d2 |
 | host.virtualization | true |
 | host.krun_features | ["net","blk"] |
@@ -163,7 +162,7 @@ substring). **Pre-v10; not ship proof.**
 | image reference | docker.io/library/alpine:latest |
 | image digest | sha256:e7a1a92a5bfeee40966aea60f0796b0e7917cc35591542701834f03a68fa3d18 |
 
-Leftover sibling `BUX_GUEST_PATH` host mode **0644** is OK to record; Runtime
+Leftover sibling guest ELF host mode **0644** is OK to record; Runtime
 inject writes the guest ELF at mode `0555`. Item 7 `NO_ETH0` sysfs still counts as offline proof.
 Item 5/7 wget-fail is unclassified; do not treat as HVF proof of
 `allow_net` / offline **policy**. This record is not GitHub-hosted
@@ -189,7 +188,7 @@ After that green run, fill a Layer 1 row from **that** host (capture binary
 | /dev/kvm | character device present (`test -c /dev/kvm`) |
 | rustc | `rustc --version` |
 | git | `git rev-parse HEAD` of the tree that ran smoke |
-| guest ELF sha256 | sha256 of `$BUX_GUEST_PATH` (the ELF smoke used) |
+| guest ELF sha256 | sha256 of the guest ELF the run used (`target/debug/bux-guest-<triple>` or `bux-pkg/guest-v*`) |
 | image digest | `./target/debug/bux images --format json` |
 | SMOKE_EXIT | `0` only with `OK (full e2e)` |
 | boot_s | optional; wall seconds create → first successful exec; not a fail gate |
@@ -197,17 +196,16 @@ After that green run, fill a Layer 1 row from **that** host (capture binary
 Capture `.host.*` with `./target/debug/bux system info --format json` and image
 reference/digest with `./target/debug/bux images --format json`. Pin `$BUX_HOME`
 to a path **without** substring `bux-e2e` (`scripts/e2e/smoke.sh` removes that
-data dir on exit). Darwin guest ELF: `scripts/e2e/fetch-guest.sh`.
+data dir on exit). Darwin guest ELF: engine `guest-v{GUEST_VERSION}` fetch
+when a sibling `bux-shim` exists.
 
 FULL always builds `target/debug/bux` and `target/debug/bux-shim` and ignores a
 PATH `bux`. On Darwin the script ad-hoc codesigns the shim with
-`crates/bux-shim/bux-shim.entitlements`. Darwin FULL **requires**
-`BUX_GUEST_PATH` from `scripts/e2e/fetch-guest.sh` of this HEAD (not a cwd
-`gh run download` that leaves the ELF nested). There is no leftover
-`target/debug/bux-guest-*` fall-through: unset `BUX_GUEST_PATH` plus a leftover
-ELF must fail before `bux create`. Before fetch, unset `BUX_GUEST_PATH` **and**
-delete leftover `target/debug/bux-guest-*`. Darwin does not compile the guest
-and does not use zig cc.
+`crates/bux-shim/bux-shim.entitlements`. `pin_full_binaries` does not export
+sidecar env; `PATH` includes `target/debug` so sibling lookup finds the shim
+under test. Leftover `target/debug/bux-guest-<triple>` pins via sibling lookup;
+stamp `bux-guest-protocol-v10` rejects v9. Darwin does not compile the guest
+and does not use zig cc. Darwin FULL does not require `gh`.
 
 Before any FULL `bux create`, `pin_full_binaries` calls
 `refuse_fake_ip_example_com`: Python `getaddrinfo("example.com", 443,
@@ -217,48 +215,36 @@ packed form — macOS translated `::ffff:0:c612:a0` is not
 `::ffff:198.18.0.0/111`). Fake-ip / MacPacket is hygiene, not a recorded 502.
 Disable fake-ip for the HVF v10 record. Do not invent FULL sha256.
 
-Linux FULL when `BUX_GUEST_PATH` is unset: musl-gcc build of this tree (when
-`musl-gcc` and that rustc target are already present) **or**
-`scripts/e2e/fetch-guest.sh`. Do not silently accept a leftover v9 ELF. After
-musl-build/fetch, the ELF must still contain the literal bytes
-`bux-guest-protocol-v10`. Missing stamp, missing ELF, or a dynamic ELF exits
-before `bux create`. Validation is 64-bit LE, host guest arch x86_64/aarch64,
-no `PT_INTERP`, plus that stamp.
+Linux FULL: musl-gcc build of this tree (when `musl-gcc` and that rustc
+target are already present); otherwise the engine fetches `guest-v*`. Do not
+silently accept a leftover v9 ELF. After musl-build/fetch, the ELF must still
+contain the literal bytes `bux-guest-protocol-v10`. Missing stamp, missing
+ELF at create, or a dynamic ELF exits before a VM starts. Validation is
+64-bit LE, host guest arch x86_64/aarch64, no `PT_INTERP`, plus that stamp.
 
-FULL needs python3 for the guest ELF validator and Go for `bux-shim-bin`;
-Darwin FULL still needs `BUX_GUEST_PATH` and `gh` authenticated to `qntx/bux`
-with `workflow` if they must dispatch; `gh release download guest-<sha>` is
-enough when that Release exists; `gh run download` is enough when a matching
-run already exists.
+FULL needs python3 for the guest ELF validator and Go for `bux-shim-bin`.
 
 CD `cd.yml` musl guest:
 
-- Release tag: `guest-<40-char-sha>` of that commit (never `v0.4.1`)
-- Release asset **file**: `bux-guest-<triple>`
+- Release tag: `guest-v{crates/bux-guest version}` (never `v0.8.0`, never `guest-<sha>`)
+- Release asset **file**: `bux-guest-<triple>` and `bux-guest-<triple>.sha256`
 - GHA artifact **name**: `guest-<triple>` (never `bux-guest-*`)
 - **file** inside the artifact: `bux-guest-<triple>`
-- sibling after fetch: `target/debug/bux-guest-<triple>`
+- engine dest: `bux-pkg/guest-v{GUEST_VERSION}/bux-guest-<triple>`
+- in-tree Linux musl-gcc sibling: `target/debug/bux-guest-<triple>`
 
-After this merge is on `main`, tag the guest of that commit:
+After this merge is on `main`, tag the guest of that commit (`guest-v` plus
+`crates/bux-guest/Cargo.toml` `version`; `0.1.0` today):
 
 ```bash
 git fetch origin
 git checkout main
 git pull --ff-only origin main
-SHA="$(git rev-parse HEAD)"
-git tag "guest-${SHA}" "${SHA}"
-git push origin "guest-${SHA}"
+git tag guest-v0.1.0
+git push origin guest-v0.1.0
 ```
 
-Do not vendor the ELF in git. Do not fill the FULL record above from a
-Release download.
-
-`scripts/e2e/fetch-guest.sh` prefers the `guest-<sha>` Release asset, else
-polls the `guest-<triple>` workflow artifact for this `HEAD`, and copies the
-file next to `target/debug/bux`. Dest is `chmod 0755` after copy; the script
-exits 1 if not `-x`. The same `bux-guest-protocol-v10` bytes check as
-`full_common.sh` applies: a v9 ELF is rejected even if `guest-<sha>` exists.
-Do not `gh run download -n bux-guest-*`.
+Do not vendor the ELF in git. Do not invent a FULL sha256 row.
 
 Pin `$BUX_E2E_IMAGE` if alpine wget/httpd is missing. There is no in-repo
 custom e2e image.
@@ -343,9 +329,9 @@ Item 17 is not in the Layer 1 or clone FULL rows.
 - `bux serve openapi` (JSON document including `/v1/health` and sandbox routes)
 - no hypervisor, no `bux-shim-bin` / guest ELF
 
-`BUX_E2E_FULL=1 ./scripts/e2e/serve.sh` is the same cli+shim+guest pin as
-`smoke.sh` (Darwin: `BUX_GUEST_PATH` from `scripts/e2e/fetch-guest.sh` of this
-HEAD; Linux: musl-gcc or fetch). Skip FULL when `host.virtualization` is not
+`BUX_E2E_FULL=1 ./scripts/e2e/serve.sh` is the same cli+shim pin as
+`smoke.sh` (Darwin: engine `guest-v*` fetch; Linux: musl-gcc or engine fetch).
+Skip FULL when `host.virtualization` is not
 true. Capture binary `./target/debug/bux`. Pin `$BUX_HOME` without substring
 `bux-e2e` if the data dir must survive script exit. Do not invent an HVF/KVM
 sha256 row here — record a real run in a later docs PR.

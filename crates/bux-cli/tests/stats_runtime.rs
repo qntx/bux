@@ -40,9 +40,24 @@ fn system_info_is_flock_free_stats_runtime_takes_lock() {
             serde_json::from_slice(&info.stdout).expect("system info json");
         let info_obj = info_json.as_object().expect("system info object");
         assert!(
-            info_obj.contains_key("host") && info_obj.contains_key("data_dir"),
+            info_obj.contains_key("host")
+                && info_obj.contains_key("data_dir")
+                && info_obj.contains_key("payload_dir"),
             "system info shape: {info_obj:?}"
         );
+        let env = info_obj
+            .get("env")
+            .and_then(serde_json::Value::as_object)
+            .expect("system info env");
+        for banned in ["BUX_SHIM_PATH", "BUX_GUEST_PATH", "BUX_GUEST_DIR"] {
+            assert!(
+                !env.contains_key(banned),
+                "system info must not document {banned}: {env:?}"
+            );
+        }
+        for required in ["BUX_HOME", "BUX_LISTEN", "BUX_API_KEYS"] {
+            assert!(env.contains_key(required), "missing {required} in {env:?}");
+        }
         for key in RUNTIME_METRIC_KEYS {
             assert!(
                 !info_obj.contains_key(key),

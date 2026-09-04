@@ -47,6 +47,19 @@ pub(crate) async fn create(
     validate(&opts)?;
     require_virtualization(HostInfo::probe().virtualization)?;
 
+    on_progress("fetching bux payload");
+    {
+        let shim = rt.shim_path.clone();
+        let guest = rt.guest_path.clone();
+        let jailer = opts.security.jailer;
+        let resolved = tokio::task::spawn_blocking(move || {
+            crate::payload::ensure_blocking(shim.as_deref(), guest.as_deref(), jailer, true)
+        })
+        .await
+        .map_err(io::Error::other)??;
+        rt.store_payload(resolved);
+    }
+
     on_progress("resolving image");
     let resolved = resolve_image(rt, &opts.image, &on_progress).await?;
 
@@ -164,7 +177,10 @@ async fn resolve_image(
                 let rootfs = pull.rootfs.clone();
                 let digest = pull.digest.replace(':', "-");
                 let pull_ref = pull.reference.clone();
-                let guest_path = rt.guest_path.clone();
+                let guest_path = rt
+                    .cached_payload()
+                    .map(|p| p.guest)
+                    .or_else(|| rt.guest_path.clone());
                 tokio::task::spawn_blocking(move || -> Result<PathBuf> {
                     info!(image = %pull_ref, "creating ext4 base image from rootfs");
                     disk.create_managed_base(&rootfs, &digest, guest_path.as_deref())

@@ -1,5 +1,4 @@
-//! Host probes that wrap libkrun. The shim crate is the only product
-//! crate that links libkrun; embedders query through this module.
+//! Host probes that wrap libkrun.
 
 #[cfg(unix)]
 pub use bux_krun::{Feature, KernelFormat, LogStyle, SyncMode};

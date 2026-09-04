@@ -24,11 +24,14 @@ bux-oci.workspace = true
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 time = "0.3"
 bux-qcow2.workspace = true
-bux-shim.workspace = true
+bux-shim = { workspace = true, default-features = false }
 dirs.workspace = true
+flate2.workspace = true
 nix.workspace = true
 rusqlite.workspace = true
-tokio = { workspace = true, features = ["io-util", "net", "time"] }
+tar.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "rt", "time"] }
+ureq.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

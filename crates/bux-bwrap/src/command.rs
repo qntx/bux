@@ -6,7 +6,7 @@
 //! subsequent chaining is infallible.
 
 use std::ffi::{OsStr, OsString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::discover::path;
@@ -97,9 +97,21 @@ impl BwrapCommand {
     /// Returns [`Error::NotFound`] if `bwrap` cannot be located via any
     /// of the strategies in [`crate::path`].
     pub fn new() -> Result<Self> {
-        let bwrap = path().ok_or(Error::NotFound)?.to_path_buf();
+        Self::from_path(path().ok_or(Error::NotFound)?)
+    }
+
+    /// Create a builder around an existing `bwrap` binary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NotFound`] if `bwrap` is not a regular file.
+    pub fn from_path(bwrap: impl AsRef<Path>) -> Result<Self> {
+        let bwrap = bwrap.as_ref();
+        if !bwrap.is_file() {
+            return Err(Error::NotFound);
+        }
         Ok(Self {
-            bwrap,
+            bwrap: bwrap.to_path_buf(),
             bwrap_args: Vec::new(),
             program: None,
             program_args: Vec::new(),
@@ -219,7 +231,7 @@ impl BwrapCommand {
 
     /// Return the resolved `bwrap` binary path.
     #[must_use]
-    pub fn bwrap_path(&self) -> &std::path::Path {
+    pub fn bwrap_path(&self) -> &Path {
         &self.bwrap
     }
 }
@@ -241,5 +253,26 @@ mod tests {
         assert_eq!(Namespace::User.flag(), "--unshare-user");
         assert_eq!(Namespace::Cgroup.flag(), "--unshare-cgroup");
         assert_eq!(Namespace::Net.flag(), "--unshare-net");
+    }
+
+    #[test]
+    fn from_path_missing_is_not_found() {
+        let err = BwrapCommand::from_path("/no/such/bux-bwrap-binary").unwrap_err();
+        assert!(
+            matches!(err, Error::NotFound),
+            "missing path must be NotFound: {err}"
+        );
+    }
+
+    #[test]
+    fn from_path_existing_file_records_path() {
+        let dir = std::env::temp_dir().join(format!("bux-bwrap-from-path-{}", std::process::id()));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bwrap");
+        std::fs::write(&path, b"dummy-bwrap").unwrap();
+        let cmd = BwrapCommand::from_path(&path).unwrap();
+        assert_eq!(cmd.bwrap_path(), path.as_path());
+        drop(std::fs::remove_dir_all(&dir));
     }
 }

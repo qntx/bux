@@ -47,37 +47,21 @@ HTTP default is deny. Two entry points, one engine type.
 
 ## Install
 
-Product artifact is the GitHub Release tarball (`v*` tags), not crates.io.
-
-| Host | Asset |
-|------|--------|
-| Linux x86_64 | `bux-<ver>-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux aarch64 | `bux-<ver>-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS aarch64 | `bux-<ver>-aarch64-apple-darwin.tar.gz` |
-
 ```bash
-tar xf bux-*-x86_64-unknown-linux-gnu.tar.gz
-./bux system info
+curl -fsSL https://sh.qntx.org/bux | sh
+bux serve start --api-key grok:devsecret
 ```
 
-Members are at archive root (`tar czf … -C "$staging" .`). Run `./bux` from
-the directory that received the extract.
+| Host | Target |
+|------|--------|
+| Linux x86_64 | `x86_64-unknown-linux-gnu` |
+| Linux aarch64 | `aarch64-unknown-linux-gnu` |
+| macOS aarch64 | `aarch64-apple-darwin` |
 
-Extracted layout (Linux `.so` / Darwin `.dylib`; keep `libkrun*` next to `bux`):
-
-```text
-bux
-bux-shim
-bux-guest-<linux-musl-triple>
-libkrun*
-libkrunfw*
-LICENSE-MIT
-LICENSE-APACHE
-```
-
-Linux binaries stamp `DT_RPATH` `$ORIGIN` (this repo’s `.cargo/config.toml`).
-Downstream Linux embedders must set the same rustflag. Darwin uses
-`@loader_path`; embedders do not need rpath rustflags.
+Product is the GitHub `v*` tarball, not crates.io. The installer extracts it
+into `bux-pkg/{ver}-{target}/` and points `~/.local/bin/bux` at that payload
+`bux` (Linux: `${XDG_DATA_HOME:-$HOME/.local/share}/bux-pkg`; macOS:
+`~/Library/Application Support/bux-pkg`). Payload is not `BUX_HOME`.
 
 Operator path, 412, Busy flock, data-dir sizing, rollback:
 [docs/serve.md](docs/serve.md).
@@ -88,7 +72,7 @@ One process owns one data dir. `Runtime::open` takes an exclusive flock;
 a second `bux serve start` (or `bux create`) on the same `BUX_HOME` is `Busy`.
 
 ```bash
-./bux serve start --api-key-file /etc/bux/keys
+bux serve start --api-key-file /etc/bux/keys
 ```
 
 Omitted `--listen` is `127.0.0.1:8080` and
@@ -124,9 +108,9 @@ verbs on that `BUX_HOME` work.
 | Variable | Purpose |
 |----------|---------|
 | `BUX_HOME` | Runtime data directory (lock, SQLite, disks, volumes, socks) |
-| `BUX_SHIM_PATH` | Absolute path to `bux-shim` |
-| `BUX_GUEST_PATH` | Absolute path to a static Linux `bux-guest` ELF |
-| `BUX_GUEST_DIR` | Build-time directory of a prebuilt Linux guest ELF |
+| `BUX_LISTEN` | Serve listen specs, comma-separated (`HOST:PORT` or `unix://PATH`) |
+| `BUX_API_KEYS` | Serve API keys as `id:secret` pairs, comma-separated |
+| `PATH` | Locates `bwrap` (Linux jailer fallback), `sandbox-exec` (macOS) |
 
 `bux system info --format json` is flock-free.
 
@@ -136,5 +120,5 @@ verbs on that `BUX_HOME` work.
 |-----|----------|
 | [docs/architecture.md](docs/architecture.md) | Crate map, worker process, isolation layers, native/guest/product tags |
 | [docs/security-model.md](docs/security-model.md) | Current engine isolation + hosted threat model |
-| [docs/serve.md](docs/serve.md) | Tarball, `/dev/kvm`, rpath, flags, data dir, rollback |
+| [docs/serve.md](docs/serve.md) | Payload fetch, `/dev/kvm`, rpath, flags, data dir, rollback |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Build, capture env, FULL procedure, recorded runs |

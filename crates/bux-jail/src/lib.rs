@@ -2,8 +2,9 @@
 //!
 //! The [`Sandbox`] trait abstracts platform-specific sandboxing:
 //! - **Linux**: bubblewrap namespace isolation (via [`bux-bwrap`]) + Landlock (K22).
+//!   Auto-detect without `bwrap` is [`Error::BwrapUnavailable`], not a no-op.
 //! - **macOS**: `sandbox-exec` with a deny-default SBPL profile.
-//! - **Fallback**: bare `Command` with pre-exec hardening only.
+//! - **Explicit [`NoopSandbox`]**: bare `Command` with pre-exec hardening only.
 //!
 //! The default sandbox is auto-detected at runtime. Override via
 //! [`JailConfig::sandbox`].
@@ -22,7 +23,7 @@ mod landlock_setup;
 #[cfg(target_os = "macos")]
 mod seatbelt;
 
-use std::os::unix::io::RawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
@@ -121,8 +122,9 @@ pub struct JailConfig {
     pub watchdog_fd: Option<RawFd>,
     /// Override the default platform sandbox.
     ///
-    /// When `None`, auto-detects: bwrap on Linux, seatbelt on macOS,
-    /// noop otherwise.
+    /// When `None`, auto-detects: bwrap on Linux (fail-closed without
+    /// [`Self::bwrap_path`]), seatbelt on macOS, noop on other Unix.
+    /// Explicit [`NoopSandbox`] is the only way to skip the Linux jailer.
     pub sandbox: Option<Box<dyn Sandbox>>,
     /// File to redirect child stderr to. When `None`, stderr is inherited.
     pub stderr_file: Option<std::fs::File>,
@@ -141,6 +143,8 @@ pub struct JailConfig {
     ///
     /// True when the VM uses virtio-net.
     pub network_host: bool,
+    /// Absolute `bwrap` binary. Required on Linux when the jailer is on.
+    pub bwrap_path: Option<PathBuf>,
 }
 
 /// Result of spawning a shim process inside a sandbox.
@@ -161,10 +165,19 @@ pub struct SpawnResult {
 ///
 /// Returns [`Error::Io`] if the process cannot be spawned,
 /// [`Error::LandlockUnavailable`] when Landlock is required but missing (K22),
+/// [`Error::BwrapUnavailable`] when Linux auto-detect cannot wrap with `bwrap`,
 /// or [`Error::Landlock`] on ruleset construction failure.
+#[allow(
+    unsafe_code,
+    reason = "own the landlock ruleset fd so Drop closes it on every error path"
+)]
 pub fn spawn(shim: &Path, config_path: &Path, config: JailConfig) -> Result<SpawnResult> {
-    let (landlock_fd, landlock_status) = prepare_landlock(&config, shim, config_path)?;
-    let (mut cmd, sandbox_kind) = build_command(shim, config_path, &config);
+    let (mut cmd, sandbox_kind) = build_command(shim, config_path, &config)?;
+    let (landlock_raw, landlock_status) = prepare_landlock(&config, shim, config_path)?;
+    let landlock_owned = landlock_raw.map(|fd| {
+        // SAFETY: `prepare_landlock` yields an exclusively owned ruleset fd.
+        unsafe { OwnedFd::from_raw_fd(fd) }
+    });
     cmd.stdin(Stdio::null());
 
     let watchdog_fd = config.watchdog_fd;
@@ -181,11 +194,12 @@ pub fn spawn(shim: &Path, config_path: &Path, config: JailConfig) -> Result<Spaw
         &mut cmd,
         pre_exec::PreserveFds {
             watchdog: watchdog_fd,
-            landlock: landlock_fd,
+            landlock: landlock_owned.as_ref().map(AsRawFd::as_raw_fd),
         },
         die_with_parent,
     );
     let child = cmd.spawn()?;
+    drop(landlock_owned);
 
     let mac = match sandbox_kind {
         SandboxKind::Seatbelt => LayerStatus::Enforced,
@@ -257,23 +271,36 @@ fn prepare_landlock(
 }
 
 /// Build the sandboxed `Command` using the configured (or auto-detected) sandbox.
-fn build_command(shim: &Path, config_path: &Path, config: &JailConfig) -> (Command, SandboxKind) {
-    // Use explicit sandbox override if provided.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "Linux returns BwrapUnavailable; other platforms always succeed"
+)]
+fn build_command(
+    shim: &Path,
+    config_path: &Path,
+    config: &JailConfig,
+) -> Result<(Command, SandboxKind)> {
     if let Some(ref sandbox) = config.sandbox
         && let Some(cmd) = sandbox.wrap(shim, config_path, config)
     {
-        return (cmd, sandbox.kind());
+        return Ok((cmd, sandbox.kind()));
     }
 
-    // Auto-detect platform sandbox.
     if let Some((cmd, kind)) = platform_sandbox(shim, config_path, config) {
-        return (cmd, kind);
+        return Ok((cmd, kind));
     }
 
-    // Ultimate fallback: noop.
-    let mut cmd = Command::new(shim);
-    cmd.arg(config_path);
-    (cmd, SandboxKind::Noop)
+    #[cfg(target_os = "linux")]
+    {
+        return Err(Error::BwrapUnavailable);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut cmd = Command::new(shim);
+        cmd.arg(config_path);
+        Ok((cmd, SandboxKind::Noop))
+    }
 }
 
 /// Try the platform-native sandbox.
@@ -300,4 +327,120 @@ fn platform_sandbox(
 
     let _ = (shim, config_path, config);
     None
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "unit tests")]
+mod tests {
+    use super::*;
+
+    fn jail(bwrap_path: Option<PathBuf>) -> JailConfig {
+        JailConfig {
+            rootfs: None,
+            root_disk: None,
+            readonly_paths: vec![],
+            socks_dir: PathBuf::from("/tmp/bux-socks"),
+            virtiofs_paths: vec![],
+            watchdog_fd: None,
+            sandbox: None,
+            stderr_file: None,
+            landlock: false,
+            allow_degraded_security: false,
+            die_with_parent: true,
+            network_host: false,
+            bwrap_path,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_auto_detect_without_bwrap_is_unavailable() {
+        let err = build_command(
+            Path::new("/usr/bin/true"),
+            Path::new("/tmp/cfg.json"),
+            &jail(None),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::BwrapUnavailable),
+            "missing bwrap must not fall through to Noop: {err}"
+        );
+        assert!(
+            err.to_string().contains("sh.qntx.org/bux"),
+            "error must name the install URL: {err}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fd_count() -> usize {
+        std::fs::read_dir("/proc/self/fd")
+            .map(|d| d.count())
+            .unwrap_or(0)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn spawn_without_bwrap_does_not_leak_landlock_fd() {
+        let cfg = JailConfig {
+            landlock: true,
+            ..jail(None)
+        };
+        let before = fd_count();
+        let err = spawn(Path::new("/usr/bin/true"), Path::new("/tmp/cfg.json"), cfg).unwrap_err();
+        assert!(
+            matches!(err, Error::BwrapUnavailable),
+            "auto-detect without bwrap must fail closed: {err}"
+        );
+        let after = fd_count();
+        assert_eq!(
+            after, before,
+            "BwrapUnavailable must not leak the landlock ruleset fd"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_explicit_noop_still_wraps() {
+        let mut cfg = jail(None);
+        cfg.sandbox = Some(Box::new(NoopSandbox));
+        let (cmd, kind) =
+            build_command(Path::new("/usr/bin/true"), Path::new("/tmp/cfg.json"), &cfg).unwrap();
+        assert_eq!(kind, SandboxKind::Noop);
+        assert_eq!(cmd.get_program(), "/usr/bin/true");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_auto_detect_with_bwrap_path_is_bwrap() {
+        let (cmd, kind) = build_command(
+            Path::new("/usr/bin/true"),
+            Path::new("/tmp/cfg.json"),
+            &jail(Some(PathBuf::from("/bin/true"))),
+        )
+        .unwrap();
+        assert_eq!(kind, SandboxKind::Bwrap);
+        assert_eq!(cmd.get_program(), "/bin/true");
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn non_linux_auto_detect_without_bwrap_is_noop_or_seatbelt() {
+        let (cmd, kind) = build_command(
+            Path::new("/usr/bin/true"),
+            Path::new("/tmp/cfg.json"),
+            &jail(None),
+        )
+        .unwrap();
+        assert!(
+            matches!(kind, SandboxKind::Noop | SandboxKind::Seatbelt),
+            "non-Linux must not require bwrap: {kind:?}"
+        );
+        let program = cmd.get_program();
+        assert!(
+            program == "/usr/bin/true"
+                || program == "sandbox-exec"
+                || program == "/usr/bin/sandbox-exec",
+            "program must be shim or sandbox-exec: {program:?}"
+        );
+    }
 }

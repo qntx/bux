@@ -80,13 +80,28 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   leftover="${leftover_root}/target/debug/bux-guest-${musl_triple}"
   mkdir -p "$(dirname "${leftover}")"
   write_fixture "${leftover}" 1
+  (
+    ROOT="${leftover_root}"
+    unset BUX_GUEST_PATH BUX_SHIM_PATH
+    pin_full_guest
+  ) || fail "Darwin leftover v10 ELF must pin via sibling lookup"
+
+  write_fixture "${leftover}" 0
   rc=0
   (
     ROOT="${leftover_root}"
-    unset BUX_GUEST_PATH
+    unset BUX_GUEST_PATH BUX_SHIM_PATH
     pin_full_guest
   ) && rc=0 || rc=$?
-  [[ "${rc}" -ne 0 ]] || fail "Darwin leftover ELF must not pin without BUX_GUEST_PATH"
+  [[ "${rc}" -ne 0 ]] || fail "Darwin leftover v9 ELF must fail stamp validation"
+
+  empty_root="${T}/empty"
+  mkdir -p "${empty_root}/target/debug"
+  (
+    ROOT="${empty_root}"
+    unset BUX_GUEST_PATH BUX_SHIM_PATH
+    pin_full_guest
+  ) || fail "Darwin FULL without leftover ELF must not require BUX_GUEST_PATH"
 fi
 
 if refuse_fake_ip_example_com "198.18.0.160"; then

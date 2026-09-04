@@ -9,8 +9,12 @@ keywords = ["vm", "libkrun", "sandbox", "shim"]
 categories = ["virtualization", "os"]
 readme = "README.md"
 
+[features]
+default = ["krun"]
+krun = ["dep:bux-krun", "dep:bux-seccomp"]
+
 [dependencies]
-bux-krun = { workspace = true }
+bux-krun = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -20,7 +24,7 @@ libc = { workspace = true }
 nix = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-bux-seccomp = { workspace = true }
+bux-seccomp = { workspace = true, optional = true }
 
 [lints]
 workspace = true

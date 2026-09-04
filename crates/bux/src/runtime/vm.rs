@@ -192,9 +192,9 @@ pub struct Vm {
     volumes: VolumeManager,
     /// When this VM was spawned (for uptime tracking).
     spawned_at: std::time::Instant,
-    /// Unresolved shim override (`Some` fail-closed; `None` searches).
+    /// Unresolved shim override (`Some` fail-closed; `None` uses payload resolution).
     pub(crate) shim_path: Option<PathBuf>,
-    /// Unresolved guest override (`Some` fail-closed; `None` searches).
+    /// Unresolved guest override (`Some` fail-closed; `None` uses payload resolution).
     pub(crate) guest_path: Option<PathBuf>,
 }
 
@@ -538,7 +538,23 @@ impl Vm {
             )));
         }
 
-        prepare_restart_config(&mut self.state.config, self.guest_path.as_deref())?;
+        let shim_opt = self.shim_path.clone();
+        let guest_opt = self.guest_path.clone();
+        let jailer = self.state.config.security.jailer;
+        let need_guest =
+            self.state.config.rootfs.is_some() || self.state.config.base_disk.is_some();
+        let payload = tokio::task::spawn_blocking(move || {
+            crate::payload::ensure_blocking(
+                shim_opt.as_deref(),
+                guest_opt.as_deref(),
+                jailer,
+                need_guest,
+            )
+        })
+        .await
+        .map_err(io::Error::other)??;
+        let guest = need_guest.then_some(payload.guest.as_path());
+        prepare_restart_config(&mut self.state.config, guest)?;
 
         let live = if opts.secrets.is_empty() {
             let held = {
@@ -594,7 +610,8 @@ impl Vm {
             &socks_dir,
             network,
             gvproxy,
-            self.shim_path.as_deref(),
+            Some(payload.shim.as_path()),
+            payload.bwrap.as_deref(),
         )?;
 
         self.state.config.security_status = shim.security.clone();
