@@ -7,7 +7,8 @@ VMs). Serve is in this 0.8.0 workspace clap; the product tag is not 1.0.
 1.0 is **hosted + FULL proof**, not library-only. See
 [`docs/serve.md`](../../docs/serve.md) and the root [`README.md`](../../README.md).
 
-Build: `cargo build -p bux-cli` then `cargo build -p bux-shim-bin`. Capture env, tarball layout,
+Install: [`curl -fsSL https://sh.qntx.org/bux | sh`](../../README.md#install).
+Build: `cargo build -p bux-cli` then `cargo build -p bux-shim-bin`. Capture env
 and FULL procedure: [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## Commands

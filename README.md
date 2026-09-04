@@ -47,36 +47,21 @@ HTTP default is deny. Two entry points, one engine type.
 
 ## Install
 
-Product artifact is the GitHub Release tarball (`v*` tags), not crates.io.
-
-| Host | Asset |
-|------|--------|
-| Linux x86_64 | `bux-<ver>-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux aarch64 | `bux-<ver>-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS aarch64 | `bux-<ver>-aarch64-apple-darwin.tar.gz` |
-
 ```bash
-tar xf bux-*-x86_64-unknown-linux-gnu.tar.gz
-./bux system info
+curl -fsSL https://sh.qntx.org/bux | sh
+bux serve start --api-key grok:devsecret
 ```
 
-Members are at archive root (`tar czf … -C "$staging" .`). Run `./bux` from
-the directory that received the extract.
+| Host | Target |
+|------|--------|
+| Linux x86_64 | `x86_64-unknown-linux-gnu` |
+| Linux aarch64 | `aarch64-unknown-linux-gnu` |
+| macOS aarch64 | `aarch64-apple-darwin` |
 
-Extracted layout (Linux `.so` / Darwin `.dylib`; keep `libkrun*` next to `bux`):
-
-```text
-bux
-bux-shim
-bux-guest-<linux-musl-triple>
-libkrun*
-libkrunfw*
-LICENSE-MIT
-LICENSE-APACHE
-```
-
-Linux `bux-shim` stamps `DT_RPATH` `$ORIGIN` (this repo’s `.cargo/config.toml`).
-Darwin uses `@loader_path`. The engine (`crates/bux`) does not link libkrun.
+Product is the GitHub `v*` tarball, not crates.io. The installer extracts it
+into `bux-pkg/{ver}-{target}/` and points `~/.local/bin/bux` at that payload
+`bux` (Linux: `${XDG_DATA_HOME:-$HOME/.local/share}/bux-pkg`; macOS:
+`~/Library/Application Support/bux-pkg`). Payload is not `BUX_HOME`.
 
 Operator path, 412, Busy flock, data-dir sizing, rollback:
 [docs/serve.md](docs/serve.md).
@@ -87,7 +72,7 @@ One process owns one data dir. `Runtime::open` takes an exclusive flock;
 a second `bux serve start` (or `bux create`) on the same `BUX_HOME` is `Busy`.
 
 ```bash
-./bux serve start --api-key-file /etc/bux/keys
+bux serve start --api-key-file /etc/bux/keys
 ```
 
 Omitted `--listen` is `127.0.0.1:8080` and
