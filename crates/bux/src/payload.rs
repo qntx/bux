@@ -23,7 +23,7 @@ use crate::util::sidecar_path;
 use crate::{Error, Result};
 
 /// `crates/bux-guest` Cargo.toml version. Prebuilt tag is `guest-v{GUEST_VERSION}`.
-pub const GUEST_VERSION: &str = "0.1.0";
+pub const GUEST_VERSION: &str = "0.2.0";
 
 const INSTALL_HINT: &str = "install with: curl -fsSL https://sh.qntx.org/bux | sh";
 const PAYLOAD_NOT_FOUND: &str =

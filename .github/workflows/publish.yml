@@ -1,0 +1,34 @@
+name: Publish to crates.io
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    uses: qntx/workflows/.github/workflows/publish-crates.yml@v2.0.0
+    permissions:
+      contents: read
+    with:
+      rust-version: "1.97.1"
+      timeout-minutes: 60
+      packages: >-
+        bux-proto
+        bux-qcow2
+        bux-landlock
+        bux-seccomp
+        bux-bwrap
+        bux-e2fs
+        bux-krun
+        bux-oci
+        bux-jail
+        bux-shim
+        bux-gvproxy
+        bux
+        bux-serve
+        bux-cli
+    secrets:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

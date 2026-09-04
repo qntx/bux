@@ -11,21 +11,12 @@ permissions:
 
 jobs:
   ci:
-    # v2 (6fae2077275e4a757a294c90cbab4f481847b45a)
-    uses: qntx/workflows/.github/workflows/ci-rust.yml@6fae2077275e4a757a294c90cbab4f481847b45a
+    uses: qntx/workflows/.github/workflows/ci-rust.yml@v2
     permissions:
       contents: read
     with:
       rust-version: "1.97.1"
-
-  deny:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      # v2.1.1 (3c634983…) ships cargo-deny 0.20.2; v2.1.0's entrypoint shift is broken.
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
-        with:
-          command: check
+      deny: true
 
   engine-no-krun:
     runs-on: ubuntu-latest
