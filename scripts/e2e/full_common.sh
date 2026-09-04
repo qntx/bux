@@ -129,7 +129,58 @@ e2e_cleanup_bux_home() {
   fi
 }
 
-# Build cli+shim, Darwin codesign, pin guest, put target/debug on PATH.
+# Fail if any address's IPv4 form is in 198.18.0.0/15 (Clash/Surge fake-ip).
+# Live: getaddrinfo("example.com", 443, SOCK_STREAM). Args: injected hosts (tests).
+# IPv4 form: IPv4; else ipv4_mapped; else last 4 bytes of the 16-byte AAAA packed form.
+refuse_fake_ip_example_com() {
+  python3 - "$@" <<'PY'
+import ipaddress, socket, sys
+
+FAKE = ipaddress.ip_network("198.18.0.0/15")
+
+
+def ipv4_form(s):
+    ip = ipaddress.ip_address(s.split("%", 1)[0])
+    if isinstance(ip, ipaddress.IPv4Address):
+        return ip
+    if ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    return ipaddress.IPv4Address(ip.packed[-4:])
+
+
+if len(sys.argv) > 1:
+    hosts = sys.argv[1:]
+    for h in hosts:
+        print(f"example.com injected: {h}", file=sys.stderr)
+else:
+    try:
+        infos = socket.getaddrinfo("example.com", 443, type=socket.SOCK_STREAM)
+    except OSError as e:
+        print(f"FULL refuse: getaddrinfo(example.com, 443) failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    hosts = []
+    for rec in infos:
+        print(f"example.com getaddrinfo: {rec}", file=sys.stderr)
+        hosts.append(rec[4][0])
+
+hit = False
+for h in hosts:
+    v4 = ipv4_form(h)
+    print(f"example.com ipv4_form: {h} -> {v4}", file=sys.stderr)
+    if v4 in FAKE:
+        hit = True
+if hit:
+    print(
+        "FULL refuse: example.com IPv4 form in 198.18.0.0/15. "
+        "Disable fake-ip/MacPacket (hygiene, not a recorded 502). CONTRIBUTING.md",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+
+# Build cli+shim, Darwin codesign, pin guest, fake-ip preflight, PATH.
 pin_full_binaries() {
   echo "building bux-cli and bux-shim-bin (FULL pin)..."
   cargo build -p bux-cli -p bux-shim-bin --manifest-path "${ROOT}/Cargo.toml"
@@ -141,4 +192,5 @@ pin_full_binaries() {
   export PATH="${ROOT}/target/debug:${PATH}"
   export BUX_SHIM_PATH="${ROOT}/target/debug/bux-shim"
   test -x "${BUX_SHIM_PATH}"
+  refuse_fake_ip_example_com
 }

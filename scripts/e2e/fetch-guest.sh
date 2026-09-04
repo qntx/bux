@@ -60,16 +60,17 @@ if machine != expected:
 e_phoff = struct.unpack_from("<Q", data, 32)[0]
 e_phentsize = struct.unpack_from("<H", data, 54)[0]
 e_phnum = struct.unpack_from("<H", data, 56)[0]
-if e_phoff == 0 or e_phentsize == 0 or e_phnum == 0:
-    sys.exit(0)
-for i in range(e_phnum):
-    off = e_phoff + i * e_phentsize
-    end = off + 4
-    if end > len(data):
-        break
-    p_type = struct.unpack_from("<I", data, off)[0]
-    if p_type == 3:
-        sys.exit(1)
+if e_phoff != 0 and e_phentsize != 0 and e_phnum != 0:
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        end = off + 4
+        if end > len(data):
+            break
+        p_type = struct.unpack_from("<I", data, off)[0]
+        if p_type == 3:
+            sys.exit(1)
+if b"bux-guest-protocol-v10" not in data:
+    sys.exit(1)
 sys.exit(0)
 PY
 }
@@ -77,7 +78,7 @@ PY
 install_from() {
   local src="$1"
   if ! validate_guest_elf "${src}"; then
-    echo "downloaded bux-guest-${TRIPLE} failed ELF checks (64-bit LE, host arch, no PT_INTERP)" >&2
+    echo "downloaded bux-guest-${TRIPLE} failed ELF checks (64-bit LE, host arch, no PT_INTERP, bux-guest-protocol-v10)" >&2
     exit 1
   fi
   mkdir -p "${ROOT}/target/debug"
