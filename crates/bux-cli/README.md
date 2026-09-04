@@ -2,7 +2,7 @@
 
 CLI client of the `bux` `Runtime` / `Vm` / `VmOptions` API. Binary name: `bux`.
 `bux serve` is the product surface (one process, one Runtime, many per-agent
-VMs) and is 1.0, not in this 0.8.0 clap.
+VMs). Serve is in this 0.8.0 workspace clap; the product tag is not 1.0.
 
 1.0 is **hosted + FULL proof**, not library-only. See
 [`docs/serve.md`](../../docs/serve.md) and the root [`README.md`](../../README.md).
@@ -42,7 +42,8 @@ List/info commands take `--format table|json` where present.
 `create` is always detach (CLI exits; VM survives). Equivalent to
 `bux run -d IMAGE` with no command override.
 
-`serve start` / `serve openapi` are 1.0 (not in 0.8.0 clap). Spec:
+`serve start` / `serve openapi` are in this 0.8.0 workspace clap; the product
+tag is not 1.0. Spec:
 [`docs/serve.md`](../../docs/serve.md). Local Runtime verbs cannot run
 during serve on the same `BUX_HOME` (exclusive flock → `Busy`).
 `system info` is flock-free. HTTP default network is deny; CLI default
