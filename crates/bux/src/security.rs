@@ -148,10 +148,11 @@ impl HostInfo {
     pub fn probe() -> Self {
         #[cfg(unix)]
         {
-            let caps = bux_jail::checks::check_host();
+            let mut caps = bux_jail::checks::check_host();
+            caps.namespaces = crate::payload::namespaces_available();
             Self {
                 virtualization: caps.virtualization,
-                namespaces: crate::payload::namespaces_available(),
+                namespaces: caps.namespaces,
                 seccomp: caps.seccomp,
                 mandatory_access_control: caps.mandatory_access_control,
                 cgroups: caps.cgroups,
@@ -217,14 +218,37 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "env lock must outlive probe"
+    )]
     fn probe_namespaces_uses_engine_bwrap_lookup() {
+        let mut env = crate::guest::sidecar_env::lock();
+        let empty = tempfile::tempdir().unwrap();
+        env.set("PATH", empty.path());
+        let planted = crate::guest::sidecar_env::Planted::sibling("bwrap", b"planted-bwrap");
+        assert!(
+            planted.path().is_file(),
+            "sibling bwrap must exist for the engine lookup"
+        );
+        assert!(
+            !bux_jail::checks::check_host().namespaces,
+            "PATH-only which(bwrap) must miss when PATH is empty"
+        );
         let h = HostInfo::probe();
-        assert_eq!(
+        assert!(
             h.namespaces,
-            crate::payload::namespaces_available(),
-            "HostInfo.namespaces is overwritten in bux, not bux-jail"
+            "engine lookup must see sibling bwrap: {}",
+            planted.path().display()
+        );
+        assert!(
+            !h.isolation_warnings
+                .iter()
+                .any(|w| w.contains("bubblewrap not found")),
+            "audit must use overwritten namespaces, got {:?}",
+            h.isolation_warnings
         );
     }
 }

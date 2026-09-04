@@ -2,8 +2,9 @@
 //!
 //! The [`Sandbox`] trait abstracts platform-specific sandboxing:
 //! - **Linux**: bubblewrap namespace isolation (via [`bux-bwrap`]) + Landlock (K22).
+//!   Auto-detect without `bwrap` is [`Error::BwrapUnavailable`], not a no-op.
 //! - **macOS**: `sandbox-exec` with a deny-default SBPL profile.
-//! - **Fallback**: bare `Command` with pre-exec hardening only.
+//! - **Explicit [`NoopSandbox`]**: bare `Command` with pre-exec hardening only.
 //!
 //! The default sandbox is auto-detected at runtime. Override via
 //! [`JailConfig::sandbox`].
@@ -22,7 +23,7 @@ mod landlock_setup;
 #[cfg(target_os = "macos")]
 mod seatbelt;
 
-use std::os::unix::io::RawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
@@ -121,8 +122,9 @@ pub struct JailConfig {
     pub watchdog_fd: Option<RawFd>,
     /// Override the default platform sandbox.
     ///
-    /// When `None`, auto-detects: bwrap on Linux, seatbelt on macOS,
-    /// noop otherwise.
+    /// When `None`, auto-detects: bwrap on Linux (fail-closed without
+    /// [`Self::bwrap_path`]), seatbelt on macOS, noop on other Unix.
+    /// Explicit [`NoopSandbox`] is the only way to skip the Linux jailer.
     pub sandbox: Option<Box<dyn Sandbox>>,
     /// File to redirect child stderr to. When `None`, stderr is inherited.
     pub stderr_file: Option<std::fs::File>,
@@ -165,9 +167,17 @@ pub struct SpawnResult {
 /// [`Error::LandlockUnavailable`] when Landlock is required but missing (K22),
 /// [`Error::BwrapUnavailable`] when Linux auto-detect cannot wrap with `bwrap`,
 /// or [`Error::Landlock`] on ruleset construction failure.
+#[allow(
+    unsafe_code,
+    reason = "own the landlock ruleset fd so Drop closes it on every error path"
+)]
 pub fn spawn(shim: &Path, config_path: &Path, config: JailConfig) -> Result<SpawnResult> {
-    let (landlock_fd, landlock_status) = prepare_landlock(&config, shim, config_path)?;
     let (mut cmd, sandbox_kind) = build_command(shim, config_path, &config)?;
+    let (landlock_raw, landlock_status) = prepare_landlock(&config, shim, config_path)?;
+    let landlock_owned = landlock_raw.map(|fd| {
+        // SAFETY: `prepare_landlock` yields an exclusively owned ruleset fd.
+        unsafe { OwnedFd::from_raw_fd(fd) }
+    });
     cmd.stdin(Stdio::null());
 
     let watchdog_fd = config.watchdog_fd;
@@ -184,11 +194,12 @@ pub fn spawn(shim: &Path, config_path: &Path, config: JailConfig) -> Result<Spaw
         &mut cmd,
         pre_exec::PreserveFds {
             watchdog: watchdog_fd,
-            landlock: landlock_fd,
+            landlock: landlock_owned.as_ref().map(AsRawFd::as_raw_fd),
         },
         die_with_parent,
     );
     let child = cmd.spawn()?;
+    drop(landlock_owned);
 
     let mac = match sandbox_kind {
         SandboxKind::Seatbelt => LayerStatus::Enforced,
@@ -357,6 +368,33 @@ mod tests {
         assert!(
             err.to_string().contains("sh.qntx.org/bux"),
             "error must name the install URL: {err}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fd_count() -> usize {
+        std::fs::read_dir("/proc/self/fd")
+            .map(|d| d.count())
+            .unwrap_or(0)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn spawn_without_bwrap_does_not_leak_landlock_fd() {
+        let cfg = JailConfig {
+            landlock: true,
+            ..jail(None)
+        };
+        let before = fd_count();
+        let err = spawn(Path::new("/usr/bin/true"), Path::new("/tmp/cfg.json"), cfg).unwrap_err();
+        assert!(
+            matches!(err, Error::BwrapUnavailable),
+            "auto-detect without bwrap must fail closed: {err}"
+        );
+        let after = fd_count();
+        assert_eq!(
+            after, before,
+            "BwrapUnavailable must not leak the landlock ruleset fd"
         );
     }
 

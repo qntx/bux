@@ -311,6 +311,12 @@ pub(crate) fn spawn_shim(
             "gvproxy and network must both be set or both absent".into(),
         ));
     }
+    #[cfg(target_os = "linux")]
+    if config.security.jailer && bwrap_path.is_none() {
+        return Err(crate::Error::SecurityUnavailable(
+            "bwrap required (jailer); install with: curl -fsSL https://sh.qntx.org/bux | sh".into(),
+        ));
+    }
     let policy = spawn_policy(config);
     let shim_cfg = to_shim_config(config, network, gvproxy);
     let json = shim_cfg
@@ -340,12 +346,6 @@ pub(crate) fn spawn_shim(
         .unwrap_or_default();
 
     let sec = &config.security;
-    #[cfg(target_os = "linux")]
-    if sec.jailer && bwrap_path.is_none() {
-        return Err(crate::Error::SecurityUnavailable(
-            "bwrap required (jailer); install with: curl -fsSL https://sh.qntx.org/bux | sh".into(),
-        ));
-    }
     let sandbox: Option<Box<dyn bux_jail::Sandbox>> = if sec.jailer {
         None
     } else {
@@ -569,6 +569,29 @@ mod tests {
         clippy::significant_drop_tightening,
         reason = "env lock must outlive find_shim"
     )]
+    fn find_shim_none_ignores_env_and_path_decoy() {
+        let mut env = crate::guest::sidecar_env::lock();
+        let _hidden = crate::guest::sidecar_env::Hidden::sibling("bux-shim");
+        let decoy_dir = tempfile::tempdir().unwrap();
+        fs::write(decoy_dir.path().join("bux-shim"), b"decoy-shim").unwrap();
+        env.prepend_path(decoy_dir.path());
+        env.set("BUX_SHIM_PATH", decoy_dir.path().join("bux-shim"));
+
+        let err = find_shim(None).unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, crate::Error::NotFound(_)), "{msg}");
+        assert!(
+            msg.contains("sh.qntx.org/bux"),
+            "None search must name the install URL, not env: {msg}"
+        );
+        assert!(!msg.contains("BUX_SHIM_PATH"), "{msg}");
+    }
+
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "env lock must outlive find_shim"
+    )]
     fn find_shim_some_missing_does_not_consult_path() {
         let mut env = crate::guest::sidecar_env::lock();
         let decoy_dir = tempfile::tempdir().unwrap();
@@ -661,5 +684,32 @@ mod tests {
         fs::write(&planted, b"shim").unwrap();
         let found = find_shim(Some(&planted)).unwrap();
         assert_eq!(found, planted);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn spawn_shim_missing_bwrap_does_not_write_json_or_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("vm.json");
+        let cfg = crate::state::VmConfig {
+            network: NetworkSpec::Disabled,
+            security: crate::security::SecurityOptions::default()
+                .jailer(true)
+                .landlock(false),
+            ..crate::state::VmConfig::default()
+        };
+        let err = spawn_shim(&cfg, &config_path, dir.path(), None, None, None, None).unwrap_err();
+        assert!(
+            matches!(err, crate::Error::SecurityUnavailable(_)),
+            "linux jailer without bwrap must fail closed: {err}"
+        );
+        assert!(
+            !config_path.exists(),
+            "must not write shim JSON before the bwrap check"
+        );
+        assert!(
+            !config_path.with_extension("stderr").exists(),
+            "must not create stderr before the bwrap check"
+        );
     }
 }

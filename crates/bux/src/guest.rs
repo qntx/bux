@@ -455,6 +455,33 @@ pub(crate) mod sidecar_env {
             }
         }
     }
+
+    /// Removes a sibling sidecar for the duration of a test, then restores it.
+    #[must_use]
+    pub(crate) struct Hidden {
+        path: PathBuf,
+        backup: Option<Vec<u8>>,
+    }
+
+    impl Hidden {
+        pub(crate) fn sibling(name: &str) -> Self {
+            let exe = std::env::current_exe().unwrap();
+            let path =
+                crate::util::sidecar_path(&exe, name).unwrap_or_else(|| exe.with_file_name(name));
+            let backup = fs::read(&path).ok();
+            drop(fs::remove_file(&path));
+            Self { path, backup }
+        }
+    }
+
+    impl Drop for Hidden {
+        fn drop(&mut self) {
+            match &self.backup {
+                Some(bytes) => drop(fs::write(&self.path, bytes)),
+                None => drop(fs::remove_file(&self.path)),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -661,6 +688,31 @@ mod tests {
             !image.with_extension("guest-inject").exists(),
             "sidecar *.guest-inject must be gone after inject_into_disk"
         );
+    }
+
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "env lock must outlive resolve"
+    )]
+    fn resolve_none_ignores_env_and_path_decoy() {
+        let mut env = sidecar_env::lock();
+        let _hidden = sidecar_env::Hidden::sibling(&guest_binary_name());
+        let decoy_dir = tempfile::tempdir().unwrap();
+        let decoy_bytes = test_static_guest_elf(b"DECOY-GUEST-ELF!");
+        let decoy = decoy_dir.path().join(guest_binary_name());
+        fs::write(&decoy, &decoy_bytes).unwrap();
+        env.prepend_path(decoy_dir.path());
+        env.set("BUX_GUEST_PATH", &decoy);
+
+        let err = ManagedGuestBinary::resolve(None).unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, Error::NotFound(_)), "{msg}");
+        assert!(
+            msg.contains("sh.qntx.org/bux"),
+            "None search must name the install URL, not env: {msg}"
+        );
+        assert!(!msg.contains("BUX_GUEST_PATH"), "{msg}");
     }
 
     #[test]

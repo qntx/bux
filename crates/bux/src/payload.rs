@@ -34,6 +34,7 @@ const BWRAP_REQUIRED: &str =
 const RELEASE_DOWNLOAD: &str = "https://github.com/qntx/bux/releases/download";
 const FETCH_TIMEOUT: Duration = Duration::from_mins(5);
 const BODY_LIMIT: u64 = 512 * 1024 * 1024;
+const SHA_LIMIT: u64 = 8 * 1024;
 const REDIRECT_HOSTS: &[&str] = &[
     "github.com",
     "objects.githubusercontent.com",
@@ -416,10 +417,10 @@ fn fetch_guest(_target: &str) -> Result<PathBuf> {
 }
 
 fn download_verified(url: &str, sha_url: &str) -> Result<Vec<u8>> {
-    let sha_text = String::from_utf8(http_get(sha_url)?)
+    let sha_text = String::from_utf8(http_get(sha_url, SHA_LIMIT)?)
         .map_err(|_| Error::InvalidConfig("sha256 file is not UTF-8".into()))?;
     let expected = parse_sha256(&sha_text)?;
-    let bytes = http_get(url)?;
+    let bytes = http_get(url, BODY_LIMIT)?;
     let actual = Sha256::digest(&bytes);
     if actual.as_slice() != expected.as_slice() {
         error!(url, "checksum mismatch");
@@ -454,22 +455,23 @@ fn parse_sha256(text: &str) -> Result<[u8; 32]> {
     Ok(out)
 }
 
-fn http_get(url: &str) -> Result<Vec<u8>> {
+fn http_get(url: &str, limit: u64) -> Result<Vec<u8>> {
     let deadline = Instant::now() + FETCH_TIMEOUT;
     let mut delay = Duration::from_secs(1);
-    let mut last = None;
-    for attempt in 0..3 {
-        match http_get_follow(url, deadline) {
+    let mut attempts_left = 3_u8;
+    loop {
+        match http_get_follow(url, deadline, limit) {
             Ok(bytes) => return Ok(bytes),
-            Err(err) if retryable(&err) && attempt < 2 => {
-                last = Some(err);
+            Err(err) => {
+                attempts_left = attempts_left.saturating_sub(1);
+                if attempts_left == 0 || !retryable(&err) {
+                    return Err(err);
+                }
                 sleep_backoff(delay, deadline)?;
                 delay *= 2;
             }
-            Err(err) => return Err(err),
         }
     }
-    Err(last.unwrap_or_else(|| Error::InvalidConfig(format!("fetch failed: {url}"))))
 }
 
 const fn retryable(err: &Error) -> bool {
@@ -488,7 +490,7 @@ fn sleep_backoff(delay: Duration, deadline: Instant) -> Result<()> {
     Ok(())
 }
 
-fn http_get_follow(url: &str, deadline: Instant) -> Result<Vec<u8>> {
+fn http_get_follow(url: &str, deadline: Instant, limit: u64) -> Result<Vec<u8>> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(remaining(deadline)?))
         .max_redirects(0)
@@ -500,8 +502,8 @@ fn http_get_follow(url: &str, deadline: Instant) -> Result<Vec<u8>> {
         if Instant::now() > deadline {
             return Err(Error::InvalidConfig("payload fetch timed out".into()));
         }
-        ensure_host_allowed(&current)?;
-        match read_response(&agent, &current)? {
+        ensure_url_allowed(&current)?;
+        match read_response(&agent, &current, limit)? {
             Fetch::Body(bytes) => return Ok(bytes),
             Fetch::Redirect(next) => current = next,
         }
@@ -516,7 +518,7 @@ enum Fetch {
     Redirect(String),
 }
 
-fn read_response(agent: &ureq::Agent, current: &str) -> Result<Fetch> {
+fn read_response(agent: &ureq::Agent, current: &str, limit: u64) -> Result<Fetch> {
     match agent.get(current).call() {
         Ok(mut resp) => {
             let status = resp.status();
@@ -535,7 +537,7 @@ fn read_response(agent: &ureq::Agent, current: &str) -> Result<Fetch> {
             }
             resp.body_mut()
                 .with_config()
-                .limit(BODY_LIMIT)
+                .limit(limit)
                 .read_to_vec()
                 .map(Fetch::Body)
                 .map_err(|e| map_ureq(e, current))
@@ -564,6 +566,9 @@ fn map_ureq(err: ureq::Error, url: &str) -> Error {
             Error::InvalidConfig(format!("HTTP {code} fetching {url}"))
         }
         ureq::Error::Io(err) => Error::Io(err),
+        ureq::Error::Timeout(_) | ureq::Error::ConnectionFailed | ureq::Error::HostNotFound => {
+            Error::Busy(format!("fetch {url}: {err}"))
+        }
         other => Error::InvalidConfig(format!("fetch {url}: {other}")),
     }
 }
@@ -572,28 +577,24 @@ fn map_status(code: u16, url: &str) -> Result<Vec<u8>> {
     Err(map_ureq(ureq::Error::StatusCode(code), url))
 }
 
-fn ensure_host_allowed(url: &str) -> Result<()> {
-    let host = url_host(url)?;
-    if host_allowed(&host) {
-        return Ok(());
-    }
-    Err(Error::InvalidConfig(format!(
-        "refusing fetch host {host} (not in GitHub allowlist)"
-    )))
-}
-
-fn host_allowed(host: &str) -> bool {
-    REDIRECT_HOSTS.contains(&host)
-        || (cfg!(test) && (host == "127.0.0.1" || host == "localhost" || host == "[::1]"))
-}
-
-fn url_host(url: &str) -> Result<String> {
+fn ensure_url_allowed(url: &str) -> Result<()> {
     let uri: ureq::http::Uri = url
         .parse()
         .map_err(|e| Error::InvalidConfig(format!("invalid url {url}: {e}")))?;
-    uri.host()
-        .map(str::to_owned)
-        .ok_or_else(|| Error::InvalidConfig(format!("url has no host: {url}")))
+    let host = uri
+        .host()
+        .ok_or_else(|| Error::InvalidConfig(format!("url has no host: {url}")))?;
+    let scheme = uri.scheme_str().unwrap_or("");
+    let loopback = host == "127.0.0.1" || host == "localhost" || host == "[::1]";
+    if scheme == "https" && REDIRECT_HOSTS.contains(&host) {
+        return Ok(());
+    }
+    if cfg!(test) && scheme == "http" && loopback {
+        return Ok(());
+    }
+    Err(Error::InvalidConfig(format!(
+        "refusing fetch {scheme}://{host} (HTTPS GitHub allowlist only)"
+    )))
 }
 
 fn resolve_location(current: &str, location: &str) -> Result<String> {
@@ -1044,6 +1045,10 @@ mod tests {
     }
 
     fn complete_tarball() -> Vec<u8> {
+        packed_tarball(true)
+    }
+
+    fn packed_tarball(with_bwrap: bool) -> Vec<u8> {
         let guest = test_static_guest_elf(b"PAYLOAD-GUEST-OK");
         let mut tar = Builder::new(Vec::new());
         tar.follow_symlinks(false);
@@ -1060,7 +1065,9 @@ mod tests {
             append_symlink(&mut tar, "libkrun.so.1", "libkrun.so");
             append_bytes(&mut tar, "libkrunfw.so", b"firmware", 0o644);
             append_symlink(&mut tar, "libkrunfw.so.5", "libkrunfw.so");
-            append_bytes(&mut tar, "bwrap", b"bwrap-bin", 0o755);
+            if with_bwrap {
+                append_bytes(&mut tar, "bwrap", b"bwrap-bin", 0o755);
+            }
         }
         append_bytes(&mut tar, "LICENSE-MIT", b"MIT", 0o644);
         append_bytes(&mut tar, "LICENSE-APACHE", b"APACHE", 0o644);
@@ -1141,6 +1148,28 @@ mod tests {
         );
         assert!(dest.join("LICENSE-MIT").is_file());
         assert!(dest.join("LICENSE-APACHE").is_file());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_archive_without_bwrap_is_incomplete() {
+        let fx = Fixture::new();
+        let bytes = packed_tarball(false);
+        let unpacked = fx.payload_root().join("unpacked");
+        fs::create_dir(&unpacked).unwrap();
+        unpack_allowlisted(&bytes, &unpacked).unwrap();
+        assert!(
+            !product_complete(&unpacked),
+            "Linux completeness requires bwrap"
+        );
+        let dest = fx.payload_root().join("incomplete");
+        let err = extract_product(&bytes, &dest).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidConfig(_)),
+            "extract of jailer-broken tree must fail: {err}"
+        );
+        assert!(err.to_string().contains("incomplete"), "{err}");
+        assert!(!dest.exists(), "must not rename an incomplete extract");
     }
 
     #[test]
@@ -1252,6 +1281,44 @@ mod tests {
         );
         assert!(
             err.to_string().contains("evil.example") || err.to_string().contains("allowlist"),
+            "{err}"
+        );
+        drop(fx);
+    }
+
+    #[test]
+    fn http_github_redirect_is_refused() {
+        let fx = Fixture::new();
+        let target = host_target().unwrap();
+        let (tar_path, sha_path) = product_urls(target);
+        let dummy = b"deadbeef";
+        let mut routes = HashMap::new();
+        routes.insert(
+            sha_path,
+            MockResp {
+                status: 200,
+                location: None,
+                body: format!("{}\n", sha256_hex(dummy)).into_bytes(),
+            },
+        );
+        routes.insert(
+            tar_path,
+            MockResp {
+                status: 302,
+                location: Some("http://github.com/qntx/bux/payload".into()),
+                body: Vec::new(),
+            },
+        );
+        let (base, _h) = serve(routes);
+        let fx = fx.with_release(&base);
+        let err = ensure_blocking(None, None, false, true).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidConfig(_)),
+            "cleartext GitHub hop must fail: {err}"
+        );
+        assert!(
+            err.to_string().contains("http://github.com")
+                || err.to_string().contains("HTTPS GitHub allowlist"),
             "{err}"
         );
         drop(fx);
