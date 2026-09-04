@@ -347,6 +347,18 @@ impl Vm {
         self.db.update_config(&self.state.id, &cfg)
     }
 
+    /// Persist idle auto-stop. HTTP clone/restore apply the worker default;
+    /// engine clone leaves `None` so CLI clones stay policy-off.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database update fails.
+    pub fn set_auto_stop_secs(&self, secs: Option<u64>) -> Result<()> {
+        let mut cfg = self.state.config.clone();
+        cfg.auto_stop_secs = secs;
+        self.db.update_config(&self.state.id, &cfg)
+    }
+
     /// Apply stored workload defaults to an exec request (caller overrides win).
     #[must_use]
     pub fn with_workload_defaults(&self, req: ExecStart) -> ExecStart {

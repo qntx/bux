@@ -683,7 +683,8 @@ pub async fn stats(args: &StatsArgs) -> Result<()> {
 #[cfg(unix)]
 pub async fn clone_box(args: CloneArgs) -> Result<()> {
     let rt = open_runtime()?;
-    let handle = rt.clone(&args.source, args.name).await?;
+    let source = rt.get(&args.source)?;
+    let handle = rt.clone(&source.info().id, args.name).await?;
     println!("{}", handle.info().id);
     Ok(())
 }

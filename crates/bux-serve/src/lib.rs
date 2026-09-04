@@ -578,10 +578,6 @@ mod tests {
             assert!(paths.get(path).is_some(), "{path}");
         }
         assert!(
-            paths.get("/v1/sandboxes/{id}/snapshots").is_none(),
-            "snapshots are a later PR"
-        );
-        assert!(
             v.pointer("/components/schemas/MetricsBody").is_some(),
             "utoipa schema"
         );

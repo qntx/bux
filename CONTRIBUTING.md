@@ -239,12 +239,15 @@ CD `cd.yml` musl guest:
 - **file** inside the artifact: `bux-guest-<triple>`
 - sibling after fetch: `target/debug/bux-guest-<triple>`
 
-After this PR and PR 1 (combined CAfile) are both on `main`:
+After this merge is on `main`, tag the guest of that commit:
 
 ```bash
 git fetch origin
-git tag "guest-$(git rev-parse origin/main)" "$(git rev-parse origin/main)"
-git push origin "guest-$(git rev-parse origin/main)"
+git checkout main
+git pull --ff-only origin main
+SHA="$(git rev-parse HEAD)"
+git tag "guest-${SHA}" "${SHA}"
+git push origin "guest-${SHA}"
 ```
 
 Do not vendor the ELF in git. Do not fill the FULL record above from a

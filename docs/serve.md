@@ -122,7 +122,7 @@ Auth: Bearer on every route except `GET /v1/health`. Compare the token to
 |------|---------|-------------------|
 | `--allow-unrestricted-net` | off | Required for request `"unrestricted": true` |
 | `--max-sandboxes` | 32 per tenant | 429 |
-| `--max-sandboxes-global` | same as `--max-sandboxes` | 429 |
+| `--max-sandboxes-global` | 32 | 429 |
 | `--max-ram-mib` | 2048 per sandbox | 400 |
 | `--max-vcpus` | 4 | 400 |
 | `--max-running-ram-mib` | 8192 (sum Running+Stopping + request) | 429 |
@@ -131,7 +131,6 @@ Auth: Bearer on every route except `GET /v1/health`. Compare the token to
 | `--max-exec-output-bytes` | 1048576 per stream | truncate + `truncated: true`; SIGKILL guest child |
 | `--default-ram-mib` | 512 | default if omitted |
 | `--default-vcpus` | 1 | default if omitted |
-| `--ready-timeout-secs` | 30 | create failure 503/504 with shim stderr tail |
 | `--pull-timeout-secs` | 300 | |
 
 `disk_bytes_used` on metrics is overlays+bases only and is **not** the
@@ -191,8 +190,7 @@ HTTP DELETE of a sandbox: stop, `Runtime::remove` (drops overlay), then
 ## `{id}.stderr`
 
 Shim and guest stderr land at `{data_dir}/socks/{id}.stderr`. CLI: `bux logs`.
-HTTP: `GET /v1/sandboxes/{id}/logs`. Create failure should return 503/504
-with a tail of this file, not hang past `--ready-timeout-secs`.
+HTTP: `GET /v1/sandboxes/{id}/logs`.
 
 ## Restart and rollback
 
@@ -247,7 +245,6 @@ POST   /v1/sandboxes                         # get-or-create by (tenant_id, agen
 GET    /v1/sandboxes                         # this tenant only
 GET    /v1/sandboxes/{id}                    # exact 12-char hex
 POST   /v1/sandboxes/{id}/start
-POST   /v1/sandboxes/{id}/stop
 DELETE /v1/sandboxes/{id}                    # stop+remove+volume rm; 204
 GET    /v1/sandboxes/{id}/logs
 
@@ -269,8 +266,8 @@ mounts, memory snapshot.
 1..=64 (`-` → 400). Same spec → same exact id. Spec mismatch → 409
 `sandbox_exists`. Name occupied by another tenant or a CLI VM → 409
 `name_occupied`. Network omit/`[]` → deny. `auto_stop_secs` default **1800**
-on API create. Sweep every 30 s. Idle clock resets on create, start, exec,
-file PUT/GET.
+on API create, clone, and restore. Sweep every 30 s. Idle clock resets on
+create, start, exec, file PUT/GET. HTTP has no stop route; idle sweep stops.
 
 Exec: collect-only. `timeout_ms` default 30000, min 1, max 300000, **never
 0**. Guest `ExecStart::timeout` kills the guest process. Do not rely on host

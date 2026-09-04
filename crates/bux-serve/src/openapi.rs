@@ -7,6 +7,7 @@ use crate::exec::{ExecRequest, ExecResponse};
 use crate::images::{ImageInfoBody, PullRequest};
 use crate::router::{MeBody, MetricsBody};
 use crate::sandboxes::{CreateRequest, SandboxBody};
+use crate::snapshots::{AgentRequest, CreateSnapshotRequest, SnapshotBody};
 use crate::state::Limits;
 
 struct BearerAuth;
@@ -49,6 +50,11 @@ impl Modify for BearerAuth {
         crate::images::list_images,
         crate::images::pull_image,
         crate::images::delete_image,
+        crate::snapshots::list_snapshots,
+        crate::snapshots::create_snapshot,
+        crate::snapshots::delete_snapshot,
+        crate::snapshots::restore_snapshot,
+        crate::snapshots::clone_one,
     ),
     components(schemas(
         Limits,
@@ -60,6 +66,9 @@ impl Modify for BearerAuth {
         ExecResponse,
         PullRequest,
         ImageInfoBody,
+        CreateSnapshotRequest,
+        AgentRequest,
+        SnapshotBody,
     )),
     tags(
         (name = "Worker", description = "Health, config, identity, metrics"),

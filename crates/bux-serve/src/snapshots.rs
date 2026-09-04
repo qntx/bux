@@ -9,11 +9,14 @@ use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use bux::{Runtime, SnapshotInfo, Vm, VolumeMount};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::auth::Tenant;
 use crate::error::{ApiError, JsonBody};
 use crate::ids::{sandbox_name, validate_agent_id, workspace_volume_name};
-use crate::sandboxes::{SandboxBody, WORKSPACE_GUEST_PATH, admit, load_owned};
+use crate::sandboxes::{
+    DEFAULT_AUTO_STOP_SECS, SandboxBody, WORKSPACE_GUEST_PATH, admit, load_owned,
+};
 use crate::state::AppState;
 
 pub(crate) fn routes() -> Router<AppState> {
@@ -33,21 +36,21 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/v1/sandboxes/{id}/clone", post(clone_one))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-struct CreateSnapshotRequest {
+pub(crate) struct CreateSnapshotRequest {
     #[serde(default)]
     name: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-struct AgentRequest {
+pub(crate) struct AgentRequest {
     agent_id: String,
 }
 
-#[derive(Debug, Serialize)]
-struct SnapshotBody {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct SnapshotBody {
     id: String,
     vm_id: String,
     name: Option<String>,
@@ -71,7 +74,19 @@ fn unix_secs(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
-async fn list_snapshots(
+#[utoipa::path(
+    get,
+    path = "/v1/sandboxes/{id}/snapshots",
+    operation_id = "listSnapshots",
+    tag = "Sandboxes",
+    params(("id" = String, Path, description = "Exact 12-char hex sandbox id")),
+    responses(
+        (status = 200, description = "Snapshots for this sandbox", body = [SnapshotBody]),
+        (status = 401, description = "Missing or invalid Bearer token"),
+        (status = 404, description = "Missing or other tenant")
+    )
+)]
+pub(crate) async fn list_snapshots(
     State(state): State<AppState>,
     tenant: Tenant,
     Path(id): Path<String>,
@@ -81,7 +96,22 @@ async fn list_snapshots(
     Ok(Json(snaps.iter().map(SnapshotBody::from_info).collect()))
 }
 
-async fn create_snapshot(
+#[utoipa::path(
+    post,
+    path = "/v1/sandboxes/{id}/snapshots",
+    operation_id = "createSnapshot",
+    tag = "Sandboxes",
+    params(("id" = String, Path, description = "Exact 12-char hex sandbox id")),
+    request_body = CreateSnapshotRequest,
+    responses(
+        (status = 201, description = "Created", body = SnapshotBody),
+        (status = 400, description = "Invalid body"),
+        (status = 401, description = "Missing or invalid Bearer token"),
+        (status = 404, description = "Missing or other tenant"),
+        (status = 409, description = "Duplicate name or no overlay")
+    )
+)]
+pub(crate) async fn create_snapshot(
     State(state): State<AppState>,
     tenant: Tenant,
     Path(id): Path<String>,
@@ -112,7 +142,22 @@ async fn create_snapshot(
     Ok((StatusCode::CREATED, Json(SnapshotBody::from_info(&info))))
 }
 
-async fn delete_snapshot(
+#[utoipa::path(
+    delete,
+    path = "/v1/sandboxes/{id}/snapshots/{sid}",
+    operation_id = "deleteSnapshot",
+    tag = "Sandboxes",
+    params(
+        ("id" = String, Path, description = "Exact 12-char hex sandbox id"),
+        ("sid" = String, Path, description = "Snapshot id")
+    ),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 401, description = "Missing or invalid Bearer token"),
+        (status = 404, description = "Missing, other tenant, or snapshot belongs elsewhere")
+    )
+)]
+pub(crate) async fn delete_snapshot(
     State(state): State<AppState>,
     tenant: Tenant,
     Path((id, sid)): Path<(String, String)>,
@@ -123,7 +168,27 @@ async fn delete_snapshot(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn restore_snapshot(
+#[utoipa::path(
+    post,
+    path = "/v1/sandboxes/{id}/snapshots/{sid}/restore",
+    operation_id = "restoreSnapshot",
+    tag = "Sandboxes",
+    params(
+        ("id" = String, Path, description = "Exact 12-char hex sandbox id"),
+        ("sid" = String, Path, description = "Snapshot id")
+    ),
+    request_body = AgentRequest,
+    responses(
+        (status = 201, description = "Restored sandbox", body = SandboxBody),
+        (status = 400, description = "Invalid body"),
+        (status = 401, description = "Missing or invalid Bearer token"),
+        (status = 404, description = "Missing, other tenant, or snapshot belongs elsewhere"),
+        (status = 409, description = "Name occupied"),
+        (status = 412, description = "No hardware virtualization"),
+        (status = 429, description = "Count, running RAM, or disk cap")
+    )
+)]
+pub(crate) async fn restore_snapshot(
     State(state): State<AppState>,
     tenant: Tenant,
     Path((id, sid)): Path<(String, String)>,
@@ -141,7 +206,24 @@ async fn restore_snapshot(
     finish_spawn(&state.runtime, &tenant, &req.agent_id, &restored)
 }
 
-async fn clone_one(
+#[utoipa::path(
+    post,
+    path = "/v1/sandboxes/{id}/clone",
+    operation_id = "cloneSandbox",
+    tag = "Sandboxes",
+    params(("id" = String, Path, description = "Exact 12-char hex sandbox id")),
+    request_body = AgentRequest,
+    responses(
+        (status = 201, description = "Cloned sandbox", body = SandboxBody),
+        (status = 400, description = "Invalid body"),
+        (status = 401, description = "Missing or invalid Bearer token"),
+        (status = 404, description = "Missing or other tenant"),
+        (status = 409, description = "Name occupied"),
+        (status = 412, description = "No hardware virtualization"),
+        (status = 429, description = "Count, running RAM, or disk cap")
+    )
+)]
+pub(crate) async fn clone_one(
     State(state): State<AppState>,
     tenant: Tenant,
     Path(id): Path<String>,
@@ -177,6 +259,8 @@ fn finish_spawn(
     agent_id: &str,
     vm: &Vm,
 ) -> Result<(StatusCode, Json<SandboxBody>), ApiError> {
+    vm.set_auto_stop_secs(Some(DEFAULT_AUTO_STOP_SECS))
+        .map_err(ApiError::from_engine)?;
     let info = vm.info();
     attach_workspace(runtime, &tenant.id, agent_id, &info.id)?;
     tracing::info!(
@@ -961,6 +1045,32 @@ mod tests {
     }
 
     #[test]
+    fn finish_spawn_sets_http_auto_stop_secs() {
+        let h = harness(Limits::default());
+        plant_owned_stopped(&h, SRC, "a1");
+        let vm = h.runtime.get_exact(SRC).unwrap();
+        let tenant = Tenant {
+            id: "tenant1".into(),
+        };
+        let (status, _) = finish_spawn(&h.runtime, &tenant, "a1", &vm).unwrap();
+        assert_eq!(status, StatusCode::CREATED, "spawned");
+        let cfg: serde_json::Value = serde_json::from_str(
+            &open_db(h.dir.path())
+                .query_row("SELECT config FROM vms WHERE id = ?1", [SRC], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.get("auto_stop_secs")
+                .and_then(serde_json::Value::as_u64),
+            Some(DEFAULT_AUTO_STOP_SECS),
+            "HTTP clone/restore must idle-stop"
+        );
+    }
+
+    #[test]
     fn handlers_never_call_runtime_get() {
         let prod = include_str!("snapshots.rs")
             .split("#[cfg(test)]")
@@ -978,6 +1088,10 @@ mod tests {
         assert!(
             prod.contains("Runtime::clone"),
             "Arc::clone would drop source id"
+        );
+        assert!(
+            prod.contains("set_auto_stop_secs"),
+            "clone/restore must persist HTTP idle-stop"
         );
     }
 

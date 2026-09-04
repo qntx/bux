@@ -19,7 +19,7 @@ use crate::ids::{sandbox_name, validate_agent_id, workspace_volume_name};
 use crate::state::AppState;
 
 pub(crate) const WORKSPACE_GUEST_PATH: &str = "/workspace";
-const DEFAULT_AUTO_STOP_SECS: u64 = 1800;
+pub(crate) const DEFAULT_AUTO_STOP_SECS: u64 = 1800;
 const STOP_WAIT: Duration = Duration::from_secs(10);
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 

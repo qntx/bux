@@ -417,6 +417,9 @@ impl Runtime {
     /// `auto_remove`, and `tenant_id`. Always `detach: true` so CLI/`Runtime`
     /// Drop does not SIGTERM the clone (same process model as `bux create`).
     ///
+    /// `source_id` is the exact primary key (not name, not prefix). CLI
+    /// resolves name/prefix with [`Self::get`] first.
+    ///
     /// `agent_id` is set from `name` when that name is the serve unique form
     /// `a-{tenant_id}-{agent}`. If `name` is `None` (CLI), `agent_id` stays
     /// `None`. Source volumes are not copied; a new `ws-{tenant}-{agent}`
@@ -429,24 +432,23 @@ impl Runtime {
     ///
     /// Returns an error if the source is missing, flatten fails, or create fails.
     pub async fn clone(&self, source_id: &str, name: Option<String>) -> Result<Vm> {
-        let source = self.get(source_id)?;
-        let source_state = source.stored();
+        let opts = self.clone_prepare(source_id, name)?;
+        let handle = self.create(opts).await?;
+        info!(source_id, clone_id = %handle.stored().id, "VM cloned");
+        Ok(handle)
+    }
 
+    /// Exact-id lookup + flatten overlay into `bases/clone-{id}.qcow2` + clone-shaped options.
+    fn clone_prepare(&self, source_id: &str, name: Option<String>) -> Result<VmOptions> {
+        let source = self.get_exact(source_id)?;
+        let source_state = source.stored();
         let clone_id = crate::state::gen_id();
         let clone_base = self
             .disk
             .bases_dir()
             .join(format!("clone-{clone_id}.qcow2"));
         self.disk.flatten_vm_disk(&source_state.id, &clone_base)?;
-
-        let opts = clone_vm_options(&source_state.config, name, clone_base);
-        let handle = self.create(opts).await?;
-        info!(
-            source_id = %source_state.id,
-            clone_id = %handle.stored().id,
-            "VM cloned"
-        );
-        Ok(handle)
+        Ok(clone_vm_options(&source_state.config, name, clone_base))
     }
 
     /// Restore a VM from a snapshot: flatten the snapshot overlay into a new
@@ -459,9 +461,9 @@ impl Runtime {
     /// Not copied: ports, volumes, secrets, security, command, env, workdir,
     /// user, auto-stop/delete, ready timeout, or name (unless `name` is passed).
     ///
-    /// Requires the source VM row. After [`Self::remove`] of the source,
-    /// snapshot rows are dropped (`ON DELETE CASCADE`) and this returns
-    /// [`crate::Error::NotFound`].
+    /// Requires the source VM row, loaded by exact `snapshots.vm_id` (not
+    /// name/prefix). After [`Self::remove`] of the source, snapshot rows are
+    /// dropped (`ON DELETE CASCADE`) and this returns [`crate::Error::NotFound`].
     ///
     /// # Errors
     ///
@@ -489,7 +491,7 @@ impl Runtime {
                 "snapshot disk missing: {snapshot_id}"
             )));
         }
-        let source = self.get(&snap.vm_id)?;
+        let source = self.get_exact(&snap.vm_id)?;
         restore_vm_options(&self.disk, snap_disk, &source.stored().config, name)
     }
 
@@ -970,6 +972,10 @@ mod tests {
         assert!(opts.agent_id.is_none(), "non-serve name leaves agent unset");
         assert!(opts.volumes.is_empty(), "source volumes are not copied");
         assert!(
+            opts.auto_stop_secs.is_none(),
+            "engine clone leaves idle policy off"
+        );
+        assert!(
             matches!(&opts.image, ImageRef::BaseDisk(p) if p == Path::new("/tmp/clone.qcow2")),
             "clone image must be the flattened base"
         );
@@ -1150,6 +1156,129 @@ mod tests {
                 "flattened restore base must be standalone"
             );
         }
+    }
+
+    #[test]
+    fn restore_prepare_uses_exact_source_id_not_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let src_id = "srcsnap000003";
+        let decoy_id = "decoy00000001";
+        let snap_raw = rt.disk.bases_dir().join("snap.raw");
+        fs::write(&snap_raw, vec![0xBB; 4096]).unwrap();
+        let snap_ovl = rt
+            .disk
+            .create_overlay(&snap_raw, crate::disk::DiskFormat::Raw, "snap-src")
+            .unwrap();
+        let snap_path = dir.path().join("snapshots").join("snap1.qcow2");
+        fs::copy(&snap_ovl, &snap_path).unwrap();
+        insert_cfg(
+            &rt,
+            src_id,
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig {
+                ram_mib: 512,
+                ..VmConfig::default()
+            },
+        );
+        rt.db
+            .insert(&VmState {
+                id: decoy_id.to_owned(),
+                name: Some(src_id.to_owned()),
+                pid: wait_dead_pid(),
+                image: None,
+                socket: rt.socks_dir.join(format!("{decoy_id}.sock")),
+                status: Status::Stopped,
+                config: VmConfig {
+                    ram_mib: 2048,
+                    ..VmConfig::default()
+                },
+                created_at: SystemTime::now(),
+            })
+            .unwrap();
+        rt.db
+            .insert_snapshot(&crate::state::SnapshotRow {
+                id: "snap1".into(),
+                vm_id: src_id.into(),
+                name: Some("s".into()),
+                disk_path: snap_path.to_string_lossy().into_owned(),
+                disk_bytes: 4096,
+                created_at: SystemTime::now(),
+            })
+            .unwrap();
+        let by_name = rt.get(src_id).unwrap();
+        assert_eq!(by_name.stored().id, decoy_id, "get prefers name");
+        let opts = rt.restore_prepare("snap1", None).unwrap();
+        assert_eq!(
+            opts.ram_mib, 512,
+            "restore source is snapshot vm_id, not a VM named that id"
+        );
+    }
+
+    #[test]
+    fn clone_prepare_uses_exact_source_id_not_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let src_id = "srcclone00001";
+        let decoy_id = "decoy00000002";
+        let live_raw = rt.disk.bases_dir().join("live.raw");
+        fs::write(&live_raw, vec![0xAA; 8192]).unwrap();
+        rt.disk
+            .create_overlay(&live_raw, crate::disk::DiskFormat::Raw, src_id)
+            .unwrap();
+        insert_cfg(
+            &rt,
+            src_id,
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig {
+                ram_mib: 512,
+                ..VmConfig::default()
+            },
+        );
+        rt.db
+            .insert(&VmState {
+                id: decoy_id.to_owned(),
+                name: Some(src_id.to_owned()),
+                pid: wait_dead_pid(),
+                image: None,
+                socket: rt.socks_dir.join(format!("{decoy_id}.sock")),
+                status: Status::Stopped,
+                config: VmConfig {
+                    ram_mib: 2048,
+                    ..VmConfig::default()
+                },
+                created_at: SystemTime::now(),
+            })
+            .unwrap();
+        let by_name = rt.get(src_id).unwrap();
+        assert_eq!(by_name.stored().id, decoy_id, "get prefers name");
+        let opts = rt.clone_prepare(src_id, None).unwrap();
+        assert_eq!(
+            opts.ram_mib, 512,
+            "clone source is exact id, not a VM named that id"
+        );
+        assert!(
+            opts.auto_stop_secs.is_none(),
+            "engine clone leaves idle policy off"
+        );
+    }
+
+    #[test]
+    fn clone_and_restore_prepare_call_get_exact() {
+        let prod = include_str!("mod.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("prod");
+        assert!(
+            prod.contains("self.get_exact(source_id)"),
+            "clone_prepare must use get_exact"
+        );
+        assert!(
+            prod.contains("self.get_exact(&snap.vm_id)"),
+            "restore_prepare must use get_exact"
+        );
     }
 
     #[test]
