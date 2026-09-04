@@ -17,6 +17,7 @@
     clippy::unwrap_used,
     clippy::unwrap_in_result,
     clippy::let_underscore_must_use,
+    clippy::missing_docs_in_private_items,
     missing_docs,
     unsafe_code,
     reason = "build scripts may panic/expect on unrecoverable setup failures"
@@ -26,6 +27,39 @@ use std::env;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+
+fn go_os(os: &str) -> &'static str {
+    match os {
+        "linux" => "linux",
+        "macos" => "darwin",
+        other => panic!("unsupported GOOS from CARGO_CFG_TARGET_OS={other}"),
+    }
+}
+
+fn go_arch(arch: &str) -> &'static str {
+    match arch {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => panic!("unsupported GOARCH from CARGO_CFG_TARGET_ARCH={other}"),
+    }
+}
+
+fn apply_go_target(cmd: &mut Command) {
+    let os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS");
+    let arch = env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH");
+    cmd.env("CGO_ENABLED", "1");
+    cmd.env("GOOS", go_os(&os));
+    cmd.env("GOARCH", go_arch(&arch));
+    if let Ok(target) = env::var("TARGET") {
+        let key = format!(
+            "CARGO_TARGET_{}_LINKER",
+            target.replace('-', "_").to_ascii_uppercase()
+        );
+        if let Ok(cc) = env::var(&key) {
+            cmd.env("CC", cc);
+        }
+    }
+}
 
 /// Builds libgvproxy from Go sources as a C static archive.
 fn build_gvproxy(source_dir: &Path, output_path: &Path) {
@@ -46,6 +80,7 @@ fn build_gvproxy(source_dir: &Path, output_path: &Path) {
     // Build as C archive (static library).
     let mut cmd = Command::new("go");
     cmd.args(["build", "-buildmode=c-archive"]);
+    apply_go_target(&mut cmd);
 
     if source_dir.join("vendor").exists() {
         cmd.arg("-mod=vendor");

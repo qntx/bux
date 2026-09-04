@@ -108,6 +108,9 @@ jobs:
         with:
           toolchain: 1.97.1
           targets: "${{ matrix.target }}"
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: crates/bux-gvproxy/gvproxy-bridge/go.mod
       - uses: Swatinem/rust-cache@v2
         with: { key: "${{ matrix.target }}" }
       - uses: actions/download-artifact@v8
@@ -133,7 +136,7 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/arm64-cross.sources
           sudo dpkg --add-architecture arm64
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu libcap-ng-dev:arm64
+          sudo apt-get install -y gcc-aarch64-linux-gnu libcap-ng-dev:arm64 libc6-dev:arm64
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
 
       # Separate -p so feature unification does not DT_NEEDED libkrun on bux.
