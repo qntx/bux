@@ -4,6 +4,8 @@ use std::fmt;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+#[cfg(unix)]
+use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
@@ -166,15 +168,22 @@ struct UnixSocketGuard {
     path: PathBuf,
     dev: u64,
     ino: u64,
+    #[allow(dead_code, reason = "cloned fd keeps the bind inode alive")]
+    _pin: OwnedFd,
 }
 
 #[cfg(unix)]
 impl UnixSocketGuard {
-    fn from_bound(path: PathBuf) -> Result<Self> {
-        // Darwin fstat() on a unix socket fd is not the bind-path inode
-        // (`st_dev` is -1). Identify the name by lstat after bind.
+    fn from_bound(path: PathBuf, fd: impl AsFd) -> Result<Self> {
+        // Darwin fstat on the listener fd is not the bind-path inode
+        // (`st_dev` is -1). Pin only stops Linux from reusing the inode.
         let (dev, ino) = path_dev_ino(&path)?;
-        Ok(Self { path, dev, ino })
+        Ok(Self {
+            path,
+            dev,
+            ino,
+            _pin: fd.as_fd().try_clone_to_owned()?,
+        })
     }
 }
 
@@ -228,7 +237,7 @@ fn path_dev_ino(path: &Path) -> io::Result<(u64, u64)> {
 fn bind_unix(path: &Path) -> Result<Bound> {
     prepare_unix_path(path)?;
     let listener = tokio::net::UnixListener::bind(path)?;
-    match UnixSocketGuard::from_bound(path.to_path_buf()) {
+    match UnixSocketGuard::from_bound(path.to_path_buf(), &listener) {
         Ok(guard) => Ok(Bound::Unix {
             listener,
             _guard: guard,
@@ -479,7 +488,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s");
         let listener = UnixListener::bind(&path).unwrap();
-        let guard = UnixSocketGuard::from_bound(path.clone()).unwrap();
+        let guard = UnixSocketGuard::from_bound(path.clone(), &listener).unwrap();
         drop(guard);
         assert!(!path.exists(), "own name unlinked");
         drop(listener);
@@ -492,7 +501,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s");
         let first = UnixListener::bind(&path).unwrap();
-        let guard = UnixSocketGuard::from_bound(path.clone()).unwrap();
+        let guard = UnixSocketGuard::from_bound(path.clone(), &first).unwrap();
         drop(first);
         std::fs::remove_file(&path).unwrap();
         let second = UnixListener::bind(&path).unwrap();

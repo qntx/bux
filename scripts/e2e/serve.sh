@@ -58,11 +58,11 @@ bux serve start --help | grep -q -- '--listen'
 
 echo "==> bux serve openapi"
 openapi="$(bux serve openapi)"
-printf '%s\n' "${openapi}" | grep -q '"openapi"'
-printf '%s\n' "${openapi}" | grep -q '/v1/health'
-printf '%s\n' "${openapi}" | grep -q '/v1/sandboxes'
-printf '%s\n' "${openapi}" | grep -q '/v1/sandboxes/{id}/exec'
-printf '%s\n' "${openapi}" | grep -q '/v1/sandboxes/{id}/snapshots'
+grep -q -- '"openapi"' <<<"${openapi}"
+grep -q -- '/v1/health' <<<"${openapi}"
+grep -q -- '/v1/sandboxes' <<<"${openapi}"
+grep -q -- '/v1/sandboxes/{id}/exec' <<<"${openapi}"
+grep -q -- '/v1/sandboxes/{id}/snapshots' <<<"${openapi}"
 
 if [[ "${BUX_E2E_FULL:-}" != "1" ]]; then
   echo "==> skip full serve e2e (set BUX_E2E_FULL=1 on a local HVF/KVM machine; see CONTRIBUTING.md)"
@@ -71,7 +71,7 @@ if [[ "${BUX_E2E_FULL:-}" != "1" ]]; then
 fi
 
 info_json="$(bux system info --format json)"
-if ! printf '%s\n' "${info_json}" | grep -Eq '"virtualization":[[:space:]]*true'; then
+if ! grep -Eq -- '"virtualization":[[:space:]]*true' <<<"${info_json}"; then
   echo "==> skip full serve e2e (host.virtualization is not true)"
   echo "OK (skipped serve full)"
   exit 0
@@ -294,7 +294,7 @@ echo "==> exec echo"
 exec_sh "${LOOP_ID}" "${KEY1_SEC}" "echo e2e-ok"
 require_http 200 "exec echo"
 test "$(json_get "${RESP}" code)" = "0"
-printf '%s\n' "$(json_get "${RESP}" stdout)" | grep -qx e2e-ok
+grep -qx -- e2e-ok <<<"$(json_get "${RESP}" stdout)"
 
 echo "==> PUT/GET /workspace/x"
 printf 'persist-ok\n' >"${BUX_HOME}/workspace-x"
@@ -331,7 +331,7 @@ REST_ID="$(json_get "${RESP}" id)"
 test "${REST_ID}" != "${LOOP_ID}"
 exec_sh "${REST_ID}" "${KEY1_SEC}" "cat /serve-marker"
 require_http 200 "restore exec marker"
-printf '%s\n' "$(json_get "${RESP}" stdout)" | grep -qx serve-ok
+grep -qx -- serve-ok <<<"$(json_get "${RESP}" stdout)"
 
 echo "==> clone {agent_id} + exec marker"
 post_json "/v1/sandboxes/${LOOP_ID}/clone" "${KEY1_SEC}" \
@@ -341,7 +341,7 @@ CLON_ID="$(json_get "${RESP}" id)"
 test "${CLON_ID}" != "${LOOP_ID}"
 exec_sh "${CLON_ID}" "${KEY1_SEC}" "cat /serve-marker"
 require_http 200 "clone exec marker"
-printf '%s\n' "$(json_get "${RESP}" stdout)" | grep -qx serve-ok
+grep -qx -- serve-ok <<<"$(json_get "${RESP}" stdout)"
 
 http DELETE "/v1/sandboxes/${REST_ID}" "${KEY1_SEC}"
 require_http 204 "DELETE restore"
@@ -386,7 +386,7 @@ start_serve
 exec_sh "${LOOP_ID}" "${KEY1_SEC}" "echo r3-ok"
 require_http 200 "R3 exec"
 test "$(json_get "${RESP}" code)" = "0"
-printf '%s\n' "$(json_get "${RESP}" stdout)" | grep -qx r3-ok
+grep -qx -- r3-ok <<<"$(json_get "${RESP}" stdout)"
 
 echo "==> stop/start file persists (auto-stop then POST /start)"
 wait_status "${IDLE_ID}" "${KEY1_SEC}" stopped 60
