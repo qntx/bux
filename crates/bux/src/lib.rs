@@ -58,7 +58,7 @@ mod volumes;
 mod watchdog;
 
 #[cfg(unix)]
-pub use bux_oci::RegistryAuth;
+pub use bux_oci::{RegistryAuth, canonical_reference};
 pub use bux_proto::ExecStart;
 #[cfg(unix)]
 pub use client::{ExecHandle, ExecOutput, PongInfo};

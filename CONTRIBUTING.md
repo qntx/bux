@@ -1,5 +1,14 @@
 # Contributing to bux
 
+The product is a hosted per-agent sandbox (`bux serve`). The engine
+(`Runtime` / `Vm` / `VmOptions`) is the substrate. **1.0 is hosted + FULL
+proof** (HVF v10 guest from that commit, Linux `/dev/kvm` FULL, load/chaos),
+not library-only. Do not tag `v1.0.0` until that bar is true. Do not invent
+FULL sha256 rows.
+
+Operator docs: root `README.md`, `docs/architecture.md`,
+`docs/security-model.md`, `docs/serve.md`.
+
 ## Build
 
 ```bash
@@ -84,11 +93,19 @@ bux system info --format json
 
 ## Architecture notes
 
-- Product entry: `Runtime` + `Vm` + `VmOptions` (`crates/bux`).
+- Product: hosted per-agent sandbox (`bux serve`). HTTP is a client of
+  `Runtime`; it does not live in `crates/bux`. 1.0 is that worker plus
+  recorded FULL proof, not library-only.
+- Engine: `Runtime` + `Vm` + `VmOptions` (`crates/bux`). Exclusive flock;
+  one process owns `BUX_HOME`. Second serve (or CLI Runtime) on the same
+  dir is `Busy`.
 - Engine boundary: product `VmConfig` → `ShimConfig` → `bux-shim` → libkrun.
 - Managed network: gvproxy virtio-net in the `bux-shim` process (`bux-shim-bin`); no TSI `set_port_map`.
 - Guest agent: postcard protocol v10; Phase A process identity only.
 - Schema: SQLite `user_version` 5 — **no migrations**; wipe `BUX_HOME` on mismatch.
+- Isolation vs host: hardware VM. Isolation vs other agents: one VM per agent.
+- `create` fail-closed: `require_virtualization` before image resolve
+  (`Error::SecurityUnavailable`; HTTP 412).
 
 ## Tests
 
@@ -97,20 +114,23 @@ cargo test -p bux --lib
 cargo test -p bux-proto --lib
 # Host-only smoke (no hypervisor). This is the GitHub-hosted CI gate:
 ./scripts/e2e/smoke.sh
+./scripts/e2e/serve.sh
 # Full VM e2e — documented **manual** gate (HVF recorded; KVM needs /dev/kvm).
 # Never set BUX_E2E_FULL=1 on GitHub-hosted runners.
 BUX_E2E_FULL=1 ./scripts/e2e/smoke.sh
-# Load / chaos — same FULL pin as smoke (cli+shim, guest ELF). Manual HVF/KVM.
+# Load / chaos / serve — same FULL pin as smoke (cli+shim, guest ELF). Manual HVF/KVM.
 # GitHub-hosted CI does not run these; e2e-host.yml stays BUX_E2E_FULL=0.
 BUX_E2E_FULL=1 ./scripts/e2e/load.sh
 BUX_E2E_FULL=1 ./scripts/e2e/chaos.sh
+BUX_E2E_FULL=1 ./scripts/e2e/serve.sh
 ```
 
 `.github/workflows/e2e-host.yml` forces `BUX_E2E_FULL=0` on `ubuntu-latest` and
-`macos-latest`. Host-only is not production proof. `BUX_E2E_FULL=1` is not a CI
-job. GitHub-hosted runners must not set `BUX_E2E_FULL=1`. Self-hosted runners
-can take it later without redesign. `load.sh` and `chaos.sh` are the same
-manual gate, not GitHub-hosted jobs.
+`macos-latest` (`smoke.sh` and `serve.sh` help/openapi). Host-only is not
+production proof. `BUX_E2E_FULL=1` is not a CI job. GitHub-hosted runners must
+not set `BUX_E2E_FULL=1`. Self-hosted runners can take it later without
+redesign. `load.sh`, `chaos.sh`, and `serve.sh` FULL are the same manual gate,
+not GitHub-hosted jobs.
 
 The first green FULL is recorded below on **local HVF (Apple Silicon)**.
 Host CI (`BUX_E2E_FULL=0`) is not that proof. Linux KVM has **no** Layer 1
@@ -189,6 +209,14 @@ ELF must fail before `bux create`. Before fetch, unset `BUX_GUEST_PATH` **and**
 delete leftover `target/debug/bux-guest-*`. Darwin does not compile the guest
 and does not use zig cc.
 
+Before any FULL `bux create`, `pin_full_binaries` calls
+`refuse_fake_ip_example_com`: Python `getaddrinfo("example.com", 443,
+type=SOCK_STREAM)`, log every record, fail if any address's IPv4 form is in
+`198.18.0.0/15` (IPv4; else `ipv4_mapped`; else last 4 bytes of the AAAA
+packed form — macOS translated `::ffff:0:c612:a0` is not
+`::ffff:198.18.0.0/111`). Fake-ip / MacPacket is hygiene, not a recorded 502.
+Disable fake-ip for the HVF v10 record. Do not invent FULL sha256.
+
 Linux FULL when `BUX_GUEST_PATH` is unset: musl-gcc build of this tree (when
 `musl-gcc` and that rustc target are already present) **or**
 `scripts/e2e/fetch-guest.sh`. Do not silently accept a leftover v9 ELF. After
@@ -211,12 +239,15 @@ CD `cd.yml` musl guest:
 - **file** inside the artifact: `bux-guest-<triple>`
 - sibling after fetch: `target/debug/bux-guest-<triple>`
 
-After this PR and PR 1 (combined CAfile) are both on `main`:
+After this merge is on `main`, tag the guest of that commit:
 
 ```bash
 git fetch origin
-git tag "guest-$(git rev-parse origin/main)" "$(git rev-parse origin/main)"
-git push origin "guest-$(git rev-parse origin/main)"
+git checkout main
+git pull --ff-only origin main
+SHA="$(git rev-parse HEAD)"
+git tag "guest-${SHA}" "${SHA}"
+git push origin "guest-${SHA}"
 ```
 
 Do not vendor the ELF in git. Do not fill the FULL record above from a
@@ -225,7 +256,9 @@ Release download.
 `scripts/e2e/fetch-guest.sh` prefers the `guest-<sha>` Release asset, else
 polls the `guest-<triple>` workflow artifact for this `HEAD`, and copies the
 file next to `target/debug/bux`. Dest is `chmod 0755` after copy; the script
-exits 1 if not `-x`. Do not `gh run download -n bux-guest-*`.
+exits 1 if not `-x`. The same `bux-guest-protocol-v10` bytes check as
+`full_common.sh` applies: a v9 ELF is rejected even if `guest-<sha>` exists.
+Do not `gh run download -n bux-guest-*`.
 
 Pin `$BUX_E2E_IMAGE` if alpine wget/httpd is missing. There is no in-repo
 custom e2e image.
@@ -304,8 +337,41 @@ Item 17 is not in the Layer 1 or clone FULL rows.
 - no leftover overlay `$BUX_HOME/disks/vms/{id}.qcow2` for that id
 - no `ulimit` disk-full test
 
+`scripts/e2e/serve.sh` host-only (`BUX_E2E_FULL=0`, GitHub-hosted `e2e-host.yml`):
+
+- `bux serve start --help`
+- `bux serve openapi` (JSON document including `/v1/health` and sandbox routes)
+- no hypervisor, no `bux-shim-bin` / guest ELF
+
+`BUX_E2E_FULL=1 ./scripts/e2e/serve.sh` is the same cli+shim+guest pin as
+`smoke.sh` (Darwin: `BUX_GUEST_PATH` from `scripts/e2e/fetch-guest.sh` of this
+HEAD; Linux: musl-gcc or fetch). Skip FULL when `host.virtualization` is not
+true. Capture binary `./target/debug/bux`. Pin `$BUX_HOME` without substring
+`bux-e2e` if the data dir must survive script exit. Do not invent an HVF/KVM
+sha256 row here — record a real run in a later docs PR.
+
+FULL loop (HTTP, two API keys `t1` / `t2`):
+
+1. `POST /v1/images/pull` alpine (or `$BUX_E2E_IMAGE`)
+2. `POST /v1/sandboxes` twice with the same `agent_id` / image → same exact
+   12-char id (201 then 200)
+3. `POST .../exec` `echo` (stdout `e2e-ok`, code 0)
+4. `PUT`/`GET .../files?path=/workspace/x`
+5. `allow_net: ["127.0.0.1"]` then guest wget example.com **fails**
+6. stop/start: `auto_stop_secs=1` + sweep then `POST .../start`; workspace
+   file persists (HTTP has no stop route; idle sweep is the stop)
+7. `DELETE` removes `{BUX_HOME}/volumes/ws-{tenant}-{agent}`
+8. second tenant GET `{id}` → 404 (same envelope as missing)
+9. SIGTERM the serve process, start again, exec still works (R3 reattach)
+10. after auto-stop, `POST /v1/sandboxes` resume then GET is still `running`
+    (`start_with` idle clock; do not wait a sweep tick with `auto_stop_secs=1`)
+11. `curl --unix-socket` `GET /v1/health` (worker also binds TCP loopback)
+12. snapshot create → restore `{agent_id}` → exec overlay marker
+13. clone `{agent_id}` → exec overlay marker
+14. other tenant 404 on snapshot GET/POST
+
 Schema mismatches require `bux system reset` (or wiping `$BUX_HOME`).
 
 ## Lints
 
-Workspace clippy is strict (`unsafe_code = deny` with crate exceptions). Prefer small, modular PRs along the redesign plan spine.
+Workspace clippy is strict (`unsafe_code = deny` with crate exceptions). Prefer small, modular PRs. Hosted worker and engine stay separate crates.

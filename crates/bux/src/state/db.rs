@@ -212,6 +212,22 @@ impl StateDb {
         Ok(())
     }
 
+    /// Finds a VM by exact primary key (`WHERE id = ?1`). Never prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NotFound`] if no row has this id.
+    pub(crate) fn get_by_id(&self, id: &str) -> Result<VmState> {
+        let conn = self.lock();
+        conn.query_row("SELECT * FROM vms WHERE id = ?1", params![id], row_to_state)
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::NotFound(format!("no VM matching '{id}'"))
+                }
+                other => Error::Db(other),
+            })
+    }
+
     /// Finds a VM by exact name.
     ///
     /// # Errors

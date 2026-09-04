@@ -94,6 +94,10 @@ pub struct VmOptions {
     pub image: ImageRef,
     /// Optional unique name.
     pub name: Option<String>,
+    /// Optional agent identity.
+    pub agent_id: Option<String>,
+    /// Optional tenant identity.
+    pub tenant_id: Option<String>,
     /// vCPUs (default 1).
     pub vcpus: u8,
     /// RAM in MiB (default 512).
@@ -139,6 +143,8 @@ impl VmOptions {
         Self {
             image: image.into(),
             name: None,
+            agent_id: None,
+            tenant_id: None,
             vcpus: 1,
             ram_mib: 512,
             ports: Vec::new(),
@@ -162,6 +168,20 @@ impl VmOptions {
     #[must_use]
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
+        self
+    }
+
+    /// Set agent id.
+    #[must_use]
+    pub fn agent_id(mut self, id: impl Into<String>) -> Self {
+        self.agent_id = Some(id.into());
+        self
+    }
+
+    /// Set tenant id.
+    #[must_use]
+    pub fn tenant_id(mut self, id: impl Into<String>) -> Self {
+        self.tenant_id = Some(id.into());
         self
     }
 
@@ -322,6 +342,8 @@ mod tests {
         assert!(o.env.is_empty());
         assert!(o.workdir.is_none());
         assert!(o.user.is_none());
+        assert!(o.agent_id.is_none());
+        assert!(o.tenant_id.is_none());
         assert!(!o.auto_remove);
         assert!(!o.detach);
     }
@@ -330,6 +352,8 @@ mod tests {
     fn fluent_chain() {
         let o = VmOptions::from_image("alpine")
             .name("n1")
+            .agent_id("agt")
+            .tenant_id("ten")
             .vcpus(2)
             .ram_mib(1024)
             .port("8080:80")
@@ -340,6 +364,8 @@ mod tests {
             .auto_remove(true)
             .detach(true);
         assert_eq!(o.name.as_deref(), Some("n1"));
+        assert_eq!(o.agent_id.as_deref(), Some("agt"));
+        assert_eq!(o.tenant_id.as_deref(), Some("ten"));
         assert_eq!(o.vcpus, 2);
         assert_eq!(o.ram_mib, 1024);
         assert_eq!(o.ports, vec!["8080:80"]);

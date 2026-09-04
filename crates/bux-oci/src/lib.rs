@@ -237,6 +237,24 @@ impl Oci {
         self.store.list_images()
     }
 
+    /// Sum of compressed layer sizes from the image manifest, before `pull_blob`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reference is invalid or the registry request fails.
+    pub async fn manifest_compressed_bytes(&self, image: &str) -> Result<u64> {
+        let reference = parse_reference(image)?;
+        let (manifest, _digest, _config) = self
+            .client
+            .pull_manifest_and_config(&reference, &self.auth)
+            .await?;
+        Ok(manifest
+            .layers
+            .iter()
+            .map(|layer| u64::try_from(layer.size).unwrap_or(0))
+            .sum())
+    }
+
     /// Removes a locally stored image and its extracted rootfs.
     ///
     /// Layer blobs are ref-counted; only orphaned blobs are deleted.
@@ -247,7 +265,11 @@ impl Oci {
     /// or a database/filesystem operation fails.
     pub fn remove(&self, image: &str) -> Result<()> {
         let reference = parse_reference(image)?;
-        self.store.remove_image(&reference.to_string())
+        let ref_str = reference.to_string();
+        if self.store.get_digest(&ref_str)?.is_none() {
+            return Err(OciError::NotFound(ref_str));
+        }
+        self.store.remove_image(&ref_str)
     }
 }
 
@@ -256,6 +278,15 @@ fn parse_reference(image: &str) -> Result<Reference> {
     image
         .parse()
         .map_err(|e: oci_client::ParseError| OciError::InvalidReference(e.to_string()))
+}
+
+/// Parse `image` and return the canonical OCI reference string.
+///
+/// # Errors
+///
+/// Returns [`OciError::InvalidReference`] if `image` is not a valid OCI reference.
+pub fn canonical_reference(image: &str) -> Result<String> {
+    Ok(parse_reference(image)?.to_string())
 }
 
 /// Deserializes the raw OCI config JSON blob into our minimal [`ImageConfig`].
@@ -269,26 +300,16 @@ fn parse_image_config(data: &str) -> Option<ImageConfig> {
     serde_json::from_str::<TopLevel>(data).ok()?.config
 }
 
-/// Platform resolver that always selects `linux/{arch}`.
+/// Platform resolver that selects `linux/{arch}` only.
 ///
-/// VMs always run Linux regardless of the host OS, so we must pull Linux
-/// images even when running on macOS.
+/// VMs always run Linux regardless of the host OS. Wrong-arch and non-linux
+/// entries are not selected.
 fn linux_platform_resolver(platforms: &[oci_client::manifest::ImageIndexEntry]) -> Option<String> {
     let target_arch = target_oci_arch();
-
-    // Prefer exact linux/{arch} match.
     for entry in platforms {
         if let Some(ref p) = entry.platform
             && p.os.to_string() == "linux"
             && p.architecture.to_string() == target_arch
-        {
-            return Some(entry.digest.clone());
-        }
-    }
-    // Fallback: first linux entry regardless of arch.
-    for entry in platforms {
-        if let Some(ref p) = entry.platform
-            && p.os.to_string() == "linux"
         {
             return Some(entry.digest.clone());
         }
@@ -332,4 +353,77 @@ fn dirs_default_store() -> PathBuf {
         }
     }
     PathBuf::from("bux")
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "tests")]
+mod tests {
+    use super::{Oci, RegistryAuth, canonical_reference, linux_platform_resolver, target_oci_arch};
+    use crate::OciError;
+
+    fn index_entry(os: &str, arch: &str, digest: &str) -> oci_client::manifest::ImageIndexEntry {
+        serde_json::from_value(serde_json::json!({
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": digest,
+            "size": 1,
+            "platform": { "architecture": arch, "os": os }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn canonical_reference_library_alias() {
+        let short = canonical_reference("python:slim").unwrap();
+        let long = canonical_reference("docker.io/library/python:slim").unwrap();
+        assert_eq!(
+            short, long,
+            "short and fully-qualified python:slim must canonicalize equally"
+        );
+        assert_eq!(
+            short, "docker.io/library/python:slim",
+            "canonical form must be the docker.io library reference"
+        );
+    }
+
+    #[test]
+    fn linux_platform_resolver_requires_linux_and_host_arch() {
+        let arch = target_oci_arch();
+        let other = if arch == "arm64" { "amd64" } else { "arm64" };
+        let want = "sha256:wanted";
+        let got = linux_platform_resolver(&[
+            index_entry("linux", other, "sha256:wrong"),
+            index_entry("linux", arch, want),
+            index_entry("darwin", arch, "sha256:darwin"),
+        ]);
+        assert_eq!(got.as_deref(), Some(want), "exact linux/arch");
+        assert_eq!(
+            linux_platform_resolver(&[index_entry("linux", other, "sha256:wrong")]),
+            None,
+            "no first-linux fallback"
+        );
+        assert_eq!(
+            linux_platform_resolver(&[index_entry("darwin", arch, "sha256:darwin")]),
+            None,
+            "non-linux"
+        );
+        assert_eq!(linux_platform_resolver(&[]), None, "empty");
+    }
+
+    #[test]
+    fn linux_platform_resolver_has_no_arch_fallback() {
+        let prod = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(
+            !prod.contains("regardless of arch"),
+            "first-linux fallback must stay deleted"
+        );
+        assert!(prod.contains("linux_platform_resolver"), "resolver exists");
+    }
+
+    #[test]
+    fn remove_missing_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let oci = Oci::open_at(dir.path(), RegistryAuth::Anonymous).unwrap();
+        let err = oci.remove("alpine:latest").unwrap_err();
+        assert!(matches!(err, OciError::NotFound(_)), "missing image: {err}");
+    }
 }

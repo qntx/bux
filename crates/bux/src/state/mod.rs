@@ -210,6 +210,14 @@ pub(crate) struct VmConfig {
     /// Detached VM: no watchdog, no parent-death, Runtime Drop does not SIGTERM.
     #[serde(default)]
     pub detach: bool,
+
+    /// Optional agent identity.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+
+    /// Optional tenant identity.
+    #[serde(default)]
+    pub tenant_id: Option<String>,
 }
 
 impl Default for VmConfig {
@@ -242,6 +250,8 @@ impl Default for VmConfig {
             last_activity_at: None,
             last_error: None,
             detach: false,
+            agent_id: None,
+            tenant_id: None,
         }
     }
 }
@@ -317,7 +327,8 @@ pub(crate) fn gen_id() -> String {
             .unwrap_or_default()
             .as_nanos(),
     );
-    format!("{:012x}", h.finish())
+    // {:012x} is minimum width; mask to 48 bits so the hex is always exactly 12.
+    format!("{:012x}", h.finish() & 0xffff_ffff_ffff_u64)
 }
 
 #[cfg(unix)]
@@ -405,6 +416,41 @@ mod tests {
 
         // No match → NotFound.
         assert!(db.get_by_id_prefix("zzz").is_err());
+    }
+
+    #[test]
+    fn get_by_id_is_exact_only() {
+        let db = open_test_db();
+        db.insert(&test_vm("abc123def456", Some("alpha"))).unwrap();
+        db.insert(&test_vm("abc999000111", None)).unwrap();
+
+        assert_eq!(db.get_by_id("abc123def456").unwrap().id, "abc123def456");
+        let ambiguous_prefix = db.get_by_id("abc").unwrap_err();
+        assert!(
+            matches!(ambiguous_prefix, crate::Error::NotFound(_)),
+            "exact id lookup must not prefix-match, got {ambiguous_prefix:?}"
+        );
+        assert!(
+            !matches!(ambiguous_prefix, crate::Error::Ambiguous(_)),
+            "exact id lookup must not be Ambiguous, got {ambiguous_prefix:?}"
+        );
+
+        let unique_prefix = db.get_by_id("abc123def").unwrap_err();
+        assert!(
+            matches!(unique_prefix, crate::Error::NotFound(_)),
+            "unique prefix must not match, got {unique_prefix:?}"
+        );
+        assert_eq!(
+            db.get_by_id_prefix("abc123def").unwrap().id,
+            "abc123def456",
+            "prefix API still resolves a unique prefix"
+        );
+
+        let by_name = db.get_by_id("alpha").unwrap_err();
+        assert!(
+            matches!(by_name, crate::Error::NotFound(_)),
+            "exact id lookup must not use vms.name, got {by_name:?}"
+        );
     }
 
     #[test]
@@ -554,5 +600,44 @@ mod tests {
 
         db.delete_base_disk("bd1").unwrap();
         assert!(db.get_base_disk_by_digest("sha256:abc").unwrap().is_none());
+    }
+
+    #[test]
+    fn vmconfig_json_defaults_identity_fields() {
+        let cfg: VmConfig = serde_json::from_str(r#"{"vcpus":1,"ram_mib":512}"#).unwrap();
+        assert!(
+            cfg.agent_id.is_none(),
+            "missing agent_id must deserialize as None"
+        );
+        assert!(
+            cfg.tenant_id.is_none(),
+            "missing tenant_id must deserialize as None"
+        );
+    }
+
+    #[test]
+    fn gen_id_is_exactly_12_lowercase_hex() {
+        for _ in 0..256 {
+            let id = gen_id();
+            assert_eq!(
+                id.len(),
+                12,
+                "gen_id must emit exactly 12 hex chars, got {id:?}"
+            );
+            assert!(
+                id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+                "gen_id must be lowercase hex, got {id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_012x_of_2_pow_48_is_length_13() {
+        // {:012x} of 2^48 is 13 chars; dropping the gen_id mask would emit >12.
+        assert_eq!(
+            format!("{:012x}", 1u64 << 48).len(),
+            13,
+            "unmasked 2^48 must format wider than 12 so the mask stays required"
+        );
     }
 }

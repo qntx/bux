@@ -1,0 +1,33 @@
+[package]
+name = "bux-serve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+description = "HTTP worker for hosted bux agent sandboxes"
+keywords = ["ai", "sandbox", "vm", "http"]
+categories = ["web-programming::http-server", "virtualization"]
+
+[dependencies]
+axum = { workspace = true, features = ["query"] }
+bux.workspace = true
+bux-proto.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+utoipa.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+rusqlite.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

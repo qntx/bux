@@ -358,6 +358,33 @@ impl Runtime {
         self.disk.disk_usage()
     }
 
+    /// Recursive sum of regular file sizes under the runtime data directory.
+    ///
+    /// Distinct from [`Self::disk_usage`], which is non-recursive bases+overlays only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a directory cannot be read or a file cannot be stat'd.
+    pub fn data_dir_usage(&self) -> io::Result<u64> {
+        dir_tree_size(self.data_dir())
+    }
+
+    /// Data directory this runtime was opened on (parent of `socks/`).
+    fn data_dir(&self) -> &Path {
+        self.socks_dir.parent().unwrap_or(&self.socks_dir)
+    }
+
+    /// Compressed layer bytes from the image manifest, before layer blob download.
+    ///
+    /// Uses this runtime's OCI handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reference is invalid or the registry request fails.
+    pub async fn manifest_compressed_bytes(&self, image: &str) -> Result<u64> {
+        Ok(self.oci.manifest_compressed_bytes(image).await?)
+    }
+
     /// Garbage-collects orphaned base disk images (`ref_count` <= 0).
     ///
     /// Returns the number of base images removed.
@@ -387,8 +414,16 @@ impl Runtime {
     /// detached VM.
     ///
     /// Copied from the source: overlay contents, `vcpus`, `ram_mib`, `network`,
-    /// and `auto_remove`. Always `detach: true` so CLI/`Runtime` Drop does not
-    /// SIGTERM the clone (same process model as `bux create`).
+    /// `auto_remove`, and `tenant_id`. Always `detach: true` so CLI/`Runtime`
+    /// Drop does not SIGTERM the clone (same process model as `bux create`).
+    ///
+    /// `source_id` is the exact primary key (not name, not prefix). CLI
+    /// resolves name/prefix with [`Self::get`] first.
+    ///
+    /// `agent_id` is set from `name` when that name is the serve unique form
+    /// `a-{tenant_id}-{agent}`. If `name` is `None` (CLI), `agent_id` stays
+    /// `None`. Source volumes are not copied; a new `ws-{tenant}-{agent}`
+    /// volume is attached when both ids are known.
     ///
     /// Not copied: ports, volumes, secrets, security, command, env, workdir,
     /// user, auto-stop/delete, ready timeout, or name (unless `name` is passed).
@@ -397,38 +432,38 @@ impl Runtime {
     ///
     /// Returns an error if the source is missing, flatten fails, or create fails.
     pub async fn clone(&self, source_id: &str, name: Option<String>) -> Result<Vm> {
-        let source = self.get(source_id)?;
-        let source_state = source.stored();
+        let opts = self.clone_prepare(source_id, name)?;
+        let handle = self.create(opts).await?;
+        info!(source_id, clone_id = %handle.stored().id, "VM cloned");
+        Ok(handle)
+    }
 
+    /// Exact-id lookup + flatten overlay into `bases/clone-{id}.qcow2` + clone-shaped options.
+    fn clone_prepare(&self, source_id: &str, name: Option<String>) -> Result<VmOptions> {
+        let source = self.get_exact(source_id)?;
+        let source_state = source.stored();
         let clone_id = crate::state::gen_id();
         let clone_base = self
             .disk
             .bases_dir()
             .join(format!("clone-{clone_id}.qcow2"));
         self.disk.flatten_vm_disk(&source_state.id, &clone_base)?;
-
-        let opts = clone_vm_options(&source_state.config, name, clone_base);
-        let handle = self.create(opts).await?;
-        info!(
-            source_id = %source_state.id,
-            clone_id = %handle.stored().id,
-            "VM cloned"
-        );
-        Ok(handle)
+        Ok(clone_vm_options(&source_state.config, name, clone_base))
     }
 
     /// Restore a VM from a snapshot: flatten the snapshot overlay into a new
     /// base, then boot a detached VM (same disk recipe as [`Self::clone`]).
     ///
     /// Copied from the source VM: overlay contents (via the snapshot file),
-    /// `vcpus`, `ram_mib`, `network`, and `auto_remove`. Always `detach: true`.
+    /// `vcpus`, `ram_mib`, `network`, `auto_remove`, and `tenant_id`. Always
+    /// `detach: true`. `agent_id` follows the same name rule as [`Self::clone`].
     ///
     /// Not copied: ports, volumes, secrets, security, command, env, workdir,
     /// user, auto-stop/delete, ready timeout, or name (unless `name` is passed).
     ///
-    /// Requires the source VM row. After [`Self::remove`] of the source,
-    /// snapshot rows are dropped (`ON DELETE CASCADE`) and this returns
-    /// [`crate::Error::NotFound`].
+    /// Requires the source VM row, loaded by exact `snapshots.vm_id` (not
+    /// name/prefix). After [`Self::remove`] of the source, snapshot rows are
+    /// dropped (`ON DELETE CASCADE`) and this returns [`crate::Error::NotFound`].
     ///
     /// # Errors
     ///
@@ -456,7 +491,7 @@ impl Runtime {
                 "snapshot disk missing: {snapshot_id}"
             )));
         }
-        let source = self.get(&snap.vm_id)?;
+        let source = self.get_exact(&snap.vm_id)?;
         restore_vm_options(&self.disk, snap_disk, &source.stored().config, name)
     }
 
@@ -521,15 +556,37 @@ impl Runtime {
     ///
     /// Returns an error if the VM is not found or the database query fails.
     pub fn get(&self, id_or_name: &str) -> Result<Vm> {
-        let mut state = if let Some(s) = self.db.get_by_name(id_or_name)? {
+        let state = if let Some(s) = self.db.get_by_name(id_or_name)? {
             s
         } else {
             self.db.get_by_id_prefix(id_or_name)?
         };
+        Ok(self.handle(state))
+    }
 
+    /// Exact primary-key lookup (`WHERE id = ?1`). Never prefix, never name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::NotFound`] if no row has this id. Never
+    /// [`crate::Error::Ambiguous`].
+    pub fn get_exact(&self, id: &str) -> Result<Vm> {
+        Ok(self.handle(self.db.get_by_id(id)?))
+    }
+
+    /// Exact unique-name lookup (`WHERE name = ?1`). Never prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails. Missing name is `Ok(None)`.
+    pub fn get_named(&self, name: &str) -> Result<Option<Vm>> {
+        Ok(self.db.get_by_name(name)?.map(|state| self.handle(state)))
+    }
+
+    /// Reconcile liveness and wrap a stored row as a handle.
+    fn handle(&self, mut state: VmState) -> Vm {
         self.reconcile_dead_pid(&mut state);
-
-        Ok(Vm::new(
+        Vm::new(
             state,
             Arc::clone(&self.db),
             self.disk.clone(),
@@ -541,7 +598,7 @@ impl Runtime {
             self.volumes.clone(),
             self.shim_path.clone(),
             self.guest_path.clone(),
-        ))
+        )
     }
 
     /// Renames a VM.
@@ -624,7 +681,13 @@ fn restore_vm_options(
 }
 
 /// Create-options for a disk-clone or snapshot-restore: copy
-/// `vcpus`/`ram_mib`/`network`/`auto_remove`; always detach.
+/// `vcpus`/`ram_mib`/`network`/`auto_remove`/`tenant_id`; always detach.
+///
+/// Serve always passes `a-{tenant}-{agent}`. That form is injective (`-` is
+/// not in the id alphabet), so `agent_id` can be recovered from `name`.
+/// CLI names are optional and unconstrained; missing/`None` leaves `agent_id`
+/// unset. Source volumes are not copied; a new workspace volume is attached
+/// only when tenant and agent are both known so HTTP clones stay isolated.
 #[must_use]
 fn clone_vm_options(config: &VmConfig, name: Option<String>, clone_base: PathBuf) -> VmOptions {
     let mut opts = VmOptions::from_image(ImageRef::BaseDisk(clone_base))
@@ -633,16 +696,67 @@ fn clone_vm_options(config: &VmConfig, name: Option<String>, clone_base: PathBuf
         .auto_remove(config.auto_remove)
         .detach(true) // durable disk-clone; CLI drop must not SIGTERM
         .network(config.network.clone());
+    if let Some(tenant) = config.tenant_id.as_deref() {
+        opts = opts.tenant_id(tenant.to_owned());
+        if let Some(agent) = name
+            .as_deref()
+            .and_then(|n| agent_id_from_sandbox_name(tenant, n))
+        {
+            opts = opts
+                .agent_id(agent.to_owned())
+                .named_volume(format!("ws-{tenant}-{agent}"), "/workspace");
+        }
+    }
     if let Some(n) = name {
         opts = opts.name(n);
     }
     opts
 }
 
+/// Parse `agent` from serve unique name `a-{tenant}-{agent}`.
+fn agent_id_from_sandbox_name<'a>(tenant_id: &str, name: &'a str) -> Option<&'a str> {
+    name.strip_prefix("a-")?
+        .strip_prefix(tenant_id)?
+        .strip_prefix('-')
+        .filter(|agent| !agent.is_empty())
+}
+
 impl Drop for Runtime {
     fn drop(&mut self) {
         self.shutdown_sync();
     }
+}
+
+/// Recursive sum of regular file sizes under `dir`.
+fn dir_tree_size(dir: &Path) -> io::Result<u64> {
+    let mut total = 0_u64;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let entries = match fs::read_dir(&path) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            };
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if file_type.is_file() {
+                let meta = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(e),
+                };
+                total += meta.len();
+            }
+        }
+    }
+    Ok(total)
 }
 
 #[cfg(test)]
@@ -656,14 +770,15 @@ mod tests {
     use super::*;
     use crate::events::{AuditEventKind, RingBufferListener};
     use crate::options::NetworkSpec;
-    use crate::secrets::LiveSecrets;
+    use crate::secrets::{LiveSecrets, StartOptions};
     use crate::state::VmConfig;
+    use crate::volumes::{VolumeMount, VolumeSource};
     use bux_oci::RegistryAuth;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use std::time::SystemTime;
+    use std::time::{Duration, SystemTime};
 
     fn insert_running(rt: &Runtime, id: &str, pid: i32) {
         insert_running_cfg(rt, id, pid, VmConfig::default());
@@ -714,6 +829,43 @@ mod tests {
 
     fn child_pid(child: &std::process::Child) -> i32 {
         i32::try_from(child.id()).unwrap()
+    }
+
+    fn dummy_offline_runtime() -> (tempfile::TempDir, Runtime, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join("dummy-shim");
+        fs::write(&shim, b"#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+        let overlay = dir.path().join("overlay.raw");
+        fs::write(&overlay, b"not-qcow").unwrap();
+        let rt = Runtime::open_with(RuntimeOptions {
+            data_dir: dir.path().join("rt"),
+            shim_path: Some(shim),
+            guest_path: None,
+            registry_auth: RegistryAuth::Anonymous,
+        })
+        .unwrap();
+        (dir, rt, overlay)
+    }
+
+    fn insert_idle_stopped(rt: &Runtime, overlay: &Path, id: &str) {
+        insert_cfg(
+            rt,
+            id,
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig {
+                auto_stop_secs: Some(1),
+                last_activity_at: Some(SystemTime::UNIX_EPOCH),
+                detach: true,
+                network: NetworkSpec::Disabled,
+                root_disk: Some(overlay.to_string_lossy().into_owned()),
+                security: crate::security::SecurityOptions::default()
+                    .jailer(false)
+                    .landlock(false),
+                ..VmConfig::default()
+            },
+        );
     }
 
     #[test]
@@ -816,10 +968,81 @@ mod tests {
         assert!(opts.auto_remove);
         assert_eq!(opts.name.as_deref(), Some("n"));
         assert_eq!(opts.network, NetworkSpec::Disabled);
+        assert!(opts.tenant_id.is_none(), "CLI source has no tenant");
+        assert!(opts.agent_id.is_none(), "non-serve name leaves agent unset");
+        assert!(opts.volumes.is_empty(), "source volumes are not copied");
+        assert!(
+            opts.auto_stop_secs.is_none(),
+            "engine clone leaves idle policy off"
+        );
         assert!(
             matches!(&opts.image, ImageRef::BaseDisk(p) if p == Path::new("/tmp/clone.qcow2")),
             "clone image must be the flattened base"
         );
+    }
+
+    #[test]
+    fn clone_vm_options_copies_tenant_and_agent_from_serve_name() {
+        let source = VmConfig {
+            tenant_id: Some("ten1".into()),
+            agent_id: Some("old".into()),
+            vcpus: 2,
+            ram_mib: 1024,
+            network: NetworkSpec::Disabled,
+            ..VmConfig::default()
+        };
+        let opts = clone_vm_options(
+            &source,
+            Some("a-ten1-newagt".into()),
+            PathBuf::from("/tmp/clone.qcow2"),
+        );
+        assert_eq!(opts.tenant_id.as_deref(), Some("ten1"));
+        assert_eq!(opts.agent_id.as_deref(), Some("newagt"));
+        assert_eq!(opts.name.as_deref(), Some("a-ten1-newagt"));
+        assert_eq!(
+            opts.volumes,
+            vec![VolumeMount::named("ws-ten1-newagt", "/workspace")],
+            "new workspace, not the source volume"
+        );
+        assert!(
+            matches!(
+                opts.volumes.first().map(|m| &m.source),
+                Some(VolumeSource::Named { name }) if name == "ws-ten1-newagt"
+            ),
+            "named volume"
+        );
+    }
+
+    #[test]
+    fn clone_vm_options_none_name_leaves_agent_none() {
+        let source = VmConfig {
+            tenant_id: Some("ten1".into()),
+            agent_id: Some("old".into()),
+            ..VmConfig::default()
+        };
+        let opts = clone_vm_options(&source, None, PathBuf::from("/tmp/clone.qcow2"));
+        assert_eq!(opts.tenant_id.as_deref(), Some("ten1"), "tenant is copied");
+        assert!(opts.agent_id.is_none(), "CLI name None keeps agent unset");
+        assert!(opts.name.is_none());
+        assert!(opts.volumes.is_empty(), "no agent → no workspace volume");
+    }
+
+    #[test]
+    fn clone_vm_options_custom_name_does_not_invent_agent() {
+        let source = VmConfig {
+            tenant_id: Some("ten1".into()),
+            agent_id: Some("old".into()),
+            ..VmConfig::default()
+        };
+        let opts = clone_vm_options(
+            &source,
+            Some("custom".into()),
+            PathBuf::from("/tmp/c.qcow2"),
+        );
+        assert_eq!(opts.tenant_id.as_deref(), Some("ten1"));
+        assert!(opts.agent_id.is_none(), "unparseable name");
+        assert_eq!(opts.name.as_deref(), Some("custom"));
+        assert!(opts.volumes.is_empty());
     }
 
     #[test]
@@ -933,6 +1156,129 @@ mod tests {
                 "flattened restore base must be standalone"
             );
         }
+    }
+
+    #[test]
+    fn restore_prepare_uses_exact_source_id_not_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let src_id = "srcsnap000003";
+        let decoy_id = "decoy00000001";
+        let snap_raw = rt.disk.bases_dir().join("snap.raw");
+        fs::write(&snap_raw, vec![0xBB; 4096]).unwrap();
+        let snap_ovl = rt
+            .disk
+            .create_overlay(&snap_raw, crate::disk::DiskFormat::Raw, "snap-src")
+            .unwrap();
+        let snap_path = dir.path().join("snapshots").join("snap1.qcow2");
+        fs::copy(&snap_ovl, &snap_path).unwrap();
+        insert_cfg(
+            &rt,
+            src_id,
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig {
+                ram_mib: 512,
+                ..VmConfig::default()
+            },
+        );
+        rt.db
+            .insert(&VmState {
+                id: decoy_id.to_owned(),
+                name: Some(src_id.to_owned()),
+                pid: wait_dead_pid(),
+                image: None,
+                socket: rt.socks_dir.join(format!("{decoy_id}.sock")),
+                status: Status::Stopped,
+                config: VmConfig {
+                    ram_mib: 2048,
+                    ..VmConfig::default()
+                },
+                created_at: SystemTime::now(),
+            })
+            .unwrap();
+        rt.db
+            .insert_snapshot(&crate::state::SnapshotRow {
+                id: "snap1".into(),
+                vm_id: src_id.into(),
+                name: Some("s".into()),
+                disk_path: snap_path.to_string_lossy().into_owned(),
+                disk_bytes: 4096,
+                created_at: SystemTime::now(),
+            })
+            .unwrap();
+        let by_name = rt.get(src_id).unwrap();
+        assert_eq!(by_name.stored().id, decoy_id, "get prefers name");
+        let opts = rt.restore_prepare("snap1", None).unwrap();
+        assert_eq!(
+            opts.ram_mib, 512,
+            "restore source is snapshot vm_id, not a VM named that id"
+        );
+    }
+
+    #[test]
+    fn clone_prepare_uses_exact_source_id_not_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let src_id = "srcclone00001";
+        let decoy_id = "decoy00000002";
+        let live_raw = rt.disk.bases_dir().join("live.raw");
+        fs::write(&live_raw, vec![0xAA; 8192]).unwrap();
+        rt.disk
+            .create_overlay(&live_raw, crate::disk::DiskFormat::Raw, src_id)
+            .unwrap();
+        insert_cfg(
+            &rt,
+            src_id,
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig {
+                ram_mib: 512,
+                ..VmConfig::default()
+            },
+        );
+        rt.db
+            .insert(&VmState {
+                id: decoy_id.to_owned(),
+                name: Some(src_id.to_owned()),
+                pid: wait_dead_pid(),
+                image: None,
+                socket: rt.socks_dir.join(format!("{decoy_id}.sock")),
+                status: Status::Stopped,
+                config: VmConfig {
+                    ram_mib: 2048,
+                    ..VmConfig::default()
+                },
+                created_at: SystemTime::now(),
+            })
+            .unwrap();
+        let by_name = rt.get(src_id).unwrap();
+        assert_eq!(by_name.stored().id, decoy_id, "get prefers name");
+        let opts = rt.clone_prepare(src_id, None).unwrap();
+        assert_eq!(
+            opts.ram_mib, 512,
+            "clone source is exact id, not a VM named that id"
+        );
+        assert!(
+            opts.auto_stop_secs.is_none(),
+            "engine clone leaves idle policy off"
+        );
+    }
+
+    #[test]
+    fn clone_and_restore_prepare_call_get_exact() {
+        let prod = include_str!("mod.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("prod");
+        assert!(
+            prod.contains("self.get_exact(source_id)"),
+            "clone_prepare must use get_exact"
+        );
+        assert!(
+            prod.contains("self.get_exact(&snap.vm_id)"),
+            "restore_prepare must use get_exact"
+        );
     }
 
     #[test]
@@ -1375,6 +1721,220 @@ mod tests {
             u32::from(inode.i_mode) & 0o777,
             0o555,
             "managed-base guest inode must be 0555"
+        );
+    }
+
+    #[test]
+    fn canonical_reference_reexport_library_alias() {
+        let short = crate::canonical_reference("python:slim").unwrap();
+        let long = crate::canonical_reference("docker.io/library/python:slim").unwrap();
+        assert_eq!(
+            short, long,
+            "python:slim and docker.io/library/python:slim must canonicalize equally"
+        );
+        assert_eq!(
+            short, "docker.io/library/python:slim",
+            "canonical form must be the docker.io library reference"
+        );
+    }
+
+    #[test]
+    fn get_exact_does_not_prefix_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        insert_cfg(
+            &rt,
+            "abc123def456",
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig::default(),
+        );
+        insert_cfg(
+            &rt,
+            "abc999000111",
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig::default(),
+        );
+        rt.db.update_name("abc123def456", Some("alpha")).unwrap();
+
+        let hit = rt.get_exact("abc123def456").unwrap();
+        assert_eq!(hit.info().id, "abc123def456", "full id must resolve");
+
+        let prefix = rt.get_exact("abc").unwrap_err();
+        assert!(
+            matches!(prefix, crate::Error::NotFound(_)),
+            "get_exact must not prefix-match, got {prefix}"
+        );
+        assert!(
+            !matches!(prefix, crate::Error::Ambiguous(_)),
+            "get_exact must never be Ambiguous, got {prefix}"
+        );
+
+        let unique_prefix = rt.get_exact("abc123def").unwrap_err();
+        assert!(
+            matches!(unique_prefix, crate::Error::NotFound(_)),
+            "get_exact must not accept a unique prefix, got {unique_prefix}"
+        );
+        assert!(
+            !matches!(unique_prefix, crate::Error::Ambiguous(_)),
+            "unique prefix must be NotFound, not Ambiguous, got {unique_prefix}"
+        );
+        let via_prefix = rt.get("abc123def").unwrap();
+        assert_eq!(
+            via_prefix.info().id,
+            "abc123def456",
+            "Runtime::get still prefix-matches unique ids"
+        );
+
+        let by_name = rt.get_exact("alpha").unwrap_err();
+        assert!(
+            matches!(by_name, crate::Error::NotFound(_)),
+            "get_exact must not look up vms.name, got {by_name}"
+        );
+        assert_eq!(
+            rt.get("alpha").unwrap().info().id,
+            "abc123def456",
+            "Runtime::get still resolves exact names"
+        );
+    }
+
+    #[test]
+    fn get_named_is_exact_name_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        insert_cfg(
+            &rt,
+            "namedvm000001",
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig::default(),
+        );
+        rt.db.update_name("namedvm000001", Some("alpha")).unwrap();
+
+        let hit = rt.get_named("alpha").unwrap();
+        assert!(hit.is_some(), "exact name must resolve");
+        assert_eq!(hit.unwrap().info().id, "namedvm000001");
+        assert!(
+            rt.get_named("alp").unwrap().is_none(),
+            "get_named must not prefix-match"
+        );
+        assert!(
+            rt.get_named("namedvm000001").unwrap().is_none(),
+            "get_named must not look up by id"
+        );
+    }
+
+    #[test]
+    fn data_dir_usage_counts_volumes_file_disk_usage_misses() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let disk_before = rt.disk_usage().unwrap();
+        let usage_before = rt.data_dir_usage().unwrap();
+
+        let payload = vec![0_u8; 65_536];
+        let vol_dir = dir.path().join("volumes").join("ws-t-a");
+        fs::create_dir_all(&vol_dir).unwrap();
+        fs::write(vol_dir.join("blob"), &payload).unwrap();
+
+        let disk_after = rt.disk_usage().unwrap();
+        let usage_after = rt.data_dir_usage().unwrap();
+        assert_eq!(
+            disk_after, disk_before,
+            "disk_usage must not count volumes/ files"
+        );
+        assert!(
+            usage_after >= usage_before + payload.len() as u64,
+            "data_dir_usage delta must include the volumes/ blob: before={usage_before} after={usage_after}"
+        );
+    }
+
+    #[test]
+    fn start_with_stamps_activity_so_sweep_skips_idle_stop() {
+        let (_dir, rt, overlay) = dummy_offline_runtime();
+        let id = "idleclock0001";
+        insert_idle_stopped(&rt, &overlay, id);
+
+        let mut vm = rt.get_exact(id).unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(vm.start_with(StartOptions {
+                ready_timeout: Some(Duration::ZERO),
+                secrets: Vec::new(),
+            }))
+            .unwrap();
+
+        let report = rt.sweep().unwrap();
+        assert_eq!(
+            report.stopped, 0,
+            "start_with must persist last_activity_at so sweep does not auto-stop"
+        );
+        assert_eq!(report.deleted, 0, "sweep must not delete the restarted VM");
+        drop(vm.kill());
+    }
+
+    #[test]
+    fn start_with_failed_ready_does_not_stamp_activity() {
+        let (_dir, rt, overlay) = dummy_offline_runtime();
+        let id = "idlefail00001";
+        insert_idle_stopped(&rt, &overlay, id);
+
+        let mut vm = rt.get_exact(id).unwrap();
+        let err = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(vm.start_with(StartOptions {
+                ready_timeout: Some(Duration::from_millis(50)),
+                secrets: Vec::new(),
+            }))
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::Error::GuestUnavailable(_)),
+            "dummy shim cannot handshake, got {err}"
+        );
+        let last = rt
+            .db
+            .get_by_id(id)
+            .unwrap()
+            .config
+            .last_activity_at
+            .unwrap();
+        assert_eq!(
+            last,
+            SystemTime::UNIX_EPOCH,
+            "failed ready must not persist last_activity_at"
+        );
+    }
+
+    #[test]
+    fn touch_activity_persists_last_activity_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path()).unwrap();
+        let id = "touchact000001";
+        insert_cfg(
+            &rt,
+            id,
+            wait_dead_pid(),
+            Status::Stopped,
+            VmConfig {
+                last_activity_at: Some(SystemTime::UNIX_EPOCH),
+                ..VmConfig::default()
+            },
+        );
+        rt.get_exact(id).unwrap().touch_activity().unwrap();
+        let last = rt
+            .db
+            .get_by_id(id)
+            .unwrap()
+            .config
+            .last_activity_at
+            .unwrap();
+        assert!(
+            last > SystemTime::UNIX_EPOCH,
+            "touch_activity must persist last_activity_at"
         );
     }
 }

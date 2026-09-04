@@ -158,7 +158,7 @@ async fn resolve_image(
             let oci_cfg = pull.config.clone();
 
             on_progress("building ext4 base disk");
-            let image_label = reference.clone();
+            let image_label = pull.reference.clone();
             let base_path = {
                 let disk = rt.disk().clone();
                 let rootfs = pull.rootfs.clone();
@@ -237,6 +237,8 @@ fn config_from_options(
         auto_delete_secs: opts.auto_delete_secs,
         last_activity_at: Some(std::time::SystemTime::now()),
         detach: opts.detach,
+        agent_id: opts.agent_id.clone(),
+        tenant_id: opts.tenant_id.clone(),
         ..VmConfig::default()
     }
 }
@@ -244,6 +246,7 @@ fn config_from_options(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "tests")]
 mod tests {
+    use super::super::RuntimeOptions;
     use super::*;
     use crate::secrets::Secret;
 
@@ -282,5 +285,75 @@ mod tests {
         assert!(matches!(err, crate::Error::SecurityUnavailable(_)));
         assert_eq!(err.to_string(), "no hardware virtualization (KVM / HVF)");
         assert!(require_virtualization(true).is_ok());
+    }
+
+    #[test]
+    fn config_from_options_copies_identity() {
+        let opts = VmOptions::from_image("alpine")
+            .agent_id("agt")
+            .tenant_id("ten")
+            .vcpus(2)
+            .ram_mib(1024)
+            .env(["A=1"])
+            .workdir("/work");
+        let cfg = config_from_options(&opts, None, None, vec![]);
+        assert_eq!(cfg.agent_id.as_deref(), Some("agt"));
+        assert_eq!(cfg.tenant_id.as_deref(), Some("ten"));
+        assert_eq!(cfg.vcpus, 2);
+        assert_eq!(cfg.ram_mib, 1024);
+        assert_eq!(cfg.workload_env, vec!["A=1"]);
+        assert_eq!(cfg.workload_workdir.as_deref(), Some("/work"));
+    }
+
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "ext4 lock must outlive resolve_image"
+    )]
+    fn resolve_oci_image_label_is_canonical() {
+        let _ext4 = crate::guest::EXT4_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let planted = crate::guest::test_static_guest_elf(b"PLANT-GUEST-ELF!");
+        let files = tempfile::tempdir().unwrap();
+        let guest = files.path().join("planted-guest");
+        std::fs::write(&guest, planted).unwrap();
+
+        let data = tempfile::tempdir().unwrap();
+        let rt = Runtime::open_with(RuntimeOptions {
+            data_dir: data.path().to_path_buf(),
+            shim_path: None,
+            guest_path: Some(guest),
+            registry_auth: bux_oci::RegistryAuth::Anonymous,
+        })
+        .unwrap();
+
+        let digest = "sha256:testdigest";
+        let canonical = "docker.io/library/python:slim";
+        let rootfs = data.path().join("rootfs").join("sha256-testdigest");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        std::fs::write(rootfs.join("placeholder"), b"root").unwrap();
+        let conn = rusqlite::Connection::open(data.path().join("images.db")).unwrap();
+        conn.execute(
+            "INSERT INTO images (reference, digest, size, config) VALUES (?1, ?2, 0, '{}')",
+            rusqlite::params![canonical, digest],
+        )
+        .unwrap();
+
+        let resolved = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(resolve_image(
+                &rt,
+                &ImageRef::Oci("python:slim".into()),
+                &|_| {},
+            ))
+            .unwrap();
+        assert_eq!(
+            resolved.image_label.as_deref(),
+            Some(canonical),
+            "create must persist PullResult.reference, not the raw request string"
+        );
     }
 }

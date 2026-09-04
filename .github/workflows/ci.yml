@@ -11,11 +11,11 @@ permissions:
 
 jobs:
   ci:
-    uses: qntx/workflows/.github/workflows/ci-rust.yml@v2
+    # v2 (6fae2077275e4a757a294c90cbab4f481847b45a)
+    uses: qntx/workflows/.github/workflows/ci-rust.yml@6fae2077275e4a757a294c90cbab4f481847b45a
     permissions:
       contents: read
     with:
-      submodules: true
       rust-version: "1.97.1"
 
   deny:
