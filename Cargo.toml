@@ -42,7 +42,7 @@ tempfile = "3.27.0"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["macros", "rt", "io-util", "net", "time", "sync", "signal"] }
 tower = { version = "0.5.2", features = ["util"] }
-tower-http = { version = "0.6.6", features = ["limit", "trace"] }
+tower-http = { version = "0.7.1", features = ["limit", "trace"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 tokio-vsock = "0.7.2"
 bindgen = "0.72.1"
