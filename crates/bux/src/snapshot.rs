@@ -1,7 +1,8 @@
 //! Snapshot management for point-in-time VM disk captures.
 //!
-//! A snapshot copies the current QCOW2 overlay disk, optionally quiescing
-//! guest filesystems first (via `FIFREEZE`) for consistency. Snapshots can
+//! A snapshot copies the current QCOW2 overlay disk. Running VMs must
+//! `FIFREEZE` first; freeze failure aborts and does not create the
+//! destination overlay. Stopped VMs copy without quiesce. Snapshots can
 //! be listed or deleted. Restore is [`crate::Runtime::restore`]: flatten the
 //! snapshot overlay into a new base, then create like clone. Snapshot rows
 //! are `ON DELETE CASCADE` on the source VM.
@@ -17,7 +18,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use std::{fs, io};
 
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::client::Client;
 use crate::error::Result;
@@ -77,12 +78,13 @@ impl SnapshotManager {
 
     /// Creates a snapshot of a VM's disk.
     ///
-    /// If the VM is running, quiesces guest filesystems first for
-    /// point-in-time consistency, then thaws after the copy.
+    /// Running VMs are frozen (`FIFREEZE`) before the copy; freeze failure
+    /// skips the destination overlay. Stopped VMs copy without quiesce.
     ///
     /// # Errors
     ///
-    /// Returns an error if the disk copy or database insert fails.
+    /// Returns an error if a running VM cannot be quiesced, or if the disk
+    /// copy or database insert fails.
     pub(crate) async fn create(
         &self,
         vm_id: &str,
@@ -94,20 +96,20 @@ impl SnapshotManager {
         let snapshot_id = crate::state::gen_id();
         let dest = self.snapshots_dir.join(format!("{snapshot_id}.qcow2"));
 
-        let quiesced = try_quiesce(vm_id, vm_status, client).await;
+        let quiesced = try_quiesce(vm_id, vm_status, client).await?;
 
-        // Copy the overlay disk.
         let src = overlay_path.to_path_buf();
         let dst = dest.clone();
-        let disk_bytes =
-            tokio::task::spawn_blocking(move || -> io::Result<u64> { fs::copy(&src, &dst) })
-                .await
-                .map_err(io::Error::other)??;
+        let copied = tokio::task::spawn_blocking(move || fs::copy(&src, &dst))
+            .await
+            .map_err(io::Error::other);
 
-        // Thaw if we quiesced.
         if quiesced {
+            // FIFREEZE holds until FITHAW; copy failure must not leave the guest frozen.
             client.thaw().await.ok();
         }
+
+        let disk_bytes = copied??;
 
         let row = SnapshotRow {
             id: snapshot_id.clone(),
@@ -151,19 +153,118 @@ impl SnapshotManager {
     }
 }
 
-/// Attempts to quiesce guest filesystems. Returns `true` if frozen successfully.
-async fn try_quiesce(vm_id: &str, status: Status, client: &Client) -> bool {
+/// Running snapshots without freeze can be torn; fail closed instead of copying dirty.
+async fn try_quiesce(vm_id: &str, status: Status, client: &Client) -> Result<bool> {
     if status != Status::Running {
-        return false;
+        return Ok(false);
     }
-    match client.quiesce().await {
-        Ok(n) => {
-            info!(vm_id, frozen = n, "filesystems quiesced for snapshot");
-            true
-        }
-        Err(e) => {
-            warn!(vm_id, error = %e, "quiesce failed, snapshot may be inconsistent");
-            false
-        }
+    let n = client.quiesce().await?;
+    info!(vm_id, frozen = n, "filesystems quiesced for snapshot");
+    Ok(true)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::missing_docs_in_private_items,
+    reason = "tests"
+)]
+mod tests {
+    use super::*;
+    use crate::state::{VmConfig, VmState};
+    use bux_proto::{ControlReq, ControlResp, ErrorInfo, Hello, HelloAck, PROTOCOL_VERSION};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::SystemTime;
+    use tokio::net::UnixListener;
+
+    async fn stub_guest_quiesce_error(listener: UnixListener, saw_quiesce: Arc<AtomicBool>) {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let hello: Hello = bux_proto::recv(&mut stream).await.unwrap();
+        assert!(
+            matches!(hello, Hello::Control { version } if version == PROTOCOL_VERSION),
+            "Client::quiesce must send Hello::Control v10, got {hello:?}"
+        );
+        bux_proto::send(
+            &mut stream,
+            &HelloAck::Control {
+                version: PROTOCOL_VERSION,
+            },
+        )
+        .await
+        .unwrap();
+        let req: ControlReq = bux_proto::recv(&mut stream).await.unwrap();
+        assert!(
+            matches!(req, ControlReq::Quiesce),
+            "create must send ControlReq::Quiesce, got {req:?}"
+        );
+        saw_quiesce.store(true, Ordering::SeqCst);
+        bux_proto::send(
+            &mut stream,
+            &ControlResp::Error(ErrorInfo::internal("FIFREEZE failed")),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn try_quiesce_running_error_skips_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = dir.path().join("overlay.qcow2");
+        fs::write(&overlay, b"overlay-bytes").unwrap();
+        let sock = dir.path().join("guest.sock");
+        let db = Arc::new(StateDb::open(dir.path().join("bux.db")).unwrap());
+        db.insert(&VmState {
+            id: "vm1".into(),
+            name: None,
+            pid: 1,
+            image: None,
+            socket: sock.clone(),
+            status: Status::Running,
+            config: VmConfig::default(),
+            created_at: SystemTime::UNIX_EPOCH,
+        })
+        .unwrap();
+        let mgr = SnapshotManager::new(Arc::clone(&db), dir.path()).unwrap();
+        let snapshots_dir = dir.path().join("snapshots");
+        let saw_quiesce = Arc::new(AtomicBool::new(false));
+
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let listener = UnixListener::bind(&sock).unwrap();
+                let saw = Arc::clone(&saw_quiesce);
+                let server = tokio::spawn(stub_guest_quiesce_error(listener, saw));
+                let client = Client::new(&sock);
+                let create = mgr
+                    .create("vm1", Status::Running, &overlay, &client, None)
+                    .await;
+                server.abort();
+                create
+            });
+
+        assert!(
+            result.is_err(),
+            "running snapshot must fail when FIFREEZE fails, got {result:?}"
+        );
+        assert!(
+            saw_quiesce.load(Ordering::SeqCst),
+            "create must call Client::quiesce"
+        );
+        let copied = fs::read_dir(&snapshots_dir).unwrap().any(|entry| {
+            entry
+                .ok()
+                .is_some_and(|e| e.path().extension().is_some_and(|ext| ext == "qcow2"))
+        });
+        assert!(
+            !copied,
+            "quiesce failure must not create the destination overlay"
+        );
+        assert!(
+            mgr.list("vm1").unwrap().is_empty(),
+            "failed snapshot must not insert a row"
+        );
     }
 }
