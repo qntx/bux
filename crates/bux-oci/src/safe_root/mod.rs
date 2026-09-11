@@ -21,8 +21,10 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub(crate) use path::{SYMLINK_HOP_LIMIT, hop_limit_error};
+
 /// Directory tree that tar members are resolved against.
-pub struct SafeRoot {
+pub(crate) struct SafeRoot {
     root: PathBuf,
     backend: imp::Backend,
 }
@@ -42,7 +44,7 @@ impl SafeRoot {
     ///
     /// Returns an error if the directory cannot be created, canonicalized, or
     /// opened by the platform backend.
-    pub fn open(root: &Path) -> Result<Self> {
+    pub(crate) fn open(root: &Path) -> Result<Self> {
         fs::create_dir_all(root)?;
         let root = fs::canonicalize(root)?;
         Ok(Self {
@@ -58,7 +60,7 @@ impl SafeRoot {
     ///
     /// Returns an error if `rel` walks above the root, the hop limit is
     /// exceeded, or a filesystem error occurs while walking.
-    pub fn resolve(&self, rel: &Path) -> Result<PathBuf> {
+    pub(crate) fn resolve(&self, rel: &Path) -> Result<PathBuf> {
         let rel = path::normalize_relative(rel)
             .ok_or_else(|| OciError::Extract(format!("path escapes rootfs: {}", rel.display())))?;
         if rel.as_os_str().is_empty() {
@@ -90,7 +92,7 @@ impl SafeRoot {
 
     /// Strip leading `/` and collapse `.` / `..`. `None` if `..` walks above root.
     #[must_use]
-    pub fn normalize(path: &Path) -> Option<PathBuf> {
+    pub(crate) fn normalize(path: &Path) -> Option<PathBuf> {
         path::normalize_relative(path)
     }
 

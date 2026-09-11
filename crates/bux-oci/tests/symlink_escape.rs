@@ -29,6 +29,13 @@ enum Ent {
         name: String,
         target: String,
     },
+    Link {
+        name: String,
+        target: String,
+    },
+    Char {
+        name: String,
+    },
 }
 
 fn write_tar(tar_path: &Path, ents: &[Ent]) {
@@ -58,6 +65,23 @@ fn write_tar(tar_path: &Path, ents: &[Ent]) {
                 header.set_path(name).unwrap();
                 header.set_link_name(target).unwrap();
                 header.set_entry_type(tar::EntryType::Symlink);
+                header.set_size(0);
+                header.set_cksum();
+                builder.append(&header, &[][..]).unwrap();
+            }
+            Ent::Link { name, target } => {
+                let mut header = tar::Header::new_gnu();
+                header.set_path(name).unwrap();
+                header.set_link_name(target).unwrap();
+                header.set_entry_type(tar::EntryType::Link);
+                header.set_size(0);
+                header.set_cksum();
+                builder.append(&header, &[][..]).unwrap();
+            }
+            Ent::Char { name } => {
+                let mut header = tar::Header::new_gnu();
+                header.set_path(name).unwrap();
+                header.set_entry_type(tar::EntryType::Char);
                 header.set_size(0);
                 header.set_cksum();
                 builder.append(&header, &[][..]).unwrap();
@@ -155,12 +179,54 @@ fn symlink_escape_whiteout_does_not_delete_host() {
         ],
     );
 
-    match extract_layer_files(&[(&tar, LAYER)], &rootfs) {
-        Ok(()) | Err(_) => {}
-    }
+    let err = extract_err(&[tar], &rootfs);
+    assert!(
+        matches!(err, OciError::Extract(ref s) if s.contains("escapes")),
+        "whiteout through a host symlink must fail closed, got {err}"
+    );
     assert!(
         victim.exists(),
         "whiteout must not delete a host file through a symlink"
+    );
+}
+
+#[test]
+fn symlink_escape_whiteout_two_hop_does_not_delete_host() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rootfs = tmp.path().join("rootfs");
+    let host = tmp.path().join("host");
+    fs::create_dir_all(&host).unwrap();
+    let victim = host.join("keep-me");
+    fs::write(&victim, b"host").unwrap();
+
+    let tar = tmp.path().join("layer.tar");
+    write_tar(
+        &tar,
+        &[
+            Ent::Symlink {
+                name: "b".into(),
+                target: host.to_string_lossy().into_owned(),
+            },
+            Ent::Symlink {
+                name: "a".into(),
+                target: "b".into(),
+            },
+            Ent::File {
+                name: "a/.wh.keep-me".into(),
+                data: vec![],
+                mode: 0o644,
+            },
+        ],
+    );
+
+    let err = extract_err(&[tar], &rootfs);
+    assert!(
+        matches!(err, OciError::Extract(ref s) if s.contains("escapes")),
+        "two-hop whiteout through a host symlink must fail closed, got {err}"
+    );
+    assert!(
+        victim.exists(),
+        "whiteout must not delete a host file through a two-hop symlink"
     );
 }
 
@@ -316,6 +382,135 @@ fn cross_layer_dir_mode_finalize() {
         "last declared dir mode applied after last layer"
     );
     fs::set_permissions(rootfs.join("usr/bin"), Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn skip_device_does_not_unlink_lower_layer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rootfs = tmp.path().join("rootfs");
+    let layer1 = tmp.path().join("l1.tar");
+    write_tar(
+        &layer1,
+        &[
+            Ent::Dir {
+                name: "dev".into(),
+                mode: 0o755,
+            },
+            Ent::File {
+                name: "dev/null".into(),
+                data: b"keep".to_vec(),
+                mode: 0o644,
+            },
+        ],
+    );
+    let layer2 = tmp.path().join("l2.tar");
+    write_tar(
+        &layer2,
+        &[Ent::Char {
+            name: "dev/null".into(),
+        }],
+    );
+    extract(&[layer1, layer2], &rootfs);
+    assert_eq!(fs::read(rootfs.join("dev/null")).unwrap(), b"keep");
+}
+
+#[test]
+fn opaque_whiteout_preserves_same_layer_nested() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rootfs = tmp.path().join("rootfs");
+    let layer1 = tmp.path().join("l1.tar");
+    write_tar(
+        &layer1,
+        &[
+            Ent::Dir {
+                name: "dir".into(),
+                mode: 0o755,
+            },
+            Ent::Dir {
+                name: "dir/sub".into(),
+                mode: 0o755,
+            },
+            Ent::File {
+                name: "dir/sub/lower".into(),
+                data: b"old".to_vec(),
+                mode: 0o644,
+            },
+        ],
+    );
+    let layer2 = tmp.path().join("l2.tar");
+    write_tar(
+        &layer2,
+        &[
+            Ent::File {
+                name: "dir/sub/a".into(),
+                data: b"new".to_vec(),
+                mode: 0o644,
+            },
+            Ent::File {
+                name: "dir/.wh..wh..opq".into(),
+                data: vec![],
+                mode: 0o644,
+            },
+        ],
+    );
+    extract(&[layer1, layer2], &rootfs);
+    assert_eq!(fs::read(rootfs.join("dir/sub/a")).unwrap(), b"new");
+    assert!(
+        !rootfs.join("dir/sub/lower").exists(),
+        "opaque whiteout must still clear lower-layer nested names"
+    );
+}
+
+#[test]
+fn deferred_hardlink_does_not_clobber_later_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rootfs = tmp.path().join("rootfs");
+    let tar = tmp.path().join("layer.tar");
+    write_tar(
+        &tar,
+        &[
+            Ent::File {
+                name: "target".into(),
+                data: b"A".to_vec(),
+                mode: 0o644,
+            },
+            Ent::Link {
+                name: "dest".into(),
+                target: "later".into(),
+            },
+            Ent::File {
+                name: "later".into(),
+                data: b"B".to_vec(),
+                mode: 0o644,
+            },
+            Ent::File {
+                name: "dest".into(),
+                data: b"C".to_vec(),
+                mode: 0o644,
+            },
+        ],
+    );
+    extract(&[tar], &rootfs);
+    assert_eq!(fs::read(rootfs.join("dest")).unwrap(), b"C");
+}
+
+#[test]
+fn missing_hardlink_target_is_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rootfs = tmp.path().join("rootfs");
+    let tar = tmp.path().join("layer.tar");
+    write_tar(
+        &tar,
+        &[Ent::Link {
+            name: "link".into(),
+            target: "nowhere".into(),
+        }],
+    );
+    let err = extract_err(&[tar], &rootfs);
+    assert!(
+        matches!(err, OciError::Extract(ref s) if s.contains("hardlink target missing")),
+        "missing hardlink target must fail, got {err}"
+    );
 }
 
 #[test]

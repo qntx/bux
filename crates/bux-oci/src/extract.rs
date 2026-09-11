@@ -1,9 +1,10 @@
 //! OCI layer extraction with whiteout handling.
 //!
-//! Paths are resolved with [`crate::SafeRoot`]. Device, FIFO, and socket
-//! members are skipped. Directory modes are applied once after the last layer.
+//! Paths are resolved with a rooted walker. Device and FIFO members are
+//! skipped. Directory modes are applied once after the last layer.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, BufReader, Read};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -13,7 +14,7 @@ use flate2::read::GzDecoder;
 use tar::{Archive, EntryType};
 use tracing::{debug, error};
 
-use crate::safe_root::SafeRoot;
+use crate::safe_root::{SYMLINK_HOP_LIMIT, SafeRoot, hop_limit_error};
 use crate::{OciError, Result};
 
 /// Media types recognized as gzip-compressed layers.
@@ -30,8 +31,8 @@ fn is_gzip(media_type: &str) -> bool {
 /// Extracts layer tarballs from disk into a rootfs directory (streaming, low memory).
 ///
 /// Each `(path, media_type)` pair is a layer tarball on disk. Layers are applied
-/// in order with full OCI whiteout semantics. One [`SafeRoot`] is used for every
-/// layer; directory modes are chmod'd deepest-first after the last layer.
+/// in order with full OCI whiteout semantics. One rooted resolver is used for
+/// every layer; directory modes are chmod'd deepest-first after the last layer.
 ///
 /// # Errors
 ///
@@ -86,16 +87,21 @@ impl LayerExtractor {
 
     fn extract_tarball(&mut self, path: &Path, gzip: bool) -> Result<()> {
         let file = BufReader::new(File::open(path)?);
-        if gzip {
+        let result = if gzip {
             self.extract_reader(GzDecoder::new(file))
         } else {
             self.extract_reader(file)
+        };
+        if result.is_err() {
+            self.deferred_dirs.clear();
         }
+        result
     }
 
     fn extract_reader(&mut self, reader: impl Read) -> Result<()> {
         let mut archive = Archive::new(reader);
         let mut unpacked = HashSet::new();
+        let mut written_rels = HashSet::new();
         let mut deferred_hardlinks = Vec::new();
 
         for raw_entry in archive.entries()? {
@@ -113,55 +119,43 @@ impl LayerExtractor {
             if apply_whiteout(&self.root, &normalized, &unpacked, entry_type)? {
                 continue;
             }
+            if skip_member(entry_type, &normalized) {
+                continue;
+            }
+
+            if entry_type == EntryType::Link {
+                self.apply_hardlink(
+                    &raw_path,
+                    &normalized,
+                    &entry,
+                    &mut deferred_hardlinks,
+                    &mut written_rels,
+                    &mut unpacked,
+                )?;
+                continue;
+            }
 
             let safe_path = self.place_leaf(&normalized, entry_type == EntryType::Directory)?;
-            let applied = match entry_type {
-                EntryType::Directory => {
-                    self.create_directory(&safe_path, mode)?;
-                    true
-                }
+            match entry_type {
+                EntryType::Directory => self.create_directory(&safe_path, mode)?,
                 EntryType::Regular | EntryType::GNUSparse | EntryType::Continuous => {
                     write_regular(&safe_path, mode, &mut entry)?;
-                    true
                 }
-                EntryType::Link => {
-                    self.apply_hardlink(
-                        &raw_path,
-                        &normalized,
-                        &safe_path,
-                        &entry,
-                        &mut deferred_hardlinks,
-                    )?;
-                    true
-                }
-                EntryType::Symlink => {
-                    create_symlink(&raw_path, &safe_path, &entry)?;
-                    true
-                }
-                EntryType::Block | EntryType::Char | EntryType::Fifo => {
-                    debug!(
-                        path = %normalized.display(),
-                        ?entry_type,
-                        "skipping device/fifo tar member"
-                    );
-                    false
-                }
-                EntryType::XGlobalHeader | EntryType::XHeader => false,
+                EntryType::Symlink => create_symlink(&raw_path, &safe_path, &entry)?,
                 other => {
                     debug!(
                         path = %normalized.display(),
                         ?other,
                         "skipping unhandled tar member"
                     );
-                    false
+                    continue;
                 }
-            };
-            if applied {
-                remember_unpacked(&mut unpacked, self.root.root_path(), &safe_path);
             }
+            written_rels.insert(normalized.clone());
+            remember_unpacked(&mut unpacked, self.root.root_path(), &safe_path);
         }
 
-        self.flush_hardlinks(deferred_hardlinks)
+        self.flush_hardlinks(deferred_hardlinks, &written_rels)
     }
 
     fn place_leaf(&self, normalized: &Path, keep_dir: bool) -> Result<PathBuf> {
@@ -187,9 +181,10 @@ impl LayerExtractor {
         &self,
         raw_path: &Path,
         normalized: &Path,
-        safe_path: &Path,
         entry: &tar::Entry<'_, R>,
         deferred: &mut Vec<DeferredHardlink>,
+        written_rels: &mut HashSet<PathBuf>,
+        unpacked: &mut HashSet<PathBuf>,
     ) -> Result<()> {
         let target = entry.link_name()?.ok_or_else(|| {
             OciError::Extract(format!("hardlink without target: {}", raw_path.display()))
@@ -204,7 +199,10 @@ impl LayerExtractor {
         let target_safe = self.root.resolve_or_root(&tp)?.join(&tl);
         ensure_inside(self.root.root_path(), &target_safe)?;
         if fs::symlink_metadata(&target_safe).is_ok() {
-            fs::hard_link(&target_safe, safe_path)?;
+            let safe_path = self.place_leaf(normalized, false)?;
+            fs::hard_link(&target_safe, &safe_path)?;
+            written_rels.insert(normalized.to_path_buf());
+            remember_unpacked(unpacked, self.root.root_path(), &safe_path);
         } else {
             deferred.push(DeferredHardlink {
                 link_rel: normalized.to_path_buf(),
@@ -214,22 +212,26 @@ impl LayerExtractor {
         Ok(())
     }
 
-    fn flush_hardlinks(&self, deferred: Vec<DeferredHardlink>) -> Result<()> {
+    fn flush_hardlinks(
+        &self,
+        deferred: Vec<DeferredHardlink>,
+        written_rels: &HashSet<PathBuf>,
+    ) -> Result<()> {
         for item in deferred {
+            if written_rels.contains(&item.link_rel) {
+                continue;
+            }
             let (tp, tl) = split_parent_leaf(&item.target_rel);
             let target_safe = self.root.resolve_or_root(&tp)?.join(&tl);
             ensure_inside(self.root.root_path(), &target_safe)?;
             if fs::symlink_metadata(&target_safe).is_err() {
-                continue;
+                return Err(OciError::Extract(format!(
+                    "hardlink target missing: {}",
+                    item.target_rel.display()
+                )));
             }
-            let (lp, ll) = split_parent_leaf(&item.link_rel);
-            let link_safe = self.root.resolve_or_root(&lp)?.join(&ll);
-            ensure_inside(self.root.root_path(), &link_safe)?;
-            if let Some(parent) = link_safe.parent() {
-                ensure_dir(parent, self.root.root_path())?;
-            }
-            remove_nofollow(&link_safe, false)?;
-            fs::hard_link(&target_safe, &link_safe)?;
+            let safe_path = self.place_leaf(&item.link_rel, false)?;
+            fs::hard_link(&target_safe, &safe_path)?;
         }
         Ok(())
     }
@@ -262,7 +264,36 @@ fn write_regular<R: Read>(
         .mode(mode & 0o7777)
         .open(safe_path)?;
     io::copy(entry, &mut file)?;
+    fs::set_permissions(safe_path, Permissions::from_mode(mode & 0o7777))?;
     Ok(())
+}
+
+fn skip_member(entry_type: EntryType, normalized: &Path) -> bool {
+    match entry_type {
+        EntryType::Block | EntryType::Char | EntryType::Fifo => {
+            debug!(
+                path = %normalized.display(),
+                ?entry_type,
+                "skipping device/fifo tar member"
+            );
+            true
+        }
+        EntryType::XGlobalHeader | EntryType::XHeader => true,
+        EntryType::Directory
+        | EntryType::Regular
+        | EntryType::GNUSparse
+        | EntryType::Continuous
+        | EntryType::Link
+        | EntryType::Symlink => false,
+        other => {
+            debug!(
+                path = %normalized.display(),
+                ?other,
+                "skipping unhandled tar member"
+            );
+            true
+        }
+    }
 }
 
 fn create_symlink<R: Read>(
@@ -443,20 +474,55 @@ fn refuse_whiteout_escape(root: &SafeRoot, parent_rel: &Path) -> Result<()> {
     )))
 }
 
+fn push_path_components(out: &mut VecDeque<OsString>, path: &Path) {
+    for c in path.components() {
+        match c {
+            Component::Normal(s) => out.push_back(s.to_os_string()),
+            Component::ParentDir => out.push_back(OsString::from("..")),
+            _ => {}
+        }
+    }
+}
+
+fn prepend_path_components(remaining: &mut VecDeque<OsString>, path: &Path) {
+    let mut parts = VecDeque::new();
+    push_path_components(&mut parts, path);
+    while let Some(part) = parts.pop_back() {
+        remaining.push_front(part);
+    }
+}
+
 fn whiteout_parent_escapes(root: &Path, parent_rel: &Path) -> Result<bool> {
-    let mut cur = root.to_path_buf();
-    for comp in parent_rel.components() {
-        let Component::Normal(c) = comp else {
+    let mut resolved = PathBuf::new();
+    let mut hops: u32 = 0;
+    let mut remaining = VecDeque::new();
+    push_path_components(&mut remaining, parent_rel);
+
+    while let Some(comp) = remaining.pop_front() {
+        if comp == ".." {
+            if resolved.as_os_str().is_empty() {
+                return Ok(true);
+            }
+            resolved.pop();
             continue;
-        };
-        cur.push(c);
-        match fs::symlink_metadata(&cur) {
+        }
+        resolved.push(&comp);
+        let full = root.join(&resolved);
+        match fs::symlink_metadata(&full) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(e.into()),
             Ok(meta) if meta.file_type().is_symlink() => {
-                let target = fs::read_link(&cur)?;
-                if symlink_target_escapes(root, &cur, &target) {
-                    return Ok(true);
+                hops += 1;
+                if hops > SYMLINK_HOP_LIMIT {
+                    return Err(hop_limit_error(parent_rel));
+                }
+                let target = fs::read_link(&full)
+                    .map_err(|e| OciError::Extract(format!("readlink {}: {e}", full.display())))?;
+                resolved.pop();
+                match classify_host_target(root, &root.join(&resolved), &target) {
+                    HostFollow::Escape => return Ok(true),
+                    HostFollow::Rel => prepend_path_components(&mut remaining, &target),
+                    HostFollow::Abs(in_root) => resolved = in_root,
                 }
             }
             Ok(_) => {}
@@ -465,17 +531,18 @@ fn whiteout_parent_escapes(root: &Path, parent_rel: &Path) -> Result<bool> {
     Ok(false)
 }
 
-fn symlink_target_escapes(root: &Path, link_path: &Path, target: &Path) -> bool {
-    if target.is_absolute() {
-        return !target.starts_with(root);
-    }
-    let mut acc = link_path.parent().unwrap_or(link_path).to_path_buf();
+enum HostFollow {
+    Escape,
+    Rel,
+    Abs(PathBuf),
+}
+
+fn relative_target_escapes(root: &Path, link_parent: &Path, target: &Path) -> bool {
+    let mut acc = link_parent.to_path_buf();
     for comp in target.components() {
         match comp {
+            Component::ParentDir if acc == root => return true,
             Component::ParentDir => {
-                if acc == root {
-                    return true;
-                }
                 acc.pop();
             }
             Component::Normal(c) => acc.push(c),
@@ -485,10 +552,52 @@ fn symlink_target_escapes(root: &Path, link_path: &Path, target: &Path) -> bool 
     !acc.starts_with(root)
 }
 
+fn classify_host_target(root: &Path, link_parent: &Path, target: &Path) -> HostFollow {
+    if !target.is_absolute() {
+        if relative_target_escapes(root, link_parent, target) {
+            return HostFollow::Escape;
+        }
+        return HostFollow::Rel;
+    }
+    let norm = lexical_normalize(target);
+    if !norm.starts_with(root) {
+        return HostFollow::Escape;
+    }
+    HostFollow::Abs(
+        norm.strip_prefix(root)
+            .map(Path::to_path_buf)
+            .unwrap_or_default(),
+    )
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut acc = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => acc.push(comp),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                acc.pop();
+            }
+            Component::Normal(c) => acc.push(c),
+        }
+    }
+    acc
+}
+
 fn clear_dir(dir: &Path, unpacked: &HashSet<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
+        let is_real_dir = meta.is_dir() && !meta.file_type().is_symlink();
         if unpacked.contains(&path) {
+            if is_real_dir {
+                clear_dir(&path, unpacked)?;
+            }
             continue;
         }
         remove_nofollow(&path, false)?;

@@ -1,10 +1,10 @@
 //! OCI image management for the bux micro-VM sandbox.
 //!
 //! Pulls, caches, and extracts OCI container images to a directory. Layer
-//! extract resolves members with [`SafeRoot`] so a crafted symlink cannot
-//! write the host. The managed Runtime converts that directory into an ext4
-//! base plus QCOW2 overlay (`DiskManager::create_managed_base`). Powered by
-//! [`oci_client`].
+//! extract resolves members inside the destination root so a crafted symlink
+//! cannot write the host. The managed Runtime converts that directory into an
+//! ext4 base plus QCOW2 overlay (`DiskManager::create_managed_base`). Powered
+//! by [`oci_client`].
 //!
 //! # Architecture
 //!
@@ -37,7 +37,6 @@ use oci_client::secrets::RegistryAuth as ClientRegistryAuth;
 pub use config::{ImageConfig, OciConfig, PullResult, RegistryAuth};
 pub use error::{OciError, Result};
 pub use extract::extract_layer_files;
-pub use safe_root::SafeRoot;
 pub use store::ImageMeta;
 use store::Store;
 

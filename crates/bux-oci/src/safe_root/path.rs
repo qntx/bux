@@ -8,7 +8,14 @@ use std::path::{Component, Path, PathBuf};
 use crate::{OciError, Result};
 
 /// 256th follow is treated as a cycle or a crafted chain.
-pub(super) const SYMLINK_HOP_LIMIT: u32 = 255;
+pub(crate) const SYMLINK_HOP_LIMIT: u32 = 255;
+
+pub(crate) fn hop_limit_error(rel: &Path) -> OciError {
+    OciError::Extract(format!(
+        "symlink hop limit exceeded resolving {}",
+        rel.display()
+    ))
+}
 
 /// Strip `/`, collapse `.` / `..`. `None` if `..` walks above the root.
 pub(super) fn normalize_relative(path: &Path) -> Option<PathBuf> {
@@ -55,10 +62,7 @@ pub(super) fn resolve_walk(root: &Path, rel: &Path) -> Result<PathBuf> {
             Ok(meta) if meta.file_type().is_symlink() => {
                 hops += 1;
                 if hops > SYMLINK_HOP_LIMIT {
-                    return Err(OciError::Extract(format!(
-                        "symlink hop limit exceeded resolving {}",
-                        rel.display()
-                    )));
+                    return Err(hop_limit_error(rel));
                 }
                 let target = std::fs::read_link(&full)
                     .map_err(|e| OciError::Extract(format!("readlink {}: {e}", full.display())))?;

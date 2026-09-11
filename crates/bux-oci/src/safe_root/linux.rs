@@ -35,6 +35,9 @@ impl Backend {
             {
                 path::resolve_walk(&self.root_path, rel)
             }
+            Err(e) if e.kind() == pathrs::error::ErrorKind::OsError(Some(libc::ELOOP)) => {
+                Err(path::hop_limit_error(rel))
+            }
             Err(e) => Err(OciError::Extract(format!(
                 "pathrs resolve {}: {e}",
                 rel.display()
