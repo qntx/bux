@@ -19,6 +19,11 @@ sha2.workspace = true
 tar.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+pathrs = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true
