@@ -209,6 +209,10 @@ fn copy_in_archive(dest: &Path, file: std::fs::File) -> io::Result<()> {
             };
             std::fs::create_dir_all(parent)?;
         }
+        // unpack(None) hard_links the raw link_name (absolute or CWD-relative).
+        if entry.header().entry_type().is_hard_link() {
+            return Err(copy_in_traversal_blocked(&path));
+        }
         entry.unpack(&target)?;
     }
     Ok(())
@@ -261,6 +265,67 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().canonicalize().unwrap();
         f(&dest);
+    }
+
+    async fn copy_in(dest: &Path, tar_bytes: &[u8]) -> UploadResult {
+        let dest_str = dest.to_str().unwrap().to_owned();
+        let (mut guest_from_host, mut host_to_guest) = tokio::io::duplex(64 * 1024);
+        let (mut host_from_guest, mut guest_to_host) = tokio::io::duplex(64 * 1024);
+        let guest = tokio::spawn(async move {
+            handle_copy_in(&mut guest_from_host, &mut guest_to_host, &dest_str).await
+        });
+        bux_proto::send_upload(&mut host_to_guest, tar_bytes, 256)
+            .await
+            .unwrap();
+        let result: UploadResult = bux_proto::recv(&mut host_from_guest).await.unwrap();
+        guest.await.unwrap().unwrap();
+        result
+    }
+
+    fn tar_hardlink(member: &str, link_name: &Path) -> Vec<u8> {
+        let mut tar_bytes = Vec::new();
+        {
+            let mut ar = tar::Builder::new(&mut tar_bytes);
+            let payload = b"inside";
+            let mut file = tar::Header::new_gnu();
+            file.set_entry_type(tar::EntryType::Regular);
+            file.set_path("ok.txt").unwrap();
+            file.set_size(u64::try_from(payload.len()).unwrap());
+            file.set_cksum();
+            ar.append(&file, &payload[..]).unwrap();
+
+            let mut link = tar::Header::new_gnu();
+            link.set_entry_type(tar::EntryType::Link);
+            link.set_path(member).unwrap();
+            link.set_link_name(link_name).unwrap();
+            link.set_size(0);
+            link.set_cksum();
+            ar.append(&link, &[][..]).unwrap();
+            ar.finish().unwrap();
+        }
+        tar_bytes
+    }
+
+    fn same_inode(a: &Path, b: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(ma) = a.symlink_metadata() else {
+            return false;
+        };
+        let Ok(mb) = b.symlink_metadata() else {
+            return false;
+        };
+        ma.dev() == mb.dev() && ma.ino() == mb.ino()
+    }
+
+    fn assert_traversal_blocked(result: UploadResult) {
+        let UploadResult::Error(info) = result else {
+            panic!("copy_in allowed a blocked member: {result:?}");
+        };
+        assert!(
+            info.message.contains("path traversal blocked"),
+            "{}",
+            info.message
+        );
     }
 
     #[test]
@@ -318,28 +383,42 @@ mod tests {
             ar.finish().unwrap();
         }
 
-        let dest_str = dest.to_str().unwrap().to_owned();
-        let (mut guest_from_host, mut host_to_guest) = tokio::io::duplex(64 * 1024);
-        let (mut host_from_guest, mut guest_to_host) = tokio::io::duplex(64 * 1024);
-        let guest = tokio::spawn(async move {
-            handle_copy_in(&mut guest_from_host, &mut guest_to_host, &dest_str).await
-        });
-
-        bux_proto::send_upload(&mut host_to_guest, &tar_bytes, 256)
-            .await
-            .unwrap();
-        let result: UploadResult = bux_proto::recv(&mut host_from_guest).await.unwrap();
-        guest.await.unwrap().unwrap();
-
-        let UploadResult::Error(info) = result else {
-            panic!("copy_in followed a symlink component: {result:?}");
-        };
-        assert!(
-            info.message.contains("path traversal blocked"),
-            "{}",
-            info.message
-        );
+        assert_traversal_blocked(copy_in(&dest, &tar_bytes).await);
         assert!(dest.join("evil").symlink_metadata().unwrap().is_symlink());
         assert!(!dest.join("ok").join("pwned").exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn copy_in_refuses_hardlink_outside_dest() {
+        // unpack(None) hard_links absolute and CWD-relative link_name as-is.
+        let root = tempfile::tempdir().unwrap();
+
+        let dest_abs = root.path().join("dest-abs");
+        std::fs::create_dir(&dest_abs).unwrap();
+        let abs_outside = tempfile::Builder::new()
+            .prefix("bux-guest-hl-")
+            .tempfile_in("/tmp")
+            .unwrap();
+        std::fs::write(abs_outside.path(), b"secret").unwrap();
+        assert_traversal_blocked(
+            copy_in(&dest_abs, &tar_hardlink("pwned", abs_outside.path())).await,
+        );
+        assert_eq!(std::fs::read(dest_abs.join("ok.txt")).unwrap(), b"inside");
+        assert!(!same_inode(&dest_abs.join("pwned"), abs_outside.path()));
+        assert_eq!(std::fs::read(abs_outside.path()).unwrap(), b"secret");
+
+        let dest_rel = root.path().join("dest-rel");
+        std::fs::create_dir(&dest_rel).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let rel_outside = tempfile::Builder::new()
+            .prefix("bux-guest-hl-")
+            .tempfile_in(&cwd)
+            .unwrap();
+        std::fs::write(rel_outside.path(), b"secret").unwrap();
+        let rel_name = PathBuf::from(rel_outside.path().file_name().unwrap());
+        assert_traversal_blocked(copy_in(&dest_rel, &tar_hardlink("pwned", &rel_name)).await);
+        assert_eq!(std::fs::read(dest_rel.join("ok.txt")).unwrap(), b"inside");
+        assert!(!same_inode(&dest_rel.join("pwned"), rel_outside.path()));
+        assert_eq!(std::fs::read(rel_outside.path()).unwrap(), b"secret");
     }
 }
