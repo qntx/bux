@@ -1,7 +1,7 @@
 //! File transfer handlers: single-file read/write and tar-based copy.
 
 use std::io;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bux_proto::{Download, ErrorCode, ErrorInfo, STREAM_CHUNK_SIZE, UploadResult};
@@ -98,15 +98,7 @@ pub async fn handle_copy_in(
         std::fs::create_dir_all(dest_path)?;
         let canonical_dest = dest_path.canonicalize()?;
         let file = std::fs::File::open(&tp)?;
-        let mut archive = tar::Archive::new(file);
-        archive.set_preserve_permissions(true);
-        for raw_entry in archive.entries()? {
-            let mut entry = raw_entry?;
-            let path = entry.path()?.into_owned();
-            copy_in_parent_under_dest(&canonical_dest, &path)?;
-            entry.unpack_in(&canonical_dest)?;
-        }
-        Ok(())
+        copy_in_archive(&canonical_dest, file)
     })
     .await
     .map_err(io::Error::other)?;
@@ -182,9 +174,7 @@ pub async fn handle_copy_out(
 ///
 /// Uses `recv_upload_to_writer` so memory usage is O(chunk_size) regardless
 /// of total upload size.
-async fn recv_upload_to_file(
-    r: &mut (impl AsyncRead + Unpin + Send),
-) -> io::Result<std::path::PathBuf> {
+async fn recv_upload_to_file(r: &mut (impl AsyncRead + Unpin + Send)) -> io::Result<PathBuf> {
     let temp_path = temp_file_path("upload");
     let mut file = tokio::fs::File::create(&temp_path).await?;
     match bux_proto::recv_upload_to_writer(r, &mut file, bux_proto::MAX_UPLOAD_BYTES).await {
@@ -197,40 +187,62 @@ async fn recv_upload_to_file(
 }
 
 /// Returns a unique temp file path under `/tmp`.
-fn temp_file_path(tag: &str) -> std::path::PathBuf {
+fn temp_file_path(tag: &str) -> PathBuf {
     let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
     Path::new("/tmp").join(format!("bux-{tag}-{}-{seq}", std::process::id()))
 }
 
-/// Resolve the parent only: the leaf is created by unpack and may not exist.
-/// `canonicalize` failure is deny: a missing prefix must not skip the check.
-pub(crate) fn copy_in_parent_under_dest(canonical_dest: &Path, entry: &Path) -> io::Result<()> {
-    if entry.is_absolute()
-        || entry
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return Err(copy_in_traversal_blocked(entry));
-    }
-    // CurDir-only `./`: join drops CurDir so parent() is dest's parent.
-    if !entry
-        .components()
-        .any(|c| matches!(c, std::path::Component::Normal(_)))
-    {
-        return Ok(());
-    }
-    let target = canonical_dest.join(entry);
-    let parent = target.parent().unwrap_or(canonical_dest);
-    let resolved = parent
-        .canonicalize()
-        .map_err(|_| copy_in_traversal_blocked(entry))?;
-    if !resolved.starts_with(canonical_dest) {
-        return Err(copy_in_traversal_blocked(entry));
+/// `create_dir_all` and `unpack` follow a planted symlink; only write a jailed path.
+fn copy_in_archive(dest: &Path, file: std::fs::File) -> io::Result<()> {
+    let mut archive = tar::Archive::new(file);
+    archive.set_preserve_permissions(true);
+    for raw_entry in archive.entries()? {
+        let mut entry = raw_entry?;
+        let path = entry.path()?.into_owned();
+        let Some(target) = jailed_join(dest, &path) else {
+            return Err(copy_in_traversal_blocked(&path));
+        };
+        // create_dir_all follows a planted symlink.
+        if let Some(parent_rel) = path.parent() {
+            let Some(parent) = jailed_join(dest, parent_rel) else {
+                return Err(copy_in_traversal_blocked(&path));
+            };
+            std::fs::create_dir_all(parent)?;
+        }
+        // unpack(None) hard_links the raw link_name (absolute or CWD-relative).
+        if entry.header().entry_type().is_hard_link() {
+            return Err(copy_in_traversal_blocked(&path));
+        }
+        entry.unpack(&target)?;
     }
     Ok(())
 }
 
-/// PermissionDenied constructor for the fail-closed parent-under-dest check.
+/// A tar member may plant a symlink; following it would write outside `base`.
+fn jailed_join(base: &Path, rel: &Path) -> Option<PathBuf> {
+    if rel.is_absolute() {
+        return None;
+    }
+    let mut cur = base.to_path_buf();
+    for component in rel.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(name) => {
+                cur.push(name);
+                match std::fs::symlink_metadata(&cur) {
+                    Ok(meta) if meta.is_symlink() => return None,
+                    Ok(_) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(_) => return None,
+                }
+            }
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir => return None,
+        }
+    }
+    Some(cur)
+}
+
+/// Fail closed so a blocked member is not skipped.
 fn copy_in_traversal_blocked(entry: &Path) -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
@@ -239,60 +251,174 @@ fn copy_in_traversal_blocked(entry: &Path) -> io::Error {
 }
 
 #[cfg(test)]
-mod copy_in_parent_tests {
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::missing_docs_in_private_items,
+    reason = "tests"
+)]
+mod tests {
     use super::*;
 
     fn with_canonical_dest(f: impl FnOnce(&Path)) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let dest = dir.path().canonicalize().expect("canonicalize dest");
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().canonicalize().unwrap();
         f(&dest);
+    }
+
+    async fn copy_in(dest: &Path, tar_bytes: &[u8]) -> UploadResult {
+        let dest_str = dest.to_str().unwrap().to_owned();
+        let (mut guest_from_host, mut host_to_guest) = tokio::io::duplex(64 * 1024);
+        let (mut host_from_guest, mut guest_to_host) = tokio::io::duplex(64 * 1024);
+        let guest = tokio::spawn(async move {
+            handle_copy_in(&mut guest_from_host, &mut guest_to_host, &dest_str).await
+        });
+        bux_proto::send_upload(&mut host_to_guest, tar_bytes, 256)
+            .await
+            .unwrap();
+        let result: UploadResult = bux_proto::recv(&mut host_from_guest).await.unwrap();
+        guest.await.unwrap().unwrap();
+        result
+    }
+
+    fn tar_hardlink(member: &str, link_name: &Path) -> Vec<u8> {
+        let mut tar_bytes = Vec::new();
+        {
+            let mut ar = tar::Builder::new(&mut tar_bytes);
+            let payload = b"inside";
+            let mut file = tar::Header::new_gnu();
+            file.set_entry_type(tar::EntryType::Regular);
+            file.set_path("ok.txt").unwrap();
+            file.set_size(u64::try_from(payload.len()).unwrap());
+            file.set_cksum();
+            ar.append(&file, &payload[..]).unwrap();
+
+            let mut link = tar::Header::new_gnu();
+            link.set_entry_type(tar::EntryType::Link);
+            link.set_path(member).unwrap();
+            link.set_link_name(link_name).unwrap();
+            link.set_size(0);
+            link.set_cksum();
+            ar.append(&link, &[][..]).unwrap();
+            ar.finish().unwrap();
+        }
+        tar_bytes
+    }
+
+    fn same_inode(a: &Path, b: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(ma) = a.symlink_metadata() else {
+            return false;
+        };
+        let Ok(mb) = b.symlink_metadata() else {
+            return false;
+        };
+        ma.dev() == mb.dev() && ma.ino() == mb.ino()
+    }
+
+    fn assert_traversal_blocked(result: UploadResult) {
+        let UploadResult::Error(info) = result else {
+            panic!("copy_in allowed a blocked member: {result:?}");
+        };
+        assert!(
+            info.message.contains("path traversal blocked"),
+            "{}",
+            info.message
+        );
     }
 
     #[test]
     fn rejects_parent_dir_component() {
         with_canonical_dest(|dest| {
-            let err = copy_in_parent_under_dest(dest, Path::new("../outside.txt"))
-                .expect_err(".. must fail closed");
-            assert_eq!(
-                err.kind(),
-                io::ErrorKind::PermissionDenied,
-                "expected PermissionDenied for ParentDir"
-            );
+            assert!(jailed_join(dest, Path::new("../outside.txt")).is_none());
         });
     }
 
     #[test]
     fn rejects_absolute_member() {
         with_canonical_dest(|dest| {
-            let err = copy_in_parent_under_dest(dest, Path::new("/etc/passwd"))
-                .expect_err("absolute member must fail closed");
-            assert_eq!(
-                err.kind(),
-                io::ErrorKind::PermissionDenied,
-                "expected PermissionDenied for absolute member"
-            );
-        });
-    }
-
-    #[test]
-    fn rejects_canonicalize_failure() {
-        with_canonical_dest(|dest| {
-            let err = copy_in_parent_under_dest(dest, Path::new("missing/x.txt"))
-                .expect_err("missing parent canonicalize must fail closed");
-            assert_eq!(
-                err.kind(),
-                io::ErrorKind::PermissionDenied,
-                "expected PermissionDenied when canonicalize fails"
-            );
+            assert!(jailed_join(dest, Path::new("/etc/passwd")).is_none());
         });
     }
 
     #[test]
     fn allows_direct_child() {
         with_canonical_dest(|dest| {
-            copy_in_parent_under_dest(dest, Path::new("ok.txt")).expect("direct child under dest");
-            copy_in_parent_under_dest(dest, Path::new(".")).expect("dot archive member");
-            copy_in_parent_under_dest(dest, Path::new("./")).expect("dot-slash archive member");
+            assert_eq!(
+                jailed_join(dest, Path::new("ok.txt")).unwrap(),
+                dest.join("ok.txt")
+            );
+            assert_eq!(jailed_join(dest, Path::new(".")).unwrap(), dest);
+            assert_eq!(jailed_join(dest, Path::new("./")).unwrap(), dest);
         });
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn copy_in_refuses_symlink_component() {
+        // Planted symlink is a legal leaf; writing through it would follow into `ok/`.
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+        std::fs::create_dir(dest.join("ok")).unwrap();
+
+        let mut tar_bytes = Vec::new();
+        {
+            let mut ar = tar::Builder::new(&mut tar_bytes);
+            let mut link = tar::Header::new_gnu();
+            link.set_entry_type(tar::EntryType::Symlink);
+            link.set_path("evil").unwrap();
+            link.set_link_name("ok").unwrap();
+            link.set_size(0);
+            link.set_cksum();
+            ar.append(&link, &[][..]).unwrap();
+
+            let payload = b"pwned";
+            let mut file = tar::Header::new_gnu();
+            file.set_entry_type(tar::EntryType::Regular);
+            file.set_path("evil/pwned").unwrap();
+            file.set_size(u64::try_from(payload.len()).unwrap());
+            file.set_cksum();
+            ar.append(&file, &payload[..]).unwrap();
+            ar.finish().unwrap();
+        }
+
+        assert_traversal_blocked(copy_in(&dest, &tar_bytes).await);
+        assert!(dest.join("evil").symlink_metadata().unwrap().is_symlink());
+        assert!(!dest.join("ok").join("pwned").exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn copy_in_refuses_hardlink_outside_dest() {
+        // unpack(None) hard_links absolute and CWD-relative link_name as-is.
+        let root = tempfile::tempdir().unwrap();
+
+        let dest_abs = root.path().join("dest-abs");
+        std::fs::create_dir(&dest_abs).unwrap();
+        let abs_outside = tempfile::Builder::new()
+            .prefix("bux-guest-hl-")
+            .tempfile_in("/tmp")
+            .unwrap();
+        std::fs::write(abs_outside.path(), b"secret").unwrap();
+        assert_traversal_blocked(
+            copy_in(&dest_abs, &tar_hardlink("pwned", abs_outside.path())).await,
+        );
+        assert_eq!(std::fs::read(dest_abs.join("ok.txt")).unwrap(), b"inside");
+        assert!(!same_inode(&dest_abs.join("pwned"), abs_outside.path()));
+        assert_eq!(std::fs::read(abs_outside.path()).unwrap(), b"secret");
+
+        let dest_rel = root.path().join("dest-rel");
+        std::fs::create_dir(&dest_rel).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let rel_outside = tempfile::Builder::new()
+            .prefix("bux-guest-hl-")
+            .tempfile_in(&cwd)
+            .unwrap();
+        std::fs::write(rel_outside.path(), b"secret").unwrap();
+        let rel_name = PathBuf::from(rel_outside.path().file_name().unwrap());
+        assert_traversal_blocked(copy_in(&dest_rel, &tar_hardlink("pwned", &rel_name)).await);
+        assert_eq!(std::fs::read(dest_rel.join("ok.txt")).unwrap(), b"inside");
+        assert!(!same_inode(&dest_rel.join("pwned"), rel_outside.path()));
+        assert_eq!(std::fs::read(rel_outside.path()).unwrap(), b"secret");
     }
 }
