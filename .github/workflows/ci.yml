@@ -21,11 +21,13 @@ jobs:
   engine-no-krun:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@v2
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: crates/bux does not depend on bux-krun
         run: |
           set -euo pipefail
@@ -44,18 +46,20 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Installer tests
         run: /bin/sh scripts/install_test.sh
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: 1.97.1
-      - uses: actions/setup-go@v7
+          toolchain: "1.97.1"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: crates/bux-gvproxy/gvproxy-bridge/go.mod
-      - uses: Swatinem/rust-cache@v2
-      # Guest unit tests (reaper, ca_no_command, sig_ign_waitpid) are cfg(linux).
-      # macos-latest has no Go; workspace tests compile bux-gvproxy (libgvproxy).
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # jobs.ci already cargo test --workspace on ubuntu (ci-rust.yml).
       # Never BUX_E2E_FULL=1 on GitHub-hosted runners.
       - name: Workspace tests
+        if: matrix.os == 'macos-latest'
         run: cargo test --workspace
