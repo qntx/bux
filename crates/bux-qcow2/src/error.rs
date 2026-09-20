@@ -55,6 +55,15 @@ pub enum Error {
     /// `qemu-img` exited with a non-zero status.
     #[error("qemu-img failed: {0}")]
     QemuImgFailed(String),
+
+    /// Backing file path exceeds the available space in Cluster 0.
+    #[error("backing file path too long: {len} bytes (maximum {max} bytes)")]
+    BackingPathTooLong {
+        /// The length of the backing file path in bytes.
+        len: usize,
+        /// The maximum allowable length in bytes.
+        max: usize,
+    },
 }
 
 /// Result alias for QCOW2 operations.
