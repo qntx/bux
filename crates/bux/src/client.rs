@@ -444,7 +444,9 @@ impl Client {
         )
         .await?;
         Self::expect_ready(&mut stream).await?;
-        bux_proto::recv_download(&mut stream, max_bytes).await
+        let mut data = Vec::new();
+        bux_proto::recv_download(&mut stream, &mut data, max_bytes).await?;
+        Ok(data)
     }
 
     /// Writes a file to the guest filesystem.
@@ -508,7 +510,7 @@ impl Client {
         )
         .await?;
         Self::expect_ready(&mut stream).await?;
-        bux_proto::send_upload_from_reader(&mut stream, reader).await?;
+        bux_proto::send_upload(&mut stream, reader).await?;
         Self::expect_upload_ok(&mut stream).await
     }
 
@@ -542,7 +544,9 @@ impl Client {
         )
         .await?;
         Self::expect_ready(&mut stream).await?;
-        bux_proto::recv_download(&mut stream, max_bytes).await
+        let mut data = Vec::new();
+        bux_proto::recv_download(&mut stream, &mut data, max_bytes).await?;
+        Ok(data)
     }
 
     /// Streams a path from the guest as a tar archive directly to `writer`.
@@ -570,7 +574,7 @@ impl Client {
         )
         .await?;
         Self::expect_ready(&mut stream).await?;
-        bux_proto::recv_download_to_writer(&mut stream, writer, max_bytes).await
+        bux_proto::recv_download(&mut stream, writer, max_bytes).await
     }
 
     /// Opens a raw Unix socket connection to the guest agent.

@@ -22,7 +22,7 @@ pub async fn handle_read(w: &mut (impl AsyncWrite + Unpin + Send), path: &str) -
             .await;
         }
     };
-    bux_proto::send_download_from_reader(w, &mut file).await?;
+    bux_proto::send_download(w, &mut file).await?;
     Ok(())
 }
 
@@ -154,7 +154,7 @@ pub async fn handle_copy_out(
         Ok(()) => {
             // Stream from file — O(chunk_size) memory instead of loading entire tar.
             let mut file = tokio::fs::File::open(&temp_path).await?;
-            let send_result = bux_proto::send_download_from_reader(w, &mut file).await;
+            let send_result = bux_proto::send_download(w, &mut file).await;
             let _ = tokio::fs::remove_file(&temp_path).await;
             send_result.map(|_| ())
         }
@@ -171,12 +171,12 @@ pub async fn handle_copy_out(
 
 /// Receives `Upload` chunks and streams them directly to a temp file.
 ///
-/// Uses `recv_upload_to_writer` so memory usage is O(chunk_size) regardless
+/// Uses `recv_upload` so memory usage is O(chunk_size) regardless
 /// of total upload size.
 async fn recv_upload_to_file(r: &mut (impl AsyncRead + Unpin + Send)) -> io::Result<PathBuf> {
     let temp_path = temp_file_path("upload");
     let mut file = tokio::fs::File::create(&temp_path).await?;
-    match bux_proto::recv_upload_to_writer(r, &mut file, bux_proto::MAX_UPLOAD_BYTES).await {
+    match bux_proto::recv_upload(r, &mut file, bux_proto::MAX_UPLOAD_BYTES).await {
         Ok(_) => Ok(temp_path),
         Err(e) => {
             let _ = tokio::fs::remove_file(&temp_path).await;
