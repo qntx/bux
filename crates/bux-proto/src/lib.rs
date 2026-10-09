@@ -21,11 +21,11 @@ pub use boot::{
     validate_guest_mount_path,
 };
 pub use codec::{
-    recv, recv_download, recv_download_to_writer, recv_upload, recv_upload_to_writer, send,
-    send_download, send_download_from_reader, send_upload, send_upload_from_reader,
+    recv, recv_download, recv_download_to_writer, recv_upload_to_writer, send,
+    send_download_from_reader, send_upload, send_upload_from_reader,
 };
 pub use message::{
     AGENT_PORT, ControlReq, ControlResp, Download, ErrorCode, ErrorInfo, ExecIn, ExecOut,
-    ExecStart, Hello, HelloAck, MAX_DOWNLOAD_BYTES, MAX_UPLOAD_BYTES, PROTOCOL_VERSION,
-    STREAM_CHUNK_SIZE, TtyConfig, Upload, UploadResult,
+    ExecStart, Hello, HelloAck, MAX_DOWNLOAD_BYTES, MAX_UPLOAD_BYTES, PROTOCOL_VERSION, TtyConfig,
+    Upload, UploadResult,
 };

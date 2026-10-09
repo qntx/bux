@@ -21,9 +21,6 @@ use serde::{Deserialize, Serialize};
 /// - v10: dropped unimplemented Metrics/HealthCheck/PrepareSnapshot control variants.
 pub const PROTOCOL_VERSION: u32 = 10;
 
-/// Default chunk size for streaming transfers (1 MiB).
-pub const STREAM_CHUNK_SIZE: usize = 1 << 20;
-
 /// Maximum total upload size accepted by the guest agent (512 MiB).
 pub const MAX_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
 

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use bux_proto::{
     ControlReq, ControlResp, ExecIn, ExecOut, ExecStart, Hello, HelloAck, PROTOCOL_VERSION,
-    STREAM_CHUNK_SIZE, UploadResult,
+    UploadResult,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::UnixStream;
@@ -463,7 +463,7 @@ impl Client {
         )
         .await?;
         Self::expect_ready(&mut stream).await?;
-        bux_proto::send_upload(&mut stream, data, STREAM_CHUNK_SIZE).await?;
+        bux_proto::send_upload(&mut stream, data).await?;
         Self::expect_upload_ok(&mut stream).await
     }
 
@@ -482,7 +482,7 @@ impl Client {
         )
         .await?;
         Self::expect_ready(&mut stream).await?;
-        bux_proto::send_upload(&mut stream, tar_data, STREAM_CHUNK_SIZE).await?;
+        bux_proto::send_upload(&mut stream, tar_data).await?;
         Self::expect_upload_ok(&mut stream).await
     }
 
@@ -508,7 +508,7 @@ impl Client {
         )
         .await?;
         Self::expect_ready(&mut stream).await?;
-        bux_proto::send_upload_from_reader(&mut stream, reader, STREAM_CHUNK_SIZE).await?;
+        bux_proto::send_upload_from_reader(&mut stream, reader).await?;
         Self::expect_upload_ok(&mut stream).await
     }
 

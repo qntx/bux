@@ -234,14 +234,14 @@ CD `cd.yml` musl guest:
 - in-tree Linux musl-gcc sibling: `target/debug/bux-guest-<triple>`
 
 After this merge is on `main`, tag the guest of that commit (`guest-v` plus
-`crates/bux-guest/Cargo.toml` `version`; `0.2.1` today):
+`crates/bux-guest/Cargo.toml` `version`; `0.2.2` today):
 
 ```bash
 git fetch origin
 git checkout main
 git pull --ff-only origin main
-git tag guest-v0.2.1
-git push origin guest-v0.2.1
+git tag guest-v0.2.2
+git push origin guest-v0.2.2
 ```
 
 Do not vendor the ELF in git. Do not invent a FULL sha256 row.

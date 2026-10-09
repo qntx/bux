@@ -1,35 +1,47 @@
 //! Async length-prefixed frame codec over any [`AsyncRead`]/[`AsyncWrite`] stream.
 //!
-//! Each frame is: `[u32 big-endian length][postcard payload]`.
+//! Each frame is `[u32 big-endian length][postcard payload]` and carries exactly
+//! one message. Bulk data travels as a chunk stream: `Chunk` frames of at most
+//! 1 MiB ended by `Done` — [`Upload`] host → guest, [`Download`] guest → host.
+//! A download may end with [`Download::Error`] instead.
 
 use std::io;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-#[allow(
-    unused_imports,
-    reason = "intra-doc links to Upload/Download variants need these in scope"
-)]
-use crate::{Download, Upload};
+use crate::{Download, ErrorInfo, Upload};
 
-/// Maximum allowed frame payload (16 MiB).
+/// Maximum frame payload (16 MiB).
 const MAX_FRAME: u32 = 16 * 1024 * 1024;
 
-/// Sends a postcard-serialized message with a 4-byte BE length prefix.
+/// Data bytes per stream chunk (1 MiB), leaving room for framing within [`MAX_FRAME`].
+const CHUNK_SIZE: usize = 1 << 20;
+
+/// Sends `msg` as one frame and flushes `w`.
 ///
 /// # Errors
 ///
-/// Returns an error if serialization fails or the underlying write fails.
+/// Returns an error if serialization fails, the payload exceeds 16 MiB, or the
+/// write fails.
 pub async fn send(
     w: &mut (impl AsyncWrite + Unpin + Send),
     msg: &(impl Serialize + Sync),
 ) -> io::Result<()> {
-    let payload =
-        postcard::to_allocvec(msg).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let len = u32::try_from(payload.len())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame exceeds u32::MAX"))?;
-    // Pre-assemble frame to minimize syscalls.
+    let payload = postcard::to_allocvec(msg).map_err(invalid_data)?;
+    // Enforce the receiver's limit here: an oversized frame fails at its source
+    // instead of breaking the peer's stream.
+    let len = match u32::try_from(payload.len()) {
+        Ok(len) if len <= MAX_FRAME => len,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("frame of {} bytes exceeds 16 MiB limit", payload.len()),
+            ));
+        }
+    };
+    // One buffer, one write: the length prefix does not cost its own syscall.
     let mut frame = Vec::with_capacity(4 + payload.len());
     frame.extend_from_slice(&len.to_be_bytes());
     frame.extend_from_slice(&payload);
@@ -37,274 +49,194 @@ pub async fn send(
     w.flush().await
 }
 
-/// Receives and deserializes a length-prefixed postcard message.
+/// Receives one frame and deserializes it as `T`.
 ///
 /// # Errors
 ///
-/// Returns an error if the frame exceeds 16 MiB, the read fails, or deserialization fails.
-pub async fn recv<T: for<'de> Deserialize<'de>>(
-    r: &mut (impl AsyncRead + Unpin + Send),
-) -> io::Result<T> {
-    let mut hdr = [0u8; 4];
-    r.read_exact(&mut hdr).await?;
-    let len = u32::from_be_bytes(hdr);
+/// Returns an error if the read fails, the frame exceeds 16 MiB, or the payload
+/// is not exactly one `T`.
+///
+/// # Cancel safety
+///
+/// This method is not cancellation safe. If the future is dropped mid-frame,
+/// for example by another `tokio::select!` branch completing first, the bytes
+/// read so far are lost and the stream is desynchronized.
+pub async fn recv<T: DeserializeOwned>(r: &mut (impl AsyncRead + Unpin + Send)) -> io::Result<T> {
+    let len = r.read_u32().await?;
     if len > MAX_FRAME {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "frame exceeds 16 MiB limit",
-        ));
+        return Err(invalid_data(format!(
+            "frame of {len} bytes exceeds 16 MiB limit"
+        )));
     }
-    let mut payload = vec![0u8; len as usize];
+    let mut payload = vec![0; len as usize];
     r.read_exact(&mut payload).await?;
-    postcard::from_bytes(&payload).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    // Leftover bytes mean the peer encoded a different message layout.
+    match postcard::take_from_bytes(&payload).map_err(invalid_data)? {
+        (msg, []) => Ok(msg),
+        (_, rest) => Err(invalid_data(format!(
+            "{} trailing bytes after message",
+            rest.len()
+        ))),
+    }
 }
 
-/// Sends `data` as a series of [`Upload::Chunk`] messages followed by
-/// [`Upload::Done`], using the given chunk size.
+/// Sends `data` as an [`Upload`] stream.
 ///
 /// # Errors
 ///
-/// Returns an error if any chunk write fails.
-pub async fn send_upload(
-    w: &mut (impl AsyncWrite + Unpin + Send),
-    data: &[u8],
-    chunk_size: usize,
-) -> io::Result<()> {
-    use crate::Upload;
-    for chunk in data.chunks(chunk_size) {
-        send(w, &Upload::Chunk(chunk.to_vec())).await?;
-    }
-    send(w, &Upload::Done).await
+/// Returns an error if a write fails.
+pub async fn send_upload(w: &mut (impl AsyncWrite + Unpin + Send), data: &[u8]) -> io::Result<()> {
+    let mut src = data;
+    send_upload_from_reader(w, &mut src).await?;
+    Ok(())
 }
 
-/// Receives an upload stream ([`Upload::Chunk`] + [`Upload::Done`]),
-/// collecting all chunks into a single buffer with a size limit.
-///
-/// # Errors
-///
-/// Returns an error if a read/deserialize fails or the upload exceeds `max_bytes`.
-pub async fn recv_upload(
-    r: &mut (impl AsyncRead + Unpin + Send),
-    max_bytes: u64,
-) -> io::Result<Vec<u8>> {
-    use crate::Upload;
-    let mut buf = Vec::new();
-    loop {
-        match recv::<Upload>(r).await? {
-            Upload::Chunk(data) => {
-                buf.extend(&data);
-                if buf.len() as u64 > max_bytes {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("upload exceeds {max_bytes} byte limit"),
-                    ));
-                }
-            }
-            Upload::Done => return Ok(buf),
-        }
-    }
-}
-
-/// Sends `data` as a series of [`Download::Chunk`] messages followed by
-/// [`Download::Done`], using the given chunk size.
-///
-/// # Errors
-///
-/// Returns an error if any chunk write fails.
-pub async fn send_download(
-    w: &mut (impl AsyncWrite + Unpin + Send),
-    data: &[u8],
-    chunk_size: usize,
-) -> io::Result<()> {
-    use crate::Download;
-    for chunk in data.chunks(chunk_size) {
-        send(w, &Download::Chunk(chunk.to_vec())).await?;
-    }
-    send(w, &Download::Done).await
-}
-
-/// Returns `total + chunk` if that stays within `max_bytes`.
-///
-/// Checked before the caller extends or writes so the collect buffer cannot
-/// grow past the cap.
-fn account_download_chunk(total: u64, chunk_len: usize, max_bytes: u64) -> io::Result<u64> {
-    let add = u64::try_from(chunk_len).unwrap_or(u64::MAX);
-    let next = total.saturating_add(add);
-    if next > max_bytes {
-        return Err(io::Error::new(
-            io::ErrorKind::FileTooLarge,
-            format!("download exceeds {max_bytes} byte limit"),
-        ));
-    }
-    Ok(next)
-}
-
-/// Receives a download stream ([`Download::Chunk`] + [`Download::Done`]),
-/// collecting all chunks into a single buffer with a size limit.
-///
-/// # Errors
-///
-/// Returns an error if a read/deserialize fails, the remote sends an error,
-/// or the download exceeds `max_bytes`.
-pub async fn recv_download(
-    r: &mut (impl AsyncRead + Unpin + Send),
-    max_bytes: u64,
-) -> io::Result<Vec<u8>> {
-    use crate::Download;
-    let mut buf = Vec::new();
-    let mut total: u64 = 0;
-    loop {
-        match recv::<Download>(r).await? {
-            Download::Chunk(data) => {
-                total = account_download_chunk(total, data.len(), max_bytes)?;
-                buf.extend(data);
-            }
-            Download::Done => return Ok(buf),
-            Download::Error(e) => return Err(io::Error::other(e.message)),
-        }
-    }
-}
-
-/// Reads from `src` and sends [`Upload`] chunks until EOF.
-///
-/// Streams data without buffering the entire payload in memory.
-/// Returns the total number of bytes sent.
+/// Streams `src` to EOF as an [`Upload`] stream without buffering all of it.
+/// Returns the number of bytes sent.
 ///
 /// # Errors
 ///
 /// Returns an error if a read from `src` or a write to `w` fails.
-///
-/// # Panics
-///
-/// Should not panic in practice; the internal `expect` is guarded
-/// by the read length.
 pub async fn send_upload_from_reader(
     w: &mut (impl AsyncWrite + Unpin + Send),
     src: &mut (impl AsyncRead + Unpin + Send),
-    chunk_size: usize,
 ) -> io::Result<u64> {
-    use crate::Upload;
-    let mut buf = vec![0u8; chunk_size];
-    let mut total: u64 = 0;
-    loop {
-        let n = src.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        total += n as u64;
-        #[allow(clippy::expect_used, reason = "n is bounded by buf.len()")]
-        send(
-            w,
-            &Upload::Chunk(buf.get(..n).expect("n <= buf.len()").to_vec()),
-        )
-        .await?;
+    let mut total = 0;
+    while let Some(chunk) = read_chunk(src).await? {
+        total += chunk.len() as u64;
+        send(w, &Upload::Chunk(chunk)).await?;
     }
     send(w, &Upload::Done).await?;
     Ok(total)
 }
 
-/// Reads from `src` and sends [`Download`] chunks until EOF.
+/// Streams `src` to EOF as a [`Download`] stream without buffering all of it.
+/// Returns the number of bytes sent.
 ///
-/// Streams data without buffering the entire payload in memory.
-/// Returns the total number of bytes sent.
+/// A read error from `src` is also sent as [`Download::Error`], so the peer
+/// learns the cause instead of seeing the stream cut off.
 ///
 /// # Errors
 ///
 /// Returns an error if a read from `src` or a write to `w` fails.
-///
-/// # Panics
-///
-/// Should not panic in practice; the internal `expect` is guarded
-/// by the read length.
 pub async fn send_download_from_reader(
     w: &mut (impl AsyncWrite + Unpin + Send),
     src: &mut (impl AsyncRead + Unpin + Send),
-    chunk_size: usize,
 ) -> io::Result<u64> {
-    use crate::Download;
-    let mut buf = vec![0u8; chunk_size];
-    let mut total: u64 = 0;
+    let mut total = 0;
     loop {
-        let n = src.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        total += n as u64;
-        #[allow(clippy::expect_used, reason = "n is bounded by buf.len()")]
-        send(
-            w,
-            &Download::Chunk(buf.get(..n).expect("n <= buf.len()").to_vec()),
-        )
-        .await?;
+        let chunk = match read_chunk(src).await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(e) => {
+                // Best effort: if this send fails too, the read error is still
+                // the one worth returning.
+                drop(send(w, &Download::Error(ErrorInfo::internal(e.to_string()))).await);
+                return Err(e);
+            }
+        };
+        total += chunk.len() as u64;
+        send(w, &Download::Chunk(chunk)).await?;
     }
     send(w, &Download::Done).await?;
     Ok(total)
 }
 
-/// Receives an upload stream and writes chunks directly to `dst`.
-///
-/// Streams data without buffering the entire payload in memory.
-/// Returns the total number of bytes written.
+/// Receives an [`Upload`] stream and writes it to `dst`.
+/// Returns the number of bytes written.
 ///
 /// # Errors
 ///
-/// Returns an error if a read/write fails or the upload exceeds `max_bytes`.
+/// Returns an error if a read or write fails, or the upload exceeds `max_bytes`
+/// ([`io::ErrorKind::FileTooLarge`]; nothing past the limit reaches `dst`).
 pub async fn recv_upload_to_writer(
     r: &mut (impl AsyncRead + Unpin + Send),
     dst: &mut (impl AsyncWrite + Unpin + Send),
     max_bytes: u64,
 ) -> io::Result<u64> {
-    use crate::Upload;
-    let mut total: u64 = 0;
-    loop {
-        match recv::<Upload>(r).await? {
-            Upload::Chunk(data) => {
-                total += data.len() as u64;
-                if total > max_bytes {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("upload exceeds {max_bytes} byte limit"),
-                    ));
-                }
-                dst.write_all(&data).await?;
-            }
-            Upload::Done => {
-                dst.flush().await?;
-                return Ok(total);
-            }
-        }
-    }
+    recv_chunks(r, dst, max_bytes, "upload", |msg: Upload| match msg {
+        Upload::Chunk(chunk) => Ok(Some(chunk)),
+        Upload::Done => Ok(None),
+    })
+    .await
 }
 
-/// Receives a download stream and writes chunks directly to `dst`.
-///
-/// Streams data without buffering the entire payload in memory.
-/// Returns the total number of bytes written.
+/// Receives a [`Download`] stream into memory.
 ///
 /// # Errors
 ///
-/// Returns an error if a read/write fails, the remote sends an error, or the
-/// download exceeds `max_bytes`.
+/// Same as [`recv_download_to_writer`].
+pub async fn recv_download(
+    r: &mut (impl AsyncRead + Unpin + Send),
+    max_bytes: u64,
+) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    recv_download_to_writer(r, &mut buf, max_bytes).await?;
+    Ok(buf)
+}
+
+/// Receives a [`Download`] stream and writes it to `dst`.
+/// Returns the number of bytes written.
+///
+/// # Errors
+///
+/// Returns an error if a read or write fails, the peer sends
+/// [`Download::Error`] (its [`ErrorInfo`] becomes the error's inner value), or
+/// the download exceeds `max_bytes` ([`io::ErrorKind::FileTooLarge`]; nothing
+/// past the limit reaches `dst`).
 pub async fn recv_download_to_writer(
     r: &mut (impl AsyncRead + Unpin + Send),
     dst: &mut (impl AsyncWrite + Unpin + Send),
     max_bytes: u64,
 ) -> io::Result<u64> {
-    use crate::Download;
+    recv_chunks(r, dst, max_bytes, "download", |msg: Download| match msg {
+        Download::Chunk(chunk) => Ok(Some(chunk)),
+        Download::Done => Ok(None),
+        Download::Error(e) => Err(io::Error::other(e)),
+    })
+    .await
+}
+
+/// Receives a chunk stream into `dst`, refusing more than `max_bytes` in total.
+///
+/// `chunk_of` maps each message to its chunk, `None` at end of stream, or the
+/// error the peer sent. The limit is checked before a chunk is written, so
+/// `dst` never grows past it.
+async fn recv_chunks<M: DeserializeOwned + Send>(
+    r: &mut (impl AsyncRead + Unpin + Send),
+    dst: &mut (impl AsyncWrite + Unpin + Send),
+    max_bytes: u64,
+    stream: &str,
+    chunk_of: fn(M) -> io::Result<Option<Vec<u8>>>,
+) -> io::Result<u64> {
     let mut total: u64 = 0;
-    loop {
-        match recv::<Download>(r).await? {
-            Download::Chunk(data) => {
-                total = account_download_chunk(total, data.len(), max_bytes)?;
-                dst.write_all(&data).await?;
-            }
-            Download::Done => {
-                dst.flush().await?;
-                return Ok(total);
-            }
-            Download::Error(e) => return Err(io::Error::other(e.message)),
+    while let Some(chunk) = chunk_of(recv(r).await?)? {
+        total = total.saturating_add(chunk.len() as u64);
+        if total > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                format!("{stream} exceeds {max_bytes} byte limit"),
+            ));
         }
+        dst.write_all(&chunk).await?;
     }
+    dst.flush().await?;
+    Ok(total)
+}
+
+/// Reads the next chunk of up to [`CHUNK_SIZE`] bytes, or `None` at EOF.
+///
+/// Keeps reading until the chunk is full or `src` ends, so short reads do not
+/// turn into small frames.
+async fn read_chunk(src: &mut (impl AsyncRead + Unpin + Send)) -> io::Result<Option<Vec<u8>>> {
+    let mut chunk = Vec::with_capacity(CHUNK_SIZE);
+    src.take(CHUNK_SIZE as u64).read_to_end(&mut chunk).await?;
+    Ok((!chunk.is_empty()).then_some(chunk))
+}
+
+/// Wraps `err` as an [`io::ErrorKind::InvalidData`] error.
+fn invalid_data(err: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, err)
 }
 
 #[cfg(test)]
@@ -316,11 +248,34 @@ pub async fn recv_download_to_writer(
     reason = "tests use unwrap/expect/panic for clarity"
 )]
 mod tests {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use tokio::io::ReadBuf;
+
     use super::*;
     use crate::{
-        ControlReq, ControlResp, Download, ErrorCode, ErrorInfo, ExecIn, ExecOut, ExecStart, Hello,
-        HelloAck, Upload, UploadResult,
+        ControlReq, ControlResp, ErrorCode, ExecIn, ExecOut, ExecStart, Hello, HelloAck,
+        MAX_DOWNLOAD_BYTES, MAX_UPLOAD_BYTES, UploadResult,
     };
+
+    /// Reader whose every read fails.
+    struct FailingReader;
+
+    impl AsyncRead for FailingReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Err(io::Error::other("disk read failed")))
+        }
+    }
+
+    /// Two full chunks plus a partial one.
+    fn multi_chunk_data() -> Vec<u8> {
+        (0..=255).cycle().take(2 * CHUNK_SIZE + 7).collect()
+    }
 
     #[tokio::test]
     async fn roundtrip_hello_control() {
@@ -503,28 +458,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn roundtrip_upload_stream() {
-        let (mut c, mut s) = tokio::io::duplex(4096);
-        let data = vec![42u8; 600];
-
-        send_upload(&mut c, &data, 256).await.unwrap();
-
-        let received = recv_upload(&mut s, 1024).await.unwrap();
-        assert_eq!(received, data);
-    }
-
-    #[tokio::test]
-    async fn roundtrip_download_stream() {
-        let (mut c, mut s) = tokio::io::duplex(4096);
-        let data = vec![7u8; 500];
-
-        send_download(&mut s, &data, 256).await.unwrap();
-
-        let received = recv_download(&mut c, 1024).await.unwrap();
-        assert_eq!(received, data);
-    }
-
-    #[tokio::test]
     async fn upload_result_roundtrip() {
         let (mut c, mut s) = tokio::io::duplex(1024);
         send(&mut c, &UploadResult::Ok).await.unwrap();
@@ -542,104 +475,194 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_oversized_frame() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&(32u32 * 1024 * 1024).to_be_bytes());
-        buf.extend_from_slice(&[0u8; 16]);
-        let mut cursor = io::Cursor::new(buf);
-        let result: io::Result<Hello> = recv(&mut cursor).await;
-        assert!(result.is_err());
+    async fn send_rejects_oversized_frame() {
+        let mut wire = Vec::new();
+        let err = send(&mut wire, &Upload::Chunk(vec![0; MAX_FRAME as usize]))
+            .await
+            .expect_err("oversize");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "kind");
+        assert!(wire.is_empty(), "nothing reaches the wire");
     }
 
     #[tokio::test]
-    async fn upload_exceeds_limit() {
-        let (mut c, mut s) = tokio::io::duplex(4096);
-        // Send 200 bytes, limit 100
-        send(&mut c, &Upload::Chunk(vec![0u8; 200])).await.unwrap();
-        send(&mut c, &Upload::Done).await.unwrap();
-        let result = recv_upload(&mut s, 100).await;
-        assert!(result.is_err());
+    async fn recv_rejects_oversized_frame() {
+        let mut wire = (MAX_FRAME + 1).to_be_bytes().to_vec();
+        wire.extend_from_slice(&[0; 16]);
+        let err = recv::<Hello>(&mut wire.as_slice())
+            .await
+            .expect_err("oversize");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "kind");
     }
 
     #[tokio::test]
-    async fn recv_upload_to_writer_streams() {
-        let (mut c, mut s) = tokio::io::duplex(4096);
-        let data = vec![42u8; 600];
+    async fn recv_rejects_trailing_bytes() {
+        let mut payload = postcard::to_allocvec(&Hello::Control { version: 5 }).unwrap();
+        payload.push(0);
+        let mut wire = u32::try_from(payload.len()).unwrap().to_be_bytes().to_vec();
+        wire.extend_from_slice(&payload);
+        let err = recv::<Hello>(&mut wire.as_slice())
+            .await
+            .expect_err("trailing byte");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "kind");
+    }
 
-        send_upload(&mut c, &data, 256).await.unwrap();
+    #[tokio::test]
+    async fn upload_stream_roundtrip() {
+        let data = multi_chunk_data();
+        let mut wire = Vec::new();
+        send_upload(&mut wire, &data).await.unwrap();
 
         let mut dst = Vec::new();
-        let total = recv_upload_to_writer(&mut s, &mut dst, 1024).await.unwrap();
-        assert_eq!(total, 600);
-        assert_eq!(dst, data);
+        let total = recv_upload_to_writer(&mut wire.as_slice(), &mut dst, MAX_UPLOAD_BYTES)
+            .await
+            .unwrap();
+        assert_eq!(total, data.len() as u64, "total");
+        assert!(dst == data, "payload");
+    }
+
+    #[tokio::test]
+    async fn send_upload_splits_into_full_chunks() {
+        let mut wire = Vec::new();
+        send_upload(&mut wire, &multi_chunk_data()).await.unwrap();
+
+        let mut rx = wire.as_slice();
+        let mut sizes = Vec::new();
+        while let Upload::Chunk(chunk) = recv(&mut rx).await.unwrap() {
+            sizes.push(chunk.len());
+        }
+        assert_eq!(sizes, [CHUNK_SIZE, CHUNK_SIZE, 7], "chunk sizes");
+        assert!(rx.is_empty(), "Done is the last frame");
+    }
+
+    #[tokio::test]
+    async fn send_upload_from_reader_fills_chunks() {
+        let mut src = (&b"ab"[..]).chain(&b"cd"[..]);
+        let mut wire = Vec::new();
+        let total = send_upload_from_reader(&mut wire, &mut src).await.unwrap();
+        assert_eq!(total, 4, "total");
+
+        let mut rx = wire.as_slice();
+        let first: Upload = recv(&mut rx).await.unwrap();
+        assert!(
+            matches!(first, Upload::Chunk(d) if d == b"abcd"),
+            "short reads are joined into one chunk"
+        );
+        let second: Upload = recv(&mut rx).await.unwrap();
+        assert!(matches!(second, Upload::Done), "then Done");
     }
 
     #[tokio::test]
     async fn recv_upload_to_writer_rejects_oversized() {
-        let (mut c, mut s) = tokio::io::duplex(4096);
-        send(&mut c, &Upload::Chunk(vec![0u8; 200])).await.unwrap();
-        send(&mut c, &Upload::Done).await.unwrap();
-
+        let mut wire = Vec::new();
+        send_upload(&mut wire, &[0; 200]).await.unwrap();
         let mut dst = Vec::new();
-        let result = recv_upload_to_writer(&mut s, &mut dst, 100).await;
-        assert!(result.is_err());
+        let err = recv_upload_to_writer(&mut wire.as_slice(), &mut dst, 100)
+            .await
+            .expect_err("oversize");
+        assert_eq!(err.kind(), io::ErrorKind::FileTooLarge, "kind");
+        assert!(dst.is_empty(), "nothing past the limit is written");
     }
 
     #[tokio::test]
-    async fn send_download_from_reader_streams() {
-        let (mut c, mut s) = tokio::io::duplex(8192);
-        let data = vec![7u8; 500];
-
-        let mut src = io::Cursor::new(data.clone());
-        let total = send_download_from_reader(&mut s, &mut src, 256)
+    async fn download_stream_roundtrip() {
+        let data = multi_chunk_data();
+        let mut wire = Vec::new();
+        let sent = send_download_from_reader(&mut wire, &mut data.as_slice())
             .await
             .unwrap();
-        assert_eq!(total, 500);
+        assert_eq!(sent, data.len() as u64, "sent");
 
-        let received = recv_download(&mut c, 1024).await.unwrap();
-        assert_eq!(received, data);
+        let received = recv_download(&mut wire.as_slice(), MAX_DOWNLOAD_BYTES)
+            .await
+            .unwrap();
+        assert!(received == data, "payload");
+    }
+
+    #[tokio::test]
+    async fn send_download_from_reader_reports_read_error() {
+        let mut wire = Vec::new();
+        let err = send_download_from_reader(&mut wire, &mut FailingReader)
+            .await
+            .expect_err("read error");
+        assert_eq!(
+            err.to_string(),
+            "disk read failed",
+            "caller sees the read error"
+        );
+
+        let err = recv_download(&mut wire.as_slice(), MAX_DOWNLOAD_BYTES)
+            .await
+            .expect_err("peer sees the error");
+        let info = err
+            .get_ref()
+            .and_then(|e| e.downcast_ref::<ErrorInfo>())
+            .expect("ErrorInfo");
+        assert_eq!(info.message, "disk read failed", "peer sees the cause");
+    }
+
+    #[tokio::test]
+    async fn recv_download_keeps_error_info() {
+        let mut wire = Vec::new();
+        send(
+            &mut wire,
+            &Download::Error(ErrorInfo::not_found("no such file")),
+        )
+        .await
+        .unwrap();
+        let err = recv_download(&mut wire.as_slice(), MAX_DOWNLOAD_BYTES)
+            .await
+            .expect_err("remote error");
+        let info = err
+            .get_ref()
+            .and_then(|e| e.downcast_ref::<ErrorInfo>())
+            .expect("ErrorInfo");
+        assert_eq!(info.code, ErrorCode::NotFound, "code");
     }
 
     #[tokio::test]
     async fn recv_download_rejects_oversized() {
-        let (mut c, mut s) = tokio::io::duplex(4096);
-        send(&mut s, &Download::Chunk(vec![0u8; 200]))
+        let mut wire = Vec::new();
+        send(&mut wire, &Download::Chunk(vec![0; 200]))
             .await
             .unwrap();
-        send(&mut s, &Download::Done).await.unwrap();
-        let err = recv_download(&mut c, 100).await.expect_err("oversize");
+        send(&mut wire, &Download::Done).await.unwrap();
+        let err = recv_download(&mut wire.as_slice(), 100)
+            .await
+            .expect_err("oversize");
         assert_eq!(err.kind(), io::ErrorKind::FileTooLarge, "kind");
     }
 
     #[tokio::test]
     async fn recv_download_to_writer_rejects_oversized() {
-        let (mut c, mut s) = tokio::io::duplex(4096);
-        send(&mut s, &Download::Chunk(vec![0u8; 200]))
+        let mut wire = Vec::new();
+        send(&mut wire, &Download::Chunk(vec![0; 200]))
             .await
             .unwrap();
-        send(&mut s, &Download::Done).await.unwrap();
+        send(&mut wire, &Download::Done).await.unwrap();
         let mut dst = Vec::new();
-        let err = recv_download_to_writer(&mut c, &mut dst, 100)
+        let err = recv_download_to_writer(&mut wire.as_slice(), &mut dst, 100)
             .await
             .expect_err("oversize");
         assert_eq!(err.kind(), io::ErrorKind::FileTooLarge, "kind");
-        assert!(dst.len() <= 100, "dst must not exceed max_bytes");
+        assert!(dst.is_empty(), "nothing past the limit is written");
     }
 
     #[tokio::test]
     async fn recv_download_accepts_exact_max() {
-        let (mut c, mut s) = tokio::io::duplex(4096);
-        let data = vec![7u8; 100];
-        send_download(&mut s, &data, 256).await.unwrap();
-        let received = recv_download(&mut c, 100).await.unwrap();
-        assert_eq!(received, data);
+        let data = vec![7; 100];
+        let mut wire = Vec::new();
+        send_download_from_reader(&mut wire, &mut data.as_slice())
+            .await
+            .unwrap();
+        let received = recv_download(&mut wire.as_slice(), 100).await.unwrap();
+        assert_eq!(received, data, "exactly max_bytes is accepted");
     }
 
     #[tokio::test]
     async fn recv_download_empty_ok() {
-        let (mut c, mut s) = tokio::io::duplex(1024);
-        send(&mut s, &Download::Done).await.unwrap();
-        let received = recv_download(&mut c, 0).await.unwrap();
+        let mut wire = Vec::new();
+        send(&mut wire, &Download::Done).await.unwrap();
+        let received = recv_download(&mut wire.as_slice(), 0).await.unwrap();
         assert!(received.is_empty(), "empty Done is ok at max_bytes 0");
     }
 }
