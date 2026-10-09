@@ -361,9 +361,9 @@ fn validate_resolved_path(path: &Path, allow_sensitive: bool) -> Result<PathBuf>
     }
     if !allow_sensitive {
         for denied in sensitive_prefixes() {
-            if path_is_or_under(path, &denied) {
+            if path_intersects(path, &denied) {
                 return Err(Error::InvalidConfig(format!(
-                    "host path {} is under default-denied prefix {} \
+                    "host path {} contains or is under default-denied prefix {} \
                      (set allow_sensitive on the mount to override)",
                     path.display(),
                     denied.display()
@@ -374,12 +374,17 @@ fn validate_resolved_path(path: &Path, allow_sensitive: bool) -> Result<PathBuf>
     Ok(path.to_path_buf())
 }
 
-/// Whether `path` equals or is nested under `prefix`.
-fn path_is_or_under(path: &Path, prefix: &Path) -> bool {
-    if path == prefix {
+/// Whether `path` and `prefix` intersect (one equals or is nested under the other).
+fn path_intersects(path: &Path, prefix: &Path) -> bool {
+    if path.starts_with(prefix) || prefix.starts_with(path) {
         return true;
     }
-    path.starts_with(prefix)
+    if let Ok(canon_prefix) = prefix.canonicalize()
+        && (path.starts_with(&canon_prefix) || canon_prefix.starts_with(path))
+    {
+        return true;
+    }
+    false
 }
 
 /// Default-denied host prefixes (credentials / secrets).
@@ -477,6 +482,32 @@ mod tests {
             assert!(msg.contains("denied") || msg.contains("default-denied"));
             assert!(validate_bind_path(&ssh, true).is_ok());
         }
+    }
+
+    #[test]
+    fn deny_parent_of_sensitive_prefix() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let ssh = home.join(".ssh");
+        if ssh.is_dir() {
+            let err = validate_bind_path(&home, false).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("denied") || msg.contains("default-denied"));
+            assert!(validate_bind_path(&home, true).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_path_intersects() {
+        let p1 = Path::new("/a/b");
+        let p2 = Path::new("/a/b/c");
+        let p3 = Path::new("/a/x");
+
+        assert!(path_intersects(p1, p1));
+        assert!(path_intersects(p2, p1));
+        assert!(path_intersects(p1, p2));
+        assert!(!path_intersects(p1, p3));
     }
 
     #[test]
