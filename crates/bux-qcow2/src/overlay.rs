@@ -8,7 +8,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::format::{
     BackingFormat, CLUSTER_BITS, CLUSTER_SIZE, EXT_BACKING_FMT, EXT_END, HEADER_LENGTH, MAGIC,
     REFCOUNT_ORDER, VERSION, align8, write_be_u16, write_be_u32, write_be_u64,
@@ -39,7 +39,9 @@ use crate::format::{
 ///
 /// # Errors
 ///
-/// [`crate::Error::Io`] if file creation, writing, or fsync fails.
+/// Returns [`crate::Error::BackingPathTooLong`] if `backing_file` exceeds
+/// the remaining space in Cluster 0. Returns [`crate::Error::Io`] if file
+/// creation, writing, or fsync fails.
 #[allow(
     clippy::cast_possible_truncation,
     reason = "l1_entries is capped at u32::MAX by QCOW2 spec and virtual_size upper bound"
@@ -52,6 +54,15 @@ pub fn create_overlay(
 ) -> Result<()> {
     let backing_bytes = backing_file.as_bytes();
     let fmt_bytes = backing_format.as_str().as_bytes();
+
+    let header_ext_len = (HEADER_LENGTH as usize) + 8 + align8(fmt_bytes.len()) + 8;
+    let max_backing_len = (CLUSTER_SIZE as usize).saturating_sub(header_ext_len);
+    if backing_bytes.len() > max_backing_len {
+        return Err(Error::BackingPathTooLong {
+            len: backing_bytes.len(),
+            max: max_backing_len,
+        });
+    }
 
     let l1_offset: u64 = CLUSTER_SIZE;
     let rctable_offset: u64 = 2 * CLUSTER_SIZE;
@@ -75,7 +86,7 @@ pub fn create_overlay(
     let mut off = HEADER_LENGTH as usize;
     off = write_backing_format_extension(&mut buf, off, fmt_bytes);
     off = write_end_sentinel(&mut buf, off);
-    let backing_offset = write_backing_file_name(&mut buf, off, backing_bytes);
+    let backing_offset = write_backing_file_name(&mut buf, off, backing_bytes)?;
     write_be_u64(&mut buf, 8, backing_offset);
 
     write_be_u64(&mut buf, rctable_offset as usize, rcblock_offset);
@@ -156,11 +167,57 @@ fn write_end_sentinel(buf: &mut [u8], off: usize) -> usize {
 
 /// Copy the backing-file name into `buf` at `off`, returning the absolute
 /// on-disk offset where it was placed.
+fn write_backing_file_name(buf: &mut [u8], off: usize, backing_bytes: &[u8]) -> Result<u64> {
+    let max = buf.len().saturating_sub(off);
+    let dest = buf
+        .get_mut(off..off + backing_bytes.len())
+        .ok_or(Error::BackingPathTooLong {
+            len: backing_bytes.len(),
+            max,
+        })?;
+    dest.copy_from_slice(backing_bytes);
+    Ok(off as u64)
+}
+
+#[cfg(test)]
 #[allow(
+    clippy::unwrap_used,
+    clippy::panic,
     clippy::indexing_slicing,
-    reason = "buffer sizing invariant maintained by create_overlay (4 clusters)"
+    reason = "tests"
 )]
-fn write_backing_file_name(buf: &mut [u8], off: usize, backing_bytes: &[u8]) -> u64 {
-    buf[off..off + backing_bytes.len()].copy_from_slice(backing_bytes);
-    off as u64
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn create_overlay_normal_path_succeeds() {
+        let tmp = NamedTempFile::new().unwrap();
+        let result = create_overlay(tmp.path(), "/base/image.raw", BackingFormat::Raw, 1 << 30);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn create_overlay_rejects_path_exceeding_cluster_0() {
+        let tmp = NamedTempFile::new().unwrap();
+        // Cluster 0 is 64 KiB (65536 bytes). A path of 70 KiB exceeds Cluster 0 capacity.
+        let long_path = "a".repeat(70 * 1024);
+        let result = create_overlay(tmp.path(), &long_path, BackingFormat::Raw, 1 << 30);
+        assert!(matches!(
+            result,
+            Err(Error::BackingPathTooLong { len, max }) if len == 70 * 1024 && max < 65536
+        ));
+    }
+
+    #[test]
+    fn create_overlay_rejects_excessively_long_path_without_panic() {
+        let tmp = NamedTempFile::new().unwrap();
+        // A path of 300 KiB (307,200 bytes) would overflow the total 256 KiB buffer.
+        let huge_path = "x".repeat(300 * 1024);
+        let result = create_overlay(tmp.path(), &huge_path, BackingFormat::Raw, 1 << 30);
+        assert!(matches!(
+            result,
+            Err(Error::BackingPathTooLong { len, .. }) if len == 300 * 1024
+        ));
+    }
 }
