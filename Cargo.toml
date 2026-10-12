@@ -45,7 +45,7 @@ tower = { version = "0.5.2", features = ["util"] }
 tower-http = { version = "0.7.1", features = ["limit", "trace"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 tokio-vsock = "0.7.2"
-bindgen = "0.72.1"
+bindgen = "0.73.2"
 flate2 = "1.1.9"
 tar = "0.4.46"
 ureq = "3.4.0"
