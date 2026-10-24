@@ -14,6 +14,7 @@ flate2.workspace = true
 tar.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+xattr = "1.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true

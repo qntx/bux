@@ -4,15 +4,16 @@
 //! skipped. Directory modes are applied once after the last layer.
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, BufReader, Read};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use flate2::read::GzDecoder;
 use tar::{Archive, EntryType};
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use crate::safe_root::{SYMLINK_HOP_LIMIT, SafeRoot, hop_limit_error};
 use crate::{Error, Result};
@@ -23,16 +24,18 @@ const GZIP_MEDIA_TYPES: &[&str] = &[
     "application/vnd.docker.image.rootfs.diff.tar.gzip",
 ];
 
+/// PAX record prefix for extended attributes, as Docker and containerd write it.
+const PAX_XATTR_PREFIX: &[u8] = b"SCHILY.xattr.";
+
 /// Returns `true` if the media type indicates gzip compression.
-fn is_gzip(media_type: &str) -> bool {
+pub(crate) fn is_gzip(media_type: &str) -> bool {
     GZIP_MEDIA_TYPES.contains(&media_type) || media_type.ends_with("+gzip")
 }
 
 /// Extracts layer tarballs from disk into a rootfs directory (streaming, low memory).
 ///
-/// Each `(path, media_type)` pair is a layer tarball on disk. Layers are applied
-/// in order with full OCI whiteout semantics. One rooted resolver is used for
-/// every layer; directory modes are chmod'd deepest-first after the last layer.
+/// Each `(path, media_type)` pair is a layer tarball on disk. The layers are
+/// applied in order by one [`Extractor`] with default [`Options`].
 ///
 /// # Errors
 ///
@@ -42,32 +45,65 @@ pub fn extract_layer_files(
     layers: &[(impl AsRef<Path>, impl AsRef<str>)],
     rootfs: &Path,
 ) -> Result<()> {
-    fs::create_dir_all(rootfs)?;
-    let mut extractor = LayerExtractor::open(rootfs)?;
+    let mut extractor = Extractor::open(rootfs, Options::default())?;
     for (path, media_type) in layers {
-        extractor.extract_tarball(path.as_ref(), is_gzip(media_type.as_ref()))?;
+        extractor.extract(File::open(path)?, media_type.as_ref())?;
     }
-    extractor.finalize()
+    extractor.finish()
 }
 
-struct LayerExtractor {
+/// How an [`Extractor`] applies member metadata.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Options {
+    /// Give each written member the uid and gid from its tar header, and
+    /// restore its `SCHILY.xattr.*` extended attributes.
+    ///
+    /// This needs the privilege to `chown`, so it is meant for root, as in the
+    /// image builder VM. When unset, the extracting user owns every file and
+    /// extended attributes are dropped.
+    pub keep_owners: bool,
+}
+
+/// Applies layer tarballs to a directory in order, with OCI whiteout
+/// semantics.
+///
+/// Every member path is resolved inside the root. Directory modes are applied
+/// by [`finish`](Self::finish), deepest first, after the last layer.
+///
+/// # Example
+///
+/// ```no_run
+/// use std::fs::File;
+/// use std::path::Path;
+///
+/// use bux_unpack::{Extractor, Options};
+///
+/// let mut extractor = Extractor::open(Path::new("/mnt/target"), Options { keep_owners: true })?;
+/// let layer = File::open("layer.tar.gz")?;
+/// extractor.extract(layer, "application/vnd.oci.image.layer.v1.tar+gzip")?;
+/// extractor.finish()?;
+/// # Ok::<(), bux_unpack::Error>(())
+/// ```
+pub struct Extractor {
     root: SafeRoot,
+    options: Options,
     deferred_dirs: BTreeMap<PathBuf, u32>,
 }
 
-impl std::fmt::Debug for LayerExtractor {
+impl std::fmt::Debug for Extractor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LayerExtractor")
+        f.debug_struct("Extractor")
             .field("root", &self.root)
+            .field("options", &self.options)
             .field("deferred_dirs", &self.deferred_dirs.len())
             .finish()
     }
 }
 
-impl Drop for LayerExtractor {
+impl Drop for Extractor {
     fn drop(&mut self) {
         if !self.deferred_dirs.is_empty() {
-            error!("LayerExtractor dropped without finalize");
+            error!("Extractor dropped without finish");
         }
     }
 }
@@ -77,20 +113,36 @@ struct DeferredHardlink {
     target_rel: PathBuf,
 }
 
-impl LayerExtractor {
-    fn open(rootfs: &Path) -> Result<Self> {
+impl Extractor {
+    /// Opens `root` for extraction, creating it if needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be created or opened.
+    pub fn open(root: &Path, options: Options) -> Result<Self> {
         Ok(Self {
-            root: SafeRoot::open(rootfs)?,
+            root: SafeRoot::open(root)?,
+            options,
             deferred_dirs: BTreeMap::new(),
         })
     }
 
-    fn extract_tarball(&mut self, path: &Path, gzip: bool) -> Result<()> {
-        let file = BufReader::new(File::open(path)?);
-        let result = if gzip {
-            self.extract_reader(GzDecoder::new(file))
+    /// Applies one layer read from `layer`, which is buffered here.
+    ///
+    /// A gzip `media_type` selects gzip decompression; any other type is read
+    /// as a plain tar.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the layer cannot be read, a path escapes the root,
+    /// or a filesystem operation fails. The directory modes collected so far
+    /// are then discarded, so drop the extractor after an error.
+    pub fn extract(&mut self, layer: impl Read, media_type: &str) -> Result<()> {
+        let layer = BufReader::new(layer);
+        let result = if is_gzip(media_type) {
+            self.extract_tar(GzDecoder::new(layer))
         } else {
-            self.extract_reader(file)
+            self.extract_tar(layer)
         };
         if result.is_err() {
             self.deferred_dirs.clear();
@@ -98,8 +150,8 @@ impl LayerExtractor {
         result
     }
 
-    fn extract_reader(&mut self, reader: impl Read) -> Result<()> {
-        let mut archive = Archive::new(reader);
+    fn extract_tar(&mut self, tar: impl Read) -> Result<()> {
+        let mut archive = Archive::new(tar);
         let mut unpacked = HashSet::new();
         let mut written_rels = HashSet::new();
         let mut deferred_hardlinks = Vec::new();
@@ -135,13 +187,19 @@ impl LayerExtractor {
                 continue;
             }
 
+            let owner = if self.options.keep_owners {
+                Some(Ownership::read(&mut entry, &normalized)?)
+            } else {
+                None
+            };
+            let owner = owner.as_ref();
             let safe_path = self.place_leaf(&normalized, entry_type == EntryType::Directory)?;
             match entry_type {
-                EntryType::Directory => self.create_directory(&safe_path, mode)?,
+                EntryType::Directory => self.create_directory(&safe_path, mode, owner)?,
                 EntryType::Regular | EntryType::GNUSparse | EntryType::Continuous => {
-                    write_regular(&safe_path, mode, &mut entry)?;
+                    write_regular(&safe_path, mode, &mut entry, owner)?;
                 }
-                EntryType::Symlink => create_symlink(&raw_path, &safe_path, &entry)?,
+                EntryType::Symlink => create_symlink(&raw_path, &safe_path, &entry, owner)?,
                 other => {
                     debug!(
                         path = %normalized.display(),
@@ -168,9 +226,17 @@ impl LayerExtractor {
         Ok(safe_path)
     }
 
-    fn create_directory(&mut self, safe_path: &Path, mode: u32) -> Result<()> {
+    fn create_directory(
+        &mut self,
+        safe_path: &Path,
+        mode: u32,
+        owner: Option<&Ownership>,
+    ) -> Result<()> {
         if fs::symlink_metadata(safe_path).is_err() {
             fs::create_dir(safe_path)?;
+        }
+        if let Some(owner) = owner {
+            owner.apply(safe_path, None)?;
         }
         self.deferred_dirs
             .insert(safe_path.to_path_buf(), mode & 0o7777);
@@ -236,7 +302,12 @@ impl LayerExtractor {
         Ok(())
     }
 
-    fn finalize(mut self) -> Result<()> {
+    /// Applies the directory modes collected from every layer, deepest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a mode cannot be set.
+    pub fn finish(mut self) -> Result<()> {
         let dirs = std::mem::take(&mut self.deferred_dirs);
         let mut sorted: Vec<(PathBuf, u32)> = dirs.into_iter().collect();
         sorted.sort_unstable_by(|a, b| b.0.cmp(&a.0));
@@ -256,15 +327,108 @@ fn write_regular<R: Read>(
     safe_path: &Path,
     mode: u32,
     entry: &mut tar::Entry<'_, R>,
+    owner: Option<&Ownership>,
 ) -> Result<()> {
+    let mode = mode & 0o7777;
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .mode(mode & 0o7777)
+        .mode(mode)
         .open(safe_path)?;
     io::copy(entry, &mut file)?;
-    fs::set_permissions(safe_path, Permissions::from_mode(mode & 0o7777))?;
+    match owner {
+        Some(owner) => owner.apply(safe_path, Some(mode))?,
+        None => fs::set_permissions(safe_path, Permissions::from_mode(mode))?,
+    }
+    Ok(())
+}
+
+/// Owner and extended attributes of a tar member, kept with
+/// [`Options::keep_owners`].
+struct Ownership {
+    uid: u32,
+    gid: u32,
+    xattrs: Vec<(OsString, Vec<u8>)>,
+}
+
+impl Ownership {
+    /// Reads the header uid and gid, which the tar crate has already replaced
+    /// with any PAX `uid` and `gid` records, and the `SCHILY.xattr.*` records.
+    fn read<R: Read>(entry: &mut tar::Entry<'_, R>, rel: &Path) -> Result<Self> {
+        let header = entry.header();
+        let (uid, gid) = (header.uid()?, header.gid()?);
+        let (Ok(uid), Ok(gid)) = (u32::try_from(uid), u32::try_from(gid)) else {
+            return Err(Error::Extract(format!(
+                "owner {uid}:{gid} out of range: {}",
+                rel.display()
+            )));
+        };
+        Ok(Self {
+            uid,
+            gid,
+            xattrs: pax_xattrs(entry)?,
+        })
+    }
+
+    /// Applies the owner, then `mode` if given, then the extended attributes.
+    ///
+    /// `chown` clears setuid and setgid on executables and removes
+    /// `security.capability`, even for root, so it has to come first.
+    fn apply(&self, path: &Path, mode: Option<u32>) -> Result<()> {
+        std::os::unix::fs::lchown(path, Some(self.uid), Some(self.gid))?;
+        if let Some(mode) = mode {
+            fs::set_permissions(path, Permissions::from_mode(mode))?;
+        }
+        for (name, value) in &self.xattrs {
+            set_xattr(path, name, value)?;
+        }
+        Ok(())
+    }
+}
+
+/// The `SCHILY.xattr.*` PAX records of a member, as names and values.
+fn pax_xattrs<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<Vec<(OsString, Vec<u8>)>> {
+    let mut xattrs = Vec::new();
+    let Some(extensions) = entry.pax_extensions()? else {
+        return Ok(xattrs);
+    };
+    for extension in extensions {
+        let extension = extension?;
+        if let Some(name) = extension.key_bytes().strip_prefix(PAX_XATTR_PREFIX) {
+            xattrs.push((
+                OsStr::from_bytes(name).to_os_string(),
+                extension.value_bytes().to_vec(),
+            ));
+        }
+    }
+    Ok(xattrs)
+}
+
+/// Sets one extended attribute without following symlinks.
+///
+/// Like containerd, a filesystem without xattr support, or a `security.*`
+/// attribute the kernel refuses, is logged and skipped.
+fn set_xattr(path: &Path, name: &OsStr, value: &[u8]) -> Result<()> {
+    let Err(e) = xattr::set(path, name, value) else {
+        return Ok(());
+    };
+    let skippable = e.kind() == io::ErrorKind::Unsupported
+        || (e.kind() == io::ErrorKind::PermissionDenied
+            && name.as_bytes().starts_with(b"security."));
+    if !skippable {
+        return Err(Error::Extract(format!(
+            "set xattr {} on {}: {e}",
+            name.to_string_lossy(),
+            path.display()
+        )));
+    }
+    warn!(
+        path = %path.display(),
+        name = %name.to_string_lossy(),
+        error = %e,
+        "skipping xattr"
+    );
     Ok(())
 }
 
@@ -300,11 +464,15 @@ fn create_symlink<R: Read>(
     raw_path: &Path,
     safe_path: &Path,
     entry: &tar::Entry<'_, R>,
+    owner: Option<&Ownership>,
 ) -> Result<()> {
     let target = entry
         .link_name()?
         .ok_or_else(|| Error::Extract(format!("symlink without target: {}", raw_path.display())))?;
     std::os::unix::fs::symlink(&target, safe_path)?;
+    if let Some(owner) = owner {
+        owner.apply(safe_path, None)?;
+    }
     Ok(())
 }
 
@@ -409,40 +577,53 @@ fn remember_unpacked(unpacked: &mut HashSet<PathBuf>, root: &Path, path: &Path) 
     }
 }
 
+/// What an OCI whiteout member removes.
+pub(crate) enum Whiteout<'a> {
+    /// `.wh..wh..opq`: everything lower layers put in the parent directory.
+    Opaque,
+    /// `.wh.<name>`: the sibling `<name>`.
+    Entry(&'a str),
+}
+
+/// Classifies a member as a whiteout. Only regular files are whiteouts.
+pub(crate) fn whiteout(entry_type: EntryType, rel: &Path) -> Option<Whiteout<'_>> {
+    if !matches!(entry_type, EntryType::Regular | EntryType::GNUSparse) {
+        return None;
+    }
+    let base = rel.file_name()?.to_str()?;
+    if base == ".wh..wh..opq" {
+        return Some(Whiteout::Opaque);
+    }
+    base.strip_prefix(".wh.").map(Whiteout::Entry)
+}
+
 fn apply_whiteout(
     root: &SafeRoot,
     rel: &Path,
     unpacked: &HashSet<PathBuf>,
     entry_type: EntryType,
 ) -> Result<bool> {
-    if !matches!(entry_type, EntryType::Regular | EntryType::GNUSparse) {
-        return Ok(false);
-    }
-    let Some(base) = rel.file_name().and_then(|n| n.to_str()) else {
+    let Some(whiteout) = whiteout(entry_type, rel) else {
         return Ok(false);
     };
-
-    if base == ".wh..wh..opq" {
-        let parent_rel = rel.parent().unwrap_or_else(|| Path::new(""));
-        apply_opaque_whiteout(root, parent_rel, unpacked)?;
-        return Ok(true);
-    }
-
-    if let Some(target_name) = base.strip_prefix(".wh.") {
-        if target_name.is_empty() || target_name == "." || target_name == ".." {
-            return Err(Error::Extract(format!("invalid whiteout name: {base}")));
+    let parent_rel = rel.parent().unwrap_or_else(|| Path::new(""));
+    match whiteout {
+        Whiteout::Opaque => apply_opaque_whiteout(root, parent_rel, unpacked)?,
+        Whiteout::Entry(target_name) => {
+            if target_name.is_empty() || target_name == "." || target_name == ".." {
+                return Err(Error::Extract(format!(
+                    "invalid whiteout name: .wh.{target_name}"
+                )));
+            }
+            refuse_whiteout_escape(root, parent_rel)?;
+            let target_safe = root.resolve_or_root(parent_rel)?.join(target_name);
+            ensure_inside(root.root_path(), &target_safe)?;
+            if fs::symlink_metadata(&target_safe).is_ok() {
+                remove_nofollow(&target_safe, false)?;
+            }
         }
-        let parent_rel = rel.parent().unwrap_or_else(|| Path::new(""));
-        refuse_whiteout_escape(root, parent_rel)?;
-        let target_safe = root.resolve_or_root(parent_rel)?.join(target_name);
-        ensure_inside(root.root_path(), &target_safe)?;
-        if fs::symlink_metadata(&target_safe).is_ok() {
-            remove_nofollow(&target_safe, false)?;
-        }
-        return Ok(true);
     }
-
-    Ok(false)
+    Ok(true)
 }
 
 fn apply_opaque_whiteout(

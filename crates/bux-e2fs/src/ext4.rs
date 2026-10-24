@@ -22,7 +22,8 @@
 )]
 
 use std::ffi::CString;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::error::{Error, Ext2Code, Result};
@@ -144,23 +145,53 @@ impl Drop for Filesystem {
 impl Filesystem {
     /// Creates a new ext4 filesystem image at `path`.
     ///
-    /// Equivalent to `mke2fs -t ext4 -b <block_size> -m <reserved> <path> <size>`.
+    /// Creates or truncates the file, sets its length to `size_bytes`, and
+    /// [`format`](Self::format)s it. Equivalent to
+    /// `mke2fs -t ext4 -b <block_size> -m <reserved> <path> <size>`.
     ///
     /// # Errors
     ///
     /// Returns an error if I/O, path conversion, or libext2fs initialization fails.
+    #[allow(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "same signature as format"
+    )]
     pub fn create(path: &Path, size_bytes: u64, opts: &CreateOptions) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let image = OpenOptions::new()
-            .read(true)
+        OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
-            .open(path)?;
-        image.set_len(size_bytes)?;
-        drop(image);
+            .open(path)?
+            .set_len(size_bytes)?;
+        Self::format(path, size_bytes, opts)
+    }
+
+    /// Formats the existing file or block device at `path` as an empty ext4
+    /// filesystem of `size_bytes`, without creating, truncating or resizing it.
+    ///
+    /// The filesystem takes the first `size_bytes` of `path`, rounded down to
+    /// whole blocks. Like [`create`](Self::create), this does not zero the
+    /// inode tables, so the target should read as zeros, as a new sparse file
+    /// does.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `path` cannot be opened or is smaller than
+    /// `size_bytes`, or if path conversion or libext2fs initialization fails.
+    pub fn format(path: &Path, size_bytes: u64, opts: &CreateOptions) -> Result<Self> {
+        let available = File::open(path)?.seek(SeekFrom::End(0))?;
+        if available < size_bytes {
+            return Err(Error::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{} has {available} bytes, the filesystem needs {size_bytes}",
+                    path.display()
+                ),
+            )));
+        }
 
         let c_path = to_cstring(path)?;
         let bs = opts.block_size;
@@ -385,8 +416,8 @@ impl Filesystem {
                 | (u64::from((*superblock).s_blocks_count_hi) << 32);
             let journal_blocks = sys::ext2fs_default_journal_size(blocks);
             if journal_blocks <= 0 {
-                return Err(Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
                     format!(
                         "ext2fs_default_journal_size returned {journal_blocks} for filesystem with {blocks} blocks"
                     ),
@@ -669,7 +700,93 @@ pub fn inject_file(image: &Path, host_file: &Path, guest_path: &str) -> Result<(
     fs.write_file(host_file, guest_path)
 }
 
-/// Estimates the required image size for a directory tree.
+/// Running size estimate for an ext4 image.
+///
+/// Add every entry the image will hold, then read
+/// [`image_bytes`](Self::image_bytes). [`estimate_image_size`] does this for
+/// a host directory; the image builder feeds it the members of image layers.
+///
+/// # Example
+///
+/// ```
+/// let mut size = bux_e2fs::ImageSize::new();
+/// size.add_dir();
+/// size.add_file(10_000);
+/// size.add_symlink(12);
+/// assert_eq!(size.image_bytes(), 256 * 1024 * 1024);
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ImageSize {
+    /// Data bytes, each entry rounded up to whole blocks.
+    data: u64,
+    /// Inodes, one per entry.
+    inodes: u64,
+}
+
+impl ImageSize {
+    /// Block size the estimate rounds to.
+    const BLOCK: u64 = 4096;
+    /// Inode table bytes counted per inode.
+    const INODE: u64 = 256;
+    /// Space for the journal.
+    const JOURNAL: u64 = 64 * 1024 * 1024;
+    /// Smallest image.
+    const MIN: u64 = 256 * 1024 * 1024;
+    /// Longest symlink target kept in the inode. `i_block` holds 60 bytes,
+    /// including the terminating NUL, in both ext4 and libext2fs.
+    const INLINE_SYMLINK: u64 = 59;
+
+    /// An empty estimate.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { data: 0, inodes: 0 }
+    }
+
+    /// Adds a regular file with `len` bytes of data.
+    pub const fn add_file(&mut self, len: u64) {
+        self.inodes = self.inodes.saturating_add(1);
+        self.data = self
+            .data
+            .saturating_add(len.div_ceil(Self::BLOCK).saturating_mul(Self::BLOCK));
+    }
+
+    /// Adds a directory, counted as one block.
+    pub const fn add_dir(&mut self) {
+        self.inodes = self.inodes.saturating_add(1);
+        self.data = self.data.saturating_add(Self::BLOCK);
+    }
+
+    /// Adds a symlink with a `target_len`-byte target. A target of 60 bytes
+    /// or more needs a data block.
+    pub const fn add_symlink(&mut self, target_len: u64) {
+        self.inodes = self.inodes.saturating_add(1);
+        if target_len > Self::INLINE_SYMLINK {
+            self.data = self.data.saturating_add(Self::BLOCK);
+        }
+    }
+
+    /// Adds an entry without data blocks, such as a hard link, device node,
+    /// FIFO or socket.
+    pub const fn add_other(&mut self) {
+        self.inodes = self.inodes.saturating_add(1);
+    }
+
+    /// The recommended image size in bytes: the data plus 256 bytes per
+    /// inode, 10 % more for ext4 metadata, and 64 MiB for the journal; at
+    /// least 256 MiB, rounded up to whole 4 KiB blocks.
+    #[must_use]
+    pub const fn image_bytes(&self) -> u64 {
+        let raw = self
+            .data
+            .saturating_add(self.inodes.saturating_mul(Self::INODE));
+        let sized = (raw.saturating_mul(11) / 10).saturating_add(Self::JOURNAL);
+        let sized = if sized < Self::MIN { Self::MIN } else { sized };
+        sized.div_ceil(Self::BLOCK).saturating_mul(Self::BLOCK)
+    }
+}
+
+/// Estimates the required image size for a directory tree with
+/// [`ImageSize`].
 ///
 /// Accounts for file content, inode overhead, ext4 metadata, and journal.
 /// Returns the recommended image size in bytes (minimum 256 MiB).
@@ -678,27 +795,19 @@ pub fn inject_file(image: &Path, host_file: &Path, guest_path: &str) -> Result<(
 ///
 /// Returns an error if directory traversal fails.
 pub fn estimate_image_size(dir: &Path) -> Result<u64> {
-    let mut total_bytes: u64 = 0;
-    let mut inode_count: u64 = 0;
-
+    let mut size = ImageSize::new();
     walk(dir, &mut |meta| {
-        inode_count += 1;
         if meta.is_file() {
-            // Round up to 4 KiB block boundary.
-            total_bytes += (meta.len() + 4095) & !4095;
+            size.add_file(meta.len());
         } else if meta.is_dir() {
-            total_bytes += 4096;
-        } else if meta.is_symlink() && meta.len() > 60 {
-            // Symlink targets <= 60 bytes are stored inline in the inode.
-            // Longer targets need a data block.
-            total_bytes += 4096;
+            size.add_dir();
+        } else if meta.is_symlink() {
+            size.add_symlink(meta.len());
+        } else {
+            size.add_other();
         }
     })?;
-
-    // 256 bytes per inode + 10% metadata overhead + 64 MiB journal.
-    let raw = total_bytes + inode_count * 256;
-    let sized = raw * 11 / 10 + 64 * 1024 * 1024;
-    Ok(sized.max(256 * 1024 * 1024))
+    Ok(size.image_bytes())
 }
 
 /// Checks a libext2fs `errcode_t`, converting non-zero values to [`Error::Ext2fs`].
@@ -926,5 +1035,117 @@ mod tests {
 
         // No '/' in the guest path — the mkdir_p branch must be skipped.
         inject_file(&image, &payload, "toplevel.bin").unwrap();
+    }
+
+    // ---- formatting an existing file or block device ----
+
+    fn blocks_count(fs: &Filesystem) -> u64 {
+        unsafe {
+            let superblock = (*fs.inner).super_;
+            u64::from((*superblock).s_blocks_count)
+                | (u64::from((*superblock).s_blocks_count_hi) << 32)
+        }
+    }
+
+    #[test]
+    fn format_keeps_the_target_length() {
+        let _guard = FS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("disk.raw");
+        File::create(&target).unwrap().set_len(128 << 20).unwrap();
+
+        {
+            let mut fs = Filesystem::format(&target, 64 << 20, &CreateOptions::default()).unwrap();
+            fs.add_journal().unwrap();
+            fs.flush().unwrap();
+        }
+
+        // Unlike create, the target is neither truncated nor resized.
+        assert_eq!(std::fs::metadata(&target).unwrap().len(), 128 << 20);
+        let mut fs = Filesystem::open(&target).unwrap();
+        assert_eq!(blocks_count(&fs), (64 << 20) / 4096);
+        fs.mkdir_p("etc/apk").unwrap();
+    }
+
+    #[test]
+    fn format_rejects_a_target_smaller_than_the_filesystem() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("disk.raw");
+        File::create(&target).unwrap().set_len(32 << 20).unwrap();
+
+        let err = Filesystem::format(&target, 64 << 20, &CreateOptions::default()).unwrap_err();
+        assert!(
+            matches!(&err, Error::Io(e) if e.kind() == io::ErrorKind::InvalidInput),
+            "expected InvalidInput, got {err:?}"
+        );
+        assert_eq!(std::fs::metadata(&target).unwrap().len(), 32 << 20);
+    }
+
+    // ---- size estimates ----
+
+    #[test]
+    fn image_size_rounds_files_up_to_blocks() {
+        let mut size = ImageSize::new();
+        for len in [0, 1, 4096, 4097] {
+            size.add_file(len);
+        }
+        assert_eq!(size.data, 4096 + 4096 + 8192);
+        assert_eq!(size.inodes, 4);
+    }
+
+    #[test]
+    fn image_size_gives_symlinks_of_60_bytes_or_more_a_block() {
+        let mut inline = ImageSize::new();
+        inline.add_symlink(59);
+        let mut block = ImageSize::new();
+        block.add_symlink(60);
+        assert_eq!((inline.data, inline.inodes), (0, 1));
+        assert_eq!((block.data, block.inodes), (4096, 1));
+    }
+
+    #[test]
+    fn image_size_adds_overhead_and_journal_above_the_minimum() {
+        assert_eq!(ImageSize::new().image_bytes(), 256 << 20);
+
+        let mut size = ImageSize::new();
+        size.add_file(1 << 30);
+        // (1 GiB + 256) * 1.1 + 64 MiB = 1_248_225_152, rounded up to 4 KiB.
+        assert_eq!(size.image_bytes(), 1_248_227_328);
+    }
+
+    #[test]
+    fn image_size_saturates_on_huge_entries() {
+        // Pass 1 sums sizes from untrusted tar headers.
+        let mut size = ImageSize::new();
+        size.add_file(u64::MAX);
+        size.add_file(u64::MAX);
+        assert_eq!(size.data, u64::MAX);
+        assert!(size.image_bytes() > u64::MAX / 11);
+    }
+
+    #[test]
+    fn estimate_image_size_counts_each_kind_of_entry() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Sparse, so the estimate clears the 256 MiB minimum without writing it.
+        File::create(dir.path().join("file"))
+            .unwrap()
+            .set_len(300 << 20)
+            .unwrap();
+        std::fs::create_dir(dir.path().join("dir")).unwrap();
+        std::os::unix::fs::symlink("x".repeat(60), dir.path().join("dir/long")).unwrap();
+        std::os::unix::fs::symlink("short", dir.path().join("dir/short")).unwrap();
+
+        let mut expected = ImageSize::new();
+        expected.add_file(300 << 20);
+        expected.add_dir();
+        expected.add_symlink(60);
+        expected.add_symlink(5);
+        assert!(expected.image_bytes() > ImageSize::MIN);
+        assert_eq!(
+            estimate_image_size(dir.path()).unwrap(),
+            expected.image_bytes()
+        );
     }
 }

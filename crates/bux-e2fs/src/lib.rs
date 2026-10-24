@@ -7,6 +7,8 @@
 //! - **[`Ext4Builder`]** — Fluent builder for creating images with custom options.
 //! - **[`create_from_dir`]** / **[`inject_file`]** — One-shot convenience functions
 //!   for the common case.
+//! - **[`ImageSize`]** / **[`estimate_image_size`]** — Image size estimates from
+//!   the entries an image will hold, or from a host directory.
 //!
 //! # Quick Start
 //!
@@ -56,6 +58,6 @@ mod ext4;
 
 pub use error::{Error, Ext2Code, Result};
 pub use ext4::{
-    BlockSize, CreateOptions, Ext4Builder, FileType, Filesystem, create_from_dir,
+    BlockSize, CreateOptions, Ext4Builder, FileType, Filesystem, ImageSize, create_from_dir,
     estimate_image_size, inject_file,
 };

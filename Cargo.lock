@@ -500,6 +500,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
+ "xattr",
 ]
 
 [[package]]

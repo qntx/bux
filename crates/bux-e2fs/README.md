@@ -61,6 +61,25 @@ create_from_dir(
 # Ok::<_, bux_e2fs::Error>(())
 ```
 
+Format a file or block device that already exists, without truncating it, sized from the entries it will hold:
+
+```rust,no_run
+use bux_e2fs::{CreateOptions, Filesystem, ImageSize};
+use std::path::Path;
+
+let mut size = ImageSize::new();
+size.add_dir();
+size.add_file(4 * 1024 * 1024);
+let mut fs = Filesystem::format(
+    Path::new("/dev/vda"),
+    size.image_bytes(),
+    &CreateOptions::default(),
+)?;
+fs.add_journal()?;
+fs.flush()?;
+# Ok::<_, bux_e2fs::Error>(())
+```
+
 ## Environment variables
 
 | Variable | Description |
