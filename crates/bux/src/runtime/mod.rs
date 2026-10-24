@@ -832,10 +832,13 @@ mod tests {
             .unwrap();
     }
 
+    /// A shim that has exited: identified while alive, then killed and
+    /// reaped. A child that exits on its own may be gone before it is
+    /// identified; macOS cannot look up an exiting or zombie process.
     fn dead_shim() -> ShimProcess {
-        // Sidecar tests empty PATH under a mutex.
-        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let mut child = spawn_sleep();
         let shim = child_shim(&child);
+        drop(child.kill());
         drop(child.wait());
         shim
     }
@@ -851,6 +854,7 @@ mod tests {
     }
 
     fn spawn_sleep() -> std::process::Child {
+        // Absolute path: sidecar tests empty PATH under a mutex.
         std::process::Command::new("/bin/sleep")
             .arg("30")
             .spawn()
@@ -955,17 +959,17 @@ mod tests {
         let mut child = spawn_sleep();
         let live = child_shim(&child);
         let stale = ShimProcess::open(live.pid(), live.start_time() + 1);
-        {
-            let rt = Runtime::open(dir.path()).unwrap();
-            insert_running(&rt, "reusedpid0002", stale);
-            drop(rt);
-        }
-        assert!(live.is_alive(), "Runtime Drop must not signal a reused pid");
+        // Recover in place rather than reopen the directory: right after a
+        // drop, a test forking in parallel can still hold the lock fd.
         let rt = Runtime::open(dir.path()).unwrap();
+        insert_running(&rt, "reusedpid0002", stale);
+        rt.recover();
         let row = rt.db.get_by_id_prefix("reusedpid0002").unwrap();
         assert_eq!(row.status, Status::Stopped, "recover marks it stopped");
-        drop(rt);
         assert!(live.is_alive(), "recover must not signal a reused pid");
+        insert_running(&rt, "reusedpid0003", stale);
+        drop(rt);
+        assert!(live.is_alive(), "Runtime Drop must not signal a reused pid");
         drop(child.kill());
         drop(child.wait());
     }
@@ -974,9 +978,7 @@ mod tests {
     fn update_process_then_list_sees_new_process() {
         let dir = tempfile::tempdir().unwrap();
         let rt = Runtime::open(dir.path()).unwrap();
-        let mut dead_child = std::process::Command::new("true").spawn().unwrap();
-        let dead = child_shim(&dead_child);
-        drop(dead_child.wait());
+        let dead = dead_shim();
         insert_running(&rt, "aabbccddeeff", dead);
         let mut live_child = spawn_sleep();
         let live = child_shim(&live_child);
