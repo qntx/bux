@@ -27,9 +27,6 @@ pub const GUEST_VERSION: &str = "0.2.2";
 const INSTALL_HINT: &str = "install with: curl -fsSL https://sh.qntx.org/bux | sh";
 const PAYLOAD_NOT_FOUND: &str =
     "bux payload not found; install with: curl -fsSL https://sh.qntx.org/bux | sh";
-#[cfg(target_os = "linux")]
-const BWRAP_REQUIRED: &str =
-    "bwrap required (jailer); install with: curl -fsSL https://sh.qntx.org/bux | sh";
 const RELEASE_DOWNLOAD: &str = "https://github.com/qntx/bux/releases/download";
 const FETCH_TIMEOUT: Duration = Duration::from_mins(5);
 const BODY_LIMIT: u64 = 512 * 1024 * 1024;
@@ -80,26 +77,14 @@ pub(crate) fn host_target() -> Result<&'static str> {
     }
 }
 
-/// Sibling + product dir + `$PATH` `bwrap` (Linux). Does not fetch.
-#[must_use]
-#[allow(clippy::missing_const_for_fn, reason = "Linux probes the filesystem")]
-pub(crate) fn namespaces_available() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        lookup_bwrap().is_some()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        false
-    }
-}
-
 /// Resolve shim / guest / bwrap. HTTP, extract, and flock run here (blocking).
+///
+/// `bwrap` is only looked for when `jailer` is set, and runs once to prove it works.
 ///
 /// # Errors
 ///
 /// Missing payload, checksum/ELF/archive failure, unsupported host, or Linux
-/// jailer without `bwrap`.
+/// jailer without a `bwrap` that works here.
 pub(crate) fn ensure_blocking(
     shim_override: Option<&Path>,
     guest_override: Option<&Path>,
@@ -185,17 +170,18 @@ fn take_product_members(
 
 #[allow(
     clippy::unnecessary_wraps,
-    reason = "Linux jailer missing bwrap is Err; other platforms always Ok"
+    reason = "Linux jailer without a usable bwrap is Err; other platforms always Ok"
 )]
 fn require_bwrap(jailer: bool) -> Result<Option<PathBuf>> {
-    let bwrap = lookup_bwrap();
     #[cfg(target_os = "linux")]
-    if jailer && bwrap.is_none() {
-        return Err(Error::SecurityUnavailable(BWRAP_REQUIRED.into()));
+    if jailer {
+        return crate::bwrap::select()
+            .map(Some)
+            .map_err(Error::SecurityUnavailable);
     }
     #[cfg(not(target_os = "linux"))]
     let _ = jailer;
-    Ok(bwrap)
+    Ok(None)
 }
 
 fn resolve_override(explicit: Option<&Path>, label: &str, option: &str) -> Result<Option<PathBuf>> {
@@ -346,27 +332,17 @@ fn is_exec_file(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
-fn lookup_bwrap() -> Option<PathBuf> {
-    if !cfg!(target_os = "linux") {
-        return None;
-    }
-    if let Some(path) = sibling_file("bwrap") {
-        return Some(path);
-    }
+/// The `bwrap` bundled with bux: next to the running binary, and in the product dir.
+#[cfg(target_os = "linux")]
+pub(crate) fn bundled_bwrap() -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = sibling_file("bwrap").into_iter().collect();
     if let Ok(target) = host_target() {
         let path = product_dir(target).join("bwrap");
         if path.is_file() {
-            return Some(path);
+            paths.push(path);
         }
     }
-    which_on_path("bwrap")
-}
-
-fn which_on_path(name: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    std::env::split_paths(&path_var)
-        .map(|dir| dir.join(name))
-        .find(|p| p.is_file())
+    paths
 }
 
 fn lock_payload_root() -> Result<File> {

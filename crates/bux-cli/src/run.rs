@@ -25,7 +25,8 @@ struct SecurityArgs {
     #[arg(long, overrides_with = "landlock")]
     no_landlock: bool,
 
-    /// Continue if a requested isolation layer is unavailable.
+    /// Continue without Landlock if the kernel cannot enforce it. The jailer
+    /// does not degrade: turn it off with --no-jailer.
     #[arg(long)]
     allow_degraded: bool,
 }

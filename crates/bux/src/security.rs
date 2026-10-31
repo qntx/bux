@@ -14,6 +14,9 @@ pub struct SecurityOptions {
     /// Request Landlock LSM on Linux. Default `true` on Linux, `false` elsewhere.
     pub landlock: bool,
     /// If true, missing Landlock (when requested) degrades instead of failing create/start.
+    ///
+    /// Only Landlock degrades. A jailer that cannot run always fails: dropping
+    /// namespaces takes an explicit `jailer: false`.
     pub allow_degraded: bool,
 }
 
@@ -41,7 +44,10 @@ impl SecurityOptions {
         self
     }
 
-    /// Allow degraded security when a requested layer is unavailable.
+    /// Continue without Landlock when the kernel cannot enforce it.
+    ///
+    /// Only Landlock degrades. A jailer that cannot run always fails: dropping
+    /// namespaces takes an explicit `jailer(false)`.
     #[must_use]
     pub const fn allow_degraded(mut self, yes: bool) -> Self {
         self.allow_degraded = yes;
@@ -118,8 +124,10 @@ const fn map_layer(s: bux_jail::LayerStatus) -> LayerStatus {
 pub struct HostInfo {
     /// KVM (Linux) or Hypervisor.framework (macOS).
     pub virtualization: bool,
-    /// bubblewrap available (Linux namespaces).
+    /// A bubblewrap that works on this host (Linux namespaces).
     pub namespaces: bool,
+    /// The `bwrap` the Linux jailer runs. `None` if none works.
+    pub bwrap: Option<std::path::PathBuf>,
     /// seccomp BPF present.
     pub seccomp: bool,
     /// AppArmor/SELinux/Seatbelt.
@@ -142,15 +150,19 @@ impl HostInfo {
         #[cfg(unix)]
         {
             let mut caps = bux_jail::checks::check_host();
-            caps.namespaces = crate::payload::namespaces_available();
+            let bwrap = host_bwrap();
+            caps.namespaces = matches!(bwrap, Ok(Some(_)));
+            let mut isolation_warnings = bux_jail::checks::audit_isolation(&caps);
+            isolation_warnings.extend(bwrap.as_ref().err().cloned());
             Self {
                 virtualization: caps.virtualization,
                 namespaces: caps.namespaces,
+                bwrap: bwrap.ok().flatten(),
                 seccomp: caps.seccomp,
                 mandatory_access_control: caps.mandatory_access_control,
                 cgroups: caps.cgroups,
                 landlock: caps.landlock,
-                isolation_warnings: bux_jail::checks::audit_isolation(&caps),
+                isolation_warnings,
             }
         }
         #[cfg(not(unix))]
@@ -158,6 +170,7 @@ impl HostInfo {
             Self {
                 virtualization: false,
                 namespaces: false,
+                bwrap: None,
                 seccomp: false,
                 mandatory_access_control: false,
                 cgroups: false,
@@ -166,6 +179,19 @@ impl HostInfo {
             }
         }
     }
+}
+
+/// The `bwrap` the jailer would run, or why none works.
+#[cfg(target_os = "linux")]
+fn host_bwrap() -> Result<Option<std::path::PathBuf>, String> {
+    crate::bwrap::select().map(Some)
+}
+
+/// Only Linux has a `bwrap`.
+#[cfg(all(unix, not(target_os = "linux")))]
+#[allow(clippy::unnecessary_wraps, reason = "same signature as on Linux")]
+const fn host_bwrap() -> Result<Option<std::path::PathBuf>, String> {
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -201,11 +227,8 @@ mod tests {
         let mut env = crate::guest::sidecar_env::lock();
         let empty = tempfile::tempdir().unwrap();
         env.set("PATH", empty.path());
-        let planted = crate::guest::sidecar_env::Planted::sibling("bwrap", b"planted-bwrap");
-        assert!(
-            planted.path().is_file(),
-            "sibling bwrap must exist for the engine lookup"
-        );
+        let planted = crate::guest::sidecar_env::Planted::sibling("bwrap", b"");
+        crate::bwrap::fake_bwrap(planted.path(), "exit 0");
         assert!(
             !bux_jail::checks::check_host().namespaces,
             "PATH-only which(bwrap) must miss when PATH is empty"
@@ -216,11 +239,48 @@ mod tests {
             "engine lookup must see sibling bwrap: {}",
             planted.path().display()
         );
+        assert_eq!(
+            h.bwrap,
+            Some(std::fs::canonicalize(planted.path()).unwrap())
+        );
         assert!(
             !h.isolation_warnings
                 .iter()
-                .any(|w| w.contains("bubblewrap not found")),
+                .any(|w| w.contains("no usable bubblewrap")),
             "audit must use overwritten namespaces, got {:?}",
+            h.isolation_warnings
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "env lock must outlive probe"
+    )]
+    fn probe_reports_a_bwrap_that_does_not_work() {
+        let mut env = crate::guest::sidecar_env::lock();
+        let empty = tempfile::tempdir().unwrap();
+        env.set("PATH", empty.path());
+        let planted = crate::guest::sidecar_env::Planted::sibling("bwrap", b"");
+        crate::bwrap::fake_bwrap(planted.path(), "echo denied-by-policy >&2; exit 1");
+
+        let h = HostInfo::probe();
+
+        assert!(!h.namespaces);
+        assert_eq!(h.bwrap, None);
+        assert!(
+            h.isolation_warnings
+                .iter()
+                .any(|w| w.contains("no usable bubblewrap")),
+            "{:?}",
+            h.isolation_warnings
+        );
+        assert!(
+            h.isolation_warnings
+                .iter()
+                .any(|w| w.contains("denied-by-policy") && w.contains("--no-jailer")),
+            "{:?}",
             h.isolation_warnings
         );
     }

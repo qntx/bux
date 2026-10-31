@@ -30,6 +30,8 @@
 //!
 //! [`libkrun`]: https://github.com/containers/libkrun
 
+#[cfg(target_os = "linux")]
+mod bwrap;
 #[cfg(unix)]
 mod client;
 mod disk;
