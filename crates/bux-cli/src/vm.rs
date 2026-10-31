@@ -612,7 +612,7 @@ pub struct StatsArgs {
 
 /// Arguments for `bux clone`.
 ///
-/// Disk-clone: overlay flatten; copies `vcpus`, ram, network, `auto_remove`.
+/// Disk-clone: overlay flatten; copies `vcpus`, ram, network, `auto_remove`, security options.
 /// The clone always boots detached and survives CLI exit, matching `bux create`.
 #[derive(clap::Args)]
 pub struct CloneArgs {
