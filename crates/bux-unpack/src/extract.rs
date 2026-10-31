@@ -58,9 +58,8 @@ pub struct Options {
     /// Give each written member the uid and gid from its tar header, and
     /// restore its `SCHILY.xattr.*` extended attributes.
     ///
-    /// This needs the privilege to `chown`, so it is meant for root, as in the
-    /// image builder VM. When unset, the extracting user owns every file and
-    /// extended attributes are dropped.
+    /// This needs the privilege to `chown`, so it is meant for root. When unset,
+    /// the extracting user owns every file and extended attributes are dropped.
     pub keep_owners: bool,
 }
 

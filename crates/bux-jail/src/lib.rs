@@ -192,8 +192,7 @@ pub fn spawn(shim: &Path, config_path: &Path, config: JailConfig) -> Result<Spaw
     cmd.stdin(Stdio::null());
 
     let die_with_parent = config.die_with_parent;
-    // A detached shim outlives the caller, so it must not keep the caller's
-    // stdout open: `ID=$(bux create ...)` would wait until the VM stops.
+    // The shim may outlive the caller, so it never holds the caller's stdout.
     if let Some(file) = config.log_file {
         cmd.stdout(Stdio::from(file.try_clone()?));
         cmd.stderr(Stdio::from(file));

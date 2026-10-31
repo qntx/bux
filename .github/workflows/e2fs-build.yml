@@ -28,7 +28,7 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-          # Static musl libraries for guest-side programs (the builder VM, #196).
+          # Static musl libraries for guest-side programs.
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
           - target: aarch64-unknown-linux-musl

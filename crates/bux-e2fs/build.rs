@@ -37,8 +37,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 /// Release to download, `e2fs-v{E2FS_RELEASE}`: e2fsprogs 1.47.4 plus a
-/// packaging revision (revision 1 adds the Linux musl targets). Keep in sync
-/// with `.github/workflows/e2fs-build.yml`.
+/// packaging revision. Keep in sync with `.github/workflows/e2fs-build.yml`.
 const E2FS_RELEASE: &str = "1.47.4-1";
 
 /// GitHub repository for downloading pre-built library releases.

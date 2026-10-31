@@ -704,7 +704,7 @@ pub fn inject_file(image: &Path, host_file: &Path, guest_path: &str) -> Result<(
 ///
 /// Add every entry the image will hold, then read
 /// [`image_bytes`](Self::image_bytes). [`estimate_image_size`] does this for
-/// a host directory; the image builder feeds it the members of image layers.
+/// a host directory.
 ///
 /// # Example
 ///
@@ -1117,7 +1117,7 @@ mod tests {
 
     #[test]
     fn image_size_saturates_on_huge_entries() {
-        // Pass 1 sums sizes from untrusted tar headers.
+        // Sizes may come from untrusted tar headers.
         let mut size = ImageSize::new();
         size.add_file(u64::MAX);
         size.add_file(u64::MAX);
