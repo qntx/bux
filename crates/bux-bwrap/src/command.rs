@@ -136,6 +136,13 @@ impl BwrapCommand {
         self
     }
 
+    /// Run the program as PID 1 of the new PID namespace, without bwrap's
+    /// reaper process (`--as-pid-1`). Needs [`Namespace::Pid`].
+    pub fn run_as_pid_1(mut self) -> Self {
+        self.bwrap_args.push(OsString::from("--as-pid-1"));
+        self
+    }
+
     /// Bind-mount `host` onto `guest` as **read-only**
     /// (`--ro-bind host guest`).
     pub fn ro_bind<H, G>(mut self, host: H, guest: G) -> Self

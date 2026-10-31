@@ -98,6 +98,13 @@ extern "C" fn handle_crash_signal(sig: libc::c_int) {
     #[allow(unsafe_code, reason = "restore default and re-raise")]
     unsafe {
         libc::signal(sig, libc::SIG_DFL);
+        // The kernel blocks `sig` while its handler runs, so `raise` would only leave it pending.
+        let mut unblock = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+        libc::sigemptyset(unblock.as_mut_ptr());
+        libc::sigaddset(unblock.as_mut_ptr(), sig);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, unblock.as_ptr(), std::ptr::null_mut());
         libc::raise(sig);
+        // PID 1 of a jail ignores its own signal.
+        libc::_exit(SIGNAL_EXIT_BASE + sig);
     }
 }

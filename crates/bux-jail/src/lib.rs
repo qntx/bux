@@ -29,6 +29,7 @@ mod landlock_setup;
 mod seatbelt;
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
@@ -157,7 +158,8 @@ pub struct JailConfig {
 /// Result of spawning a shim process inside a sandbox.
 #[derive(Debug)]
 pub struct SpawnResult {
-    /// The spawned process (the jail parent when a sandbox wraps the shim).
+    /// The spawned process: the leader of the jail's process group, which is
+    /// the jail's outer process when a sandbox wraps the shim.
     pub process: ShimProcess,
     /// Parent end of the watchdog pipe. `Some` iff [`JailConfig::die_with_parent`].
     pub keepalive: Option<Keepalive>,
@@ -190,6 +192,8 @@ pub fn spawn(shim: &Path, config_path: &Path, config: JailConfig) -> Result<Spaw
         unsafe { OwnedFd::from_raw_fd(fd) }
     });
     cmd.stdin(Stdio::null());
+    // The jail's processes share one group, which `ShimProcess` signals.
+    cmd.process_group(0);
 
     let die_with_parent = config.die_with_parent;
     // A detached shim outlives the caller, so it must not keep the caller's

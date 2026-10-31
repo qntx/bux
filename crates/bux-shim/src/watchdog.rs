@@ -100,6 +100,26 @@ pub fn start_watchdog_thread() {
     }
 }
 
+/// Die with bwrap's outer process when this shim is PID 1 of a jail. Call first
+/// thing in `main`: the setting survives `exec`.
+///
+/// The outer process is the one recorded for the VM, and the VM must not outlive
+/// it. bwrap's `--die-with-parent` would also tie it to the caller, which a
+/// detached VM outlives.
+///
+/// # Errors
+///
+/// Returns the OS error if the kernel refuses. The shim must not continue: it
+/// could outlive the jail.
+#[cfg(target_os = "linux")]
+pub fn die_with_jail() -> crate::Result<()> {
+    if std::process::id() != 1 {
+        return Ok(());
+    }
+    nix::sys::prctl::set_pdeathsig(nix::sys::signal::Signal::SIGKILL)
+        .map_err(|e| std::io::Error::from(e).into())
+}
+
 #[cfg(test)]
 #[cfg(unix)]
 mod tests {

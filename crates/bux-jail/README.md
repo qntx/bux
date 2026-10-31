@@ -17,6 +17,8 @@ Process isolation for the `bux-shim` child process (`bux-bwrap`,
 - [`ShimProcess`] — the spawned shim as pid + start time: `is_alive`, `terminate`, `kill`, `signal`, `wait`.
   Rebuild it after a host restart with `ShimProcess::open(pid, start_time)`; a pid
   whose start time differs is treated as gone, so a reused pid is never signalled.
+  Signals go to the process group [`spawn`] gives the jail, which holds all its
+  processes.
 - [`Keepalive`] — parent end of the watchdog pipe, returned unless the VM is
   detached. Dropping it makes the shim shut down.
 - [`SecurityReport`] / [`LayerStatus`] — actual posture after spawn

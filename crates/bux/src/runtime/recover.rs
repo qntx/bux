@@ -178,7 +178,7 @@ fn terminate(process: ShimProcess, vm_id: &str) {
     if !process.is_alive() {
         return;
     }
-    process.terminate().ok();
+    log_failed_signal(vm_id, process.terminate());
     let start = std::time::Instant::now();
     let timeout = Duration::from_secs(5);
     while process.is_alive() && start.elapsed() < timeout {
@@ -190,7 +190,14 @@ fn terminate(process: ShimProcess, vm_id: &str) {
             pid = process.pid(),
             "kill after recovery/stop timeout"
         );
-        process.kill().ok();
+        log_failed_signal(vm_id, process.kill());
+    }
+}
+
+/// Log that a VM may still be running after `result`.
+fn log_failed_signal(vm_id: &str, result: std::io::Result<()>) {
+    if let Err(e) = result {
+        warn!(vm_id, error = %e, "failed to stop VM");
     }
 }
 

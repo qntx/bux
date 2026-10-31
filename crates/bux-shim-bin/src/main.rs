@@ -27,6 +27,13 @@ fn main() {
         std::process::exit(1);
     };
 
+    #[cfg(target_os = "linux")]
+    if let Err(e) = bux_shim::die_with_jail() {
+        let exit_path = std::path::Path::new(&config_path).with_extension("exit");
+        bux_shim::write_exit_error(&exit_path, &format!("cannot tie the shim to its jail: {e}"));
+        std::process::exit(1);
+    }
+
     let exit_path = std::path::Path::new(&config_path).with_extension("exit");
     bux_shim::install_crash_capture(&exit_path);
     bux_shim::start_watchdog_thread();

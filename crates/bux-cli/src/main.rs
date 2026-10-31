@@ -451,7 +451,7 @@ async fn dispatch(command: Command) -> Result<()> {
         Command::Ps(ref args) => vm::ps(args),
         Command::Stop(args) => vm::stop(args).await,
         Command::Kill(ref args) => vm::kill(args),
-        Command::Rm(ref args) => vm::rm(args),
+        Command::Rm(ref args) => vm::rm(args).await,
         Command::Inspect(ref args) => vm::inspect(args),
         Command::Cp(args) => vm::cp(args).await,
         Command::Wait(args) => vm::wait(args).await,

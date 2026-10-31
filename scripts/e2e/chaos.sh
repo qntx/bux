@@ -60,6 +60,17 @@ if [[ "${ok}" -ne 1 ]]; then
   exit 1
 fi
 
+# The recorded pid may be the jail's outer process: nothing of the VM may outlive it.
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  pgrep -f "${vm_id}" >/dev/null || break
+  sleep 0.25
+done
+if pgrep -f "${vm_id}" >/dev/null; then
+  echo "chaos: VM processes outlived the recorded pid" >&2
+  pgrep -af "${vm_id}" >&2 || true
+  exit 1
+fi
+
 echo "==> rm ${NAME} (no -f)"
 bux rm "${NAME}"
 if [[ -e "${overlay}" ]]; then

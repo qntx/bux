@@ -50,10 +50,14 @@ impl Drop for SpawnAbort<'_> {
     }
 }
 
-/// Kill the shim if spawned, then secrets/overlay/volumes/row.
+/// Kill the shim if spawned, then secrets/overlay/volumes/row. A shim that
+/// survives the kill keeps all of them.
 fn abort_partial_spawn(rt: &Runtime, id: &str, socket: &Path, process: Option<ShimProcess>) {
-    if let Some(process) = process {
-        process.kill().ok();
+    if let Some(process) = process
+        && let Err(e) = process.kill()
+    {
+        tracing::warn!(vm_id = id, error = %e, "keeping the state of a VM that survived its kill");
+        return;
     }
     rt.secrets
         .lock()
