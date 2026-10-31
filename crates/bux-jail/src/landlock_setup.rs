@@ -20,6 +20,9 @@ pub(crate) fn build_fd(
     restrictions.build().map_err(|e| e.to_string())
 }
 
+/// Files gvproxy reads to resolve names for a networked VM.
+const RESOLVER_FILES: &[&str] = &["/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf"];
+
 /// Writable `/dev` leaves. `/dev` itself stays read-only because `PathBeneath` is recursive.
 const DEV_RW_LEAVES: &[&str] = &[
     "/dev/kvm",
@@ -82,11 +85,39 @@ fn path_restrictions(jail: &JailConfig, shim: &Path, config_path: &Path) -> Path
         r = r.allow_read_write(p);
     }
 
-    if !jail.network_host {
+    if jail.network_host {
+        r = allow_symlink_targets(r, RESOLVER_FILES);
+    } else {
         r = r.deny_network();
     }
 
     r
+}
+
+/// Allow reading what `files` resolve to.
+///
+/// Landlock checks a symlink's target, and `/etc/resolv.conf` usually points out
+/// of `/etc` (systemd-resolved, `NetworkManager`). These daemons replace the file
+/// by rename, and a rule stays on the old inode, so a directory of their own is
+/// allowed too.
+fn allow_symlink_targets(mut r: PathRestrictions, files: &[&str]) -> PathRestrictions {
+    for file in files {
+        if let Ok(target) = std::fs::canonicalize(file) {
+            let own_dir = target.parent().is_some_and(is_daemon_dir);
+            r = if own_dir {
+                allow_path_and_parent(r, &target, true)
+            } else {
+                r.allow_read(target)
+            };
+        }
+    }
+    r
+}
+
+/// A subdirectory of `/run` that belongs to a daemon. `/run` itself and
+/// `/run/user` hold other programs' files, such as session sockets.
+fn is_daemon_dir(dir: &Path) -> bool {
+    dir.starts_with("/run") && dir != Path::new("/run") && !dir.starts_with("/run/user")
 }
 
 /// Grant `/dev` read/traverse and RW only on listed leaves that exist.
@@ -192,6 +223,39 @@ mod tests {
             !r.network_denied(),
             "virtio-net VMs must bind host ports and egress"
         );
+    }
+
+    #[test]
+    fn a_daemon_directory_is_a_subdirectory_of_run() {
+        for dir in [
+            "/run/systemd/resolve",
+            "/run/NetworkManager",
+            "/run/resolvconf",
+        ] {
+            assert!(is_daemon_dir(Path::new(dir)), "{dir}");
+        }
+        for dir in ["/run", "/run/user/1000", "/etc", "/home/me", "/"] {
+            assert!(!is_daemon_dir(Path::new(dir)), "{dir}");
+        }
+    }
+
+    #[test]
+    fn only_the_symlink_target_is_readable_outside_a_daemon_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().canonicalize().unwrap().join("run");
+        std::fs::create_dir(&run).unwrap();
+        let target = run.join("stub-resolv.conf");
+        std::fs::write(&target, b"nameserver 127.0.0.53\n").unwrap();
+        let link = dir.path().join("resolv.conf");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let r = allow_symlink_targets(
+            PathRestrictions::new(),
+            &[link.to_str().unwrap(), "/nonexistent/resolv.conf"],
+        );
+
+        assert_eq!(r.read_paths(), [target]);
+        assert!(r.read_write_paths().is_empty());
     }
 
     #[test]
