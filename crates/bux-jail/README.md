@@ -27,5 +27,8 @@ Process isolation for the `bux-shim` child process (`bux-bwrap`,
 
 - Does **not** depend on `bux` or `bux-krun`.
 - Watchdog FD env key: [`ENV_WATCHDOG_FD`] (`BUX_WATCHDOG_FD`), set by [`spawn`].
+- Landlock ruleset FD env key: [`ENV_LANDLOCK_FD`] (`BUX_LANDLOCK_FD`), set by
+  [`spawn`]. The shim applies the ruleset to itself, because bwrap cannot build
+  its sandbox inside a Landlock domain.
 - QCOW2 backing-chain read-only paths are supplied by the caller via
   [`JailConfig::readonly_paths`] (Runtime computes them).

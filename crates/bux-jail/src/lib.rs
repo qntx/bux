@@ -47,6 +47,12 @@ use seatbelt::SeatbeltSandbox;
 /// `bux_shim::ENV_WATCHDOG_FD` / the shim binary.
 pub const ENV_WATCHDOG_FD: &str = "BUX_WATCHDOG_FD";
 
+/// Environment variable set on the shim child when it gets a Landlock ruleset.
+///
+/// Value is the decimal file descriptor number. Must match
+/// `bux_shim::ENV_LANDLOCK_FD` / the shim binary.
+pub const ENV_LANDLOCK_FD: &str = "BUX_LANDLOCK_FD";
+
 /// Describes the isolation features provided by a [`Sandbox`] implementation.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
@@ -87,7 +93,8 @@ pub trait Sandbox: std::fmt::Debug + Send + Sync {
 
 /// No-op sandbox: runs the shim directly with no additional isolation.
 ///
-/// Pre-exec hardening (FD cleanup, die-with-parent, Landlock) is still applied.
+/// Pre-exec hardening (FD cleanup, die-with-parent) is still applied, and the
+/// shim still applies Landlock to itself.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoopSandbox;
@@ -167,10 +174,13 @@ pub struct SpawnResult {
 
 /// Spawn `bux-shim` inside a sandbox.
 ///
-/// Applies platform-specific isolation, Landlock (when requested), then
-/// pre-exec hardening (FD cleanup, die-with-parent). With
-/// [`JailConfig::die_with_parent`], also creates the watchdog pipe and
-/// passes its read end to the shim via [`ENV_WATCHDOG_FD`].
+/// Applies platform-specific isolation, then pre-exec hardening (FD cleanup,
+/// die-with-parent). With [`JailConfig::die_with_parent`], also creates the
+/// watchdog pipe and passes its read end to the shim via [`ENV_WATCHDOG_FD`].
+///
+/// When Landlock is requested, builds the ruleset and passes it to the shim via
+/// [`ENV_LANDLOCK_FD`]. The shim must apply it itself: bwrap, which runs first,
+/// cannot build its sandbox inside a Landlock domain.
 ///
 /// # Errors
 ///
@@ -211,12 +221,14 @@ pub fn spawn(shim: &Path, config_path: &Path, config: JailConfig) -> Result<Spaw
     if let Some(fd) = watchdog_fd {
         cmd.env(ENV_WATCHDOG_FD, fd.to_string());
     }
+    let landlock_fd = landlock_owned.as_ref().map(AsRawFd::as_raw_fd);
+    set_landlock_env(&mut cmd, landlock_fd);
 
     pre_exec::apply(
         &mut cmd,
         pre_exec::PreserveFds {
             watchdog: watchdog_fd,
-            landlock: landlock_owned.as_ref().map(AsRawFd::as_raw_fd),
+            landlock: landlock_fd,
         },
         die_with_parent,
     );
@@ -257,6 +269,15 @@ fn identify(mut child: Child) -> Result<ShimProcess> {
             Err(e.into())
         }
     }
+}
+
+/// Name the ruleset in the shim's environment, or clear the variable without one.
+fn set_landlock_env(cmd: &mut Command, ruleset: Option<RawFd>) {
+    match ruleset {
+        Some(fd) => cmd.env(ENV_LANDLOCK_FD, fd.to_string()),
+        // The shim would try to apply a value inherited from this process.
+        None => cmd.env_remove(ENV_LANDLOCK_FD),
+    };
 }
 
 /// Resolve Landlock fd + status (K22).
@@ -407,6 +428,11 @@ mod tests {
         );
     }
 
+    /// Serializes the tests that open rulesets: [`landlock_fd_count`] counts the
+    /// whole process.
+    #[cfg(target_os = "linux")]
+    static RULESETS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Open landlock ruleset fds in this process. Only rulesets: other tests
     /// open and close fds concurrently, so a count of all fds is racy.
     #[cfg(target_os = "linux")]
@@ -424,6 +450,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn spawn_without_bwrap_does_not_leak_landlock_fd() {
+        let _rulesets = RULESETS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let cfg = JailConfig {
             landlock: true,
             ..jail(None)
@@ -477,6 +506,133 @@ mod tests {
         assert!(
             out.contains("to-stdout") && out.contains("to-stderr"),
             "shim stdout and stderr must both go to the log file, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn spawn_returns_the_exec_error() {
+        let cfg = JailConfig {
+            sandbox: Some(Box::new(NoopSandbox)),
+            die_with_parent: false,
+            ..jail(None)
+        };
+        let err = spawn(
+            Path::new("/nonexistent/bux-shim"),
+            Path::new("/tmp/cfg.json"),
+            cfg,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::Io(io) if io.kind() == std::io::ErrorKind::NotFound),
+            "a failed exec must come back as the spawn error: {err}"
+        );
+    }
+
+    /// Script that lists its FDs (bwrap's `/proc` is the host's, so
+    /// `/proc/self`, not `$$`), then stays alive long enough for `spawn` to
+    /// read its start time.
+    #[cfg(target_os = "linux")]
+    fn fd_listing_script(dir: &Path) -> PathBuf {
+        let script = dir.join("cfg.sh");
+        std::fs::write(
+            &script,
+            "ls -l /proc/self/fd\necho listed\nexec /bin/sleep 3\n",
+        )
+        .unwrap();
+        script
+    }
+
+    /// Spawn `sh` as the shim, wait for the FD listing of `script`, and return the log.
+    ///
+    /// `sh` reads the config path as its script. A file this process just wrote can
+    /// fail to `exec` with `ETXTBSY`: a test forking in parallel inherits the
+    /// descriptor.
+    #[cfg(target_os = "linux")]
+    fn fd_listing(script: &Path, log: &Path, cfg: JailConfig) -> String {
+        let spawned = {
+            let _rulesets = RULESETS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            spawn(Path::new("/bin/sh"), script, cfg).unwrap()
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !std::fs::read_to_string(log).unwrap().contains("listed")
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        spawned.process.kill().unwrap();
+        spawned.process.wait();
+        std::fs::read_to_string(log).unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn spawn_passes_the_ruleset_and_no_other_fd() {
+        if !bux_landlock::is_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script = fd_listing_script(dir.path());
+        let log = dir.path().join("shim.log");
+        let _inheritable = nix::unistd::pipe().unwrap();
+        let cfg = JailConfig {
+            sandbox: Some(Box::new(NoopSandbox)),
+            log_file: Some(std::fs::File::create(&log).unwrap()),
+            landlock: true,
+            die_with_parent: false,
+            ..jail(None)
+        };
+
+        let out = fd_listing(&script, &log, cfg);
+
+        assert!(
+            out.contains("anon_inode:[landlock-ruleset]"),
+            "the ruleset must reach the shim: {out}"
+        );
+        assert!(
+            !out.contains("pipe:"),
+            "an inherited fd must not reach the shim: {out}"
+        );
+    }
+
+    #[test]
+    fn an_inherited_ruleset_fd_does_not_reach_the_shim() {
+        let mut cmd = Command::new("/bin/true");
+        cmd.env(ENV_LANDLOCK_FD, "9");
+        set_landlock_env(&mut cmd, None);
+        assert!(
+            cmd.get_envs()
+                .any(|(key, value)| key == ENV_LANDLOCK_FD && value.is_none()),
+            "{cmd:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bwrap_runs_outside_the_domain_and_passes_on_the_ruleset() {
+        if !bux_landlock::is_available() {
+            return;
+        }
+        let Some(bwrap) = bwrap::usable_bwrap() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let script = fd_listing_script(dir.path());
+        let log = dir.path().join("shim.log");
+        let cfg = JailConfig {
+            socks_dir: dir.path().to_path_buf(),
+            log_file: Some(std::fs::File::create(&log).unwrap()),
+            landlock: true,
+            die_with_parent: false,
+            ..jail(Some(bwrap))
+        };
+
+        let out = fd_listing(&script, &log, cfg);
+
+        assert!(
+            out.contains("anon_inode:[landlock-ruleset]"),
+            "bwrap must start and pass on the ruleset: {out}"
         );
     }
 

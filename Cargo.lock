@@ -477,6 +477,7 @@ name = "bux-shim"
 version = "0.3.0"
 dependencies = [
  "bux-krun",
+ "bux-landlock",
  "bux-seccomp",
  "libc",
  "nix 0.31.3",
@@ -490,7 +491,10 @@ name = "bux-shim-bin"
 version = "0.2.0"
 dependencies = [
  "bux-gvproxy",
+ "bux-landlock",
  "bux-shim",
+ "libc",
+ "tempfile",
 ]
 
 [[package]]

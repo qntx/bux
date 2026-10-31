@@ -1,9 +1,11 @@
 //! Pre-exec hardening for child processes.
 //!
 //! Applied after `fork()` but before `exec()`:
-//! 1. **Landlock** (Linux, optional) — apply ruleset then close its fd.
-//! 2. **Die with parent** — `PR_SET_PDEATHSIG(SIGKILL)` (Linux), when requested.
-//! 3. **FD cleanup** — close inherited FDs ≥ 3 except preserved ones.
+//! 1. **Die with parent** — `PR_SET_PDEATHSIG(SIGKILL)` (Linux), when requested.
+//! 2. **FD cleanup** — inherited FDs ≥ 3 become close-on-exec, except preserved ones.
+//!
+//! Marking instead of closing keeps open the close-on-exec pipe through which
+//! std's `Command::spawn` reports an `exec` failure.
 
 #![allow(
     unsafe_code,
@@ -13,12 +15,12 @@
 
 use std::process::Command;
 
-/// FDs that must survive into the child until we explicitly handle them.
+/// FDs that must survive `exec` into the child.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct PreserveFds {
     /// Watchdog pipe read end (optional).
     pub watchdog: Option<i32>,
-    /// Landlock ruleset fd — applied then closed inside `pre_exec` (optional).
+    /// Landlock ruleset the shim applies to itself (optional).
     pub landlock: Option<i32>,
 }
 
@@ -34,19 +36,7 @@ pub(crate) fn apply(cmd: &mut Command, preserve: PreserveFds, die_with_parent: b
     // SAFETY: all operations inside are async-signal-safe syscalls.
     unsafe {
         cmd.pre_exec(move || {
-            // 1. Landlock first (closes its own fd). Linux only.
-            #[cfg(target_os = "linux")]
-            if let Some(fd) = preserve.landlock {
-                // SAFETY: fd is a ruleset from PathRestrictions::build.
-                let errno = bux_landlock::restrict_self(fd);
-                if errno != 0 {
-                    return Err(std::io::Error::from_raw_os_error(errno));
-                }
-            }
-            #[cfg(not(target_os = "linux"))]
-            let _ = preserve.landlock;
-
-            // 2. Die when parent exits — omitted for detached VMs.
+            // 1. Die when parent exits — omitted for detached VMs.
             #[cfg(target_os = "linux")]
             if die_with_parent {
                 libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
@@ -54,67 +44,40 @@ pub(crate) fn apply(cmd: &mut Command, preserve: PreserveFds, die_with_parent: b
             #[cfg(not(target_os = "linux"))]
             let _ = die_with_parent;
 
-            // 3. Close inherited FDs except watchdog (landlock already closed).
-            close_inherited_fds(preserve.watchdog);
+            // 2. Nothing but the preserved FDs survives `exec`.
+            mark_inherited_fds_cloexec();
+            for fd in [preserve.watchdog, preserve.landlock].into_iter().flatten() {
+                if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
 
             Ok(())
         });
     }
 }
 
-/// Close all file descriptors >= 3, optionally preserving one.
+/// Mark all FDs >= 3 close-on-exec.
 #[cfg(unix)]
-fn close_inherited_fds(preserve: Option<i32>) {
-    match preserve {
-        Some(keep) => close_fds_preserving(keep),
-        None => close_all_fds(),
-    }
-}
-
-/// Close all FDs >= 3 unconditionally.
-#[cfg(unix)]
-fn close_all_fds() {
+fn mark_inherited_fds_cloexec() {
     #[cfg(target_os = "linux")]
     {
-        // SAFETY: close_range is a valid syscall on Linux 5.9+; arguments are well-formed.
-        let ret = unsafe { libc::syscall(libc::SYS_close_range, 3_u32, u32::MAX, 0_u32) };
+        // SAFETY: close_range takes only integers; the flag needs Linux 5.11+.
+        let ret = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                3_u32,
+                u32::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            )
+        };
         if ret == 0 {
             return;
         }
     }
-    close_fd_range(3, max_fd());
-}
-
-/// Close all FDs >= 3 except `keep`.
-#[cfg(unix)]
-fn close_fds_preserving(keep: i32) {
-    #[cfg(target_os = "linux")]
-    {
-        #[allow(clippy::cast_sign_loss, reason = "keep FD is always non-negative")]
-        let keep_u = keep as u32;
-        // SAFETY: close_range is a valid syscall; arguments specify FD ranges that
-        // exclude the preserved FD.
-        unsafe {
-            if keep > 3 {
-                libc::syscall(libc::SYS_close_range, 3_u32, keep_u - 1, 0_u32);
-            }
-            libc::syscall(libc::SYS_close_range, keep_u + 1, u32::MAX, 0_u32);
-        }
-        return;
-    }
-
-    #[allow(
-        unreachable_code,
-        reason = "fallback path after platform-specific early return"
-    )]
-    {
-        let end = max_fd();
-        for fd in 3..end {
-            if fd != keep {
-                // SAFETY: fd is a valid file descriptor number in range.
-                unsafe { libc::close(fd) };
-            }
-        }
+    for fd in 3..max_fd() {
+        // SAFETY: fcntl on a number that is not an open FD only returns EBADF.
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     }
 }
 
@@ -128,13 +91,4 @@ fn max_fd() -> i32 {
         reason = "sysconf result fits in i32"
     )]
     if n > 0 { n as i32 } else { 1024 }
-}
-
-/// Close FDs in `[start, end)` via iterative `close()`.
-#[cfg(unix)]
-fn close_fd_range(start: i32, end: i32) {
-    for fd in start..end {
-        // SAFETY: fd is a valid file descriptor number in [start, end).
-        unsafe { libc::close(fd) };
-    }
 }
