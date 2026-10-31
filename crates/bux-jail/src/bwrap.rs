@@ -33,6 +33,21 @@ impl Sandbox for BwrapSandbox {
             builder = builder.dev_bind("/dev/kvm", "/dev/kvm");
         }
 
+        // After the tmpfs mounts, which may hide these paths. Only files: a parent
+        // directory such as `/tmp` or `/` would cover those mounts and `/dev/kvm`.
+        for path in jail.readonly_paths.iter().filter(|path| path.is_file()) {
+            builder = builder.ro_bind(path, path);
+        }
+        // The shim and libkrun, which sits next to it, when a tmpfs hides them. The
+        // mount points themselves stay empty.
+        if let Some(dir) = shim.parent()
+            && ["/tmp", "/dev/shm"]
+                .iter()
+                .any(|mount| dir.starts_with(mount) && dir != Path::new(mount))
+        {
+            builder = builder.ro_bind(dir, dir);
+        }
+
         if let Some(rootfs) = &jail.rootfs {
             builder = builder.bind(rootfs, rootfs);
         }
@@ -103,6 +118,57 @@ mod tests {
             args_contain_die_with_parent(&cmd),
             "foreground jail must pass --die-with-parent"
         );
+    }
+
+    /// The position of `seq` in the arguments of `cmd`.
+    fn position(cmd: &Command, seq: &[&Path]) -> Option<usize> {
+        let args: Vec<_> = cmd.get_args().map(Path::new).collect();
+        args.windows(seq.len()).position(|window| window == seq)
+    }
+
+    /// `--ro-bind path path`.
+    fn ro_bind(path: &Path) -> [&Path; 3] {
+        [Path::new("--ro-bind"), path, path]
+    }
+
+    #[test]
+    fn readonly_files_are_bound_after_the_tmpfs_but_not_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("base.raw");
+        std::fs::write(&base, b"").unwrap();
+        let mut cfg = jail(false);
+        cfg.readonly_paths = vec![dir.path().to_path_buf(), base.clone()];
+        let Some(cmd) =
+            BwrapSandbox.wrap(Path::new("/usr/bin/true"), Path::new("/tmp/cfg.json"), &cfg)
+        else {
+            return;
+        };
+
+        let tmpfs = position(&cmd, &[Path::new("--tmpfs"), Path::new("/tmp")]).unwrap();
+        let bound = position(&cmd, &ro_bind(&base)).unwrap();
+        assert!(tmpfs < bound);
+        assert_eq!(position(&cmd, &ro_bind(dir.path())), None);
+    }
+
+    #[test]
+    fn a_shim_under_a_tmpfs_is_bound_with_its_directory() {
+        let wrap = |shim: &str| {
+            BwrapSandbox.wrap(Path::new(shim), Path::new("/tmp/cfg.json"), &jail(false))
+        };
+        let Some(hidden) = wrap("/tmp/build/debug/bux-shim") else {
+            return;
+        };
+        let dir = Path::new("/tmp/build/debug");
+        assert!(position(&hidden, &ro_bind(dir)).is_some());
+
+        let at_the_mount_point = wrap("/tmp/bux-shim").unwrap();
+        assert_eq!(
+            position(&at_the_mount_point, &ro_bind(Path::new("/tmp"))),
+            None
+        );
+
+        let visible = wrap("/usr/bin/true").unwrap();
+        assert_eq!(position(&visible, &ro_bind(Path::new("/usr/bin"))), None);
     }
 
     #[test]
