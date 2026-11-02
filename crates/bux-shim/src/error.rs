@@ -20,6 +20,19 @@ pub enum Error {
     #[error(transparent)]
     Krun(#[from] bux_krun::Error),
 
+    /// `BUX_LANDLOCK_FD` does not hold a file descriptor number.
+    #[error("landlock: invalid BUX_LANDLOCK_FD: {0}")]
+    InvalidLandlockFd(String),
+
+    /// Landlock domain could not be entered (Linux fail-closed).
+    #[error("landlock: cannot {action}: {source}")]
+    Landlock {
+        /// The step that failed.
+        action: &'static str,
+        /// Why it failed.
+        source: std::io::Error,
+    },
+
     /// Seccomp filter could not be installed (Linux fail-closed).
     #[error("seccomp: {0}")]
     Seccomp(String),

@@ -23,13 +23,19 @@ Runtime writes `ShimConfig` JSON to a temp file and execs:
 bux-shim <path/to/config.json>
 ```
 
-Optional env: `BUX_WATCHDOG_FD=<fd>` (read end of parent keepalive pipe).
+Optional env:
+
+- `BUX_WATCHDOG_FD=<fd>`: read end of parent keepalive pipe.
+- `BUX_LANDLOCK_FD=<fd>`: Landlock ruleset (Linux). The binary applies it first
+  thing and re-executes itself, so that the threads the Go runtime starts before
+  `main` run inside the domain too. Failure is fatal.
 
 ## Library API
 
 | Item | Role |
 |------|------|
 | `ShimConfig` | serde JSON config for the engine |
+| `enter_landlock_domain` | apply `BUX_LANDLOCK_FD` and re-execute (Linux) |
 | `prepare` | create libkrun ctx + apply config (never starts gvproxy) |
 | `install_seccomp` | default VMM seccomp (Linux `x86_64`/`aarch64`; Darwin no-op). Binary installs after gvproxy threads exist. |
 | `start` | `krun_start_enter` (never returns on success) |

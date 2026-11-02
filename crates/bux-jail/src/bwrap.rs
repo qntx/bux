@@ -62,6 +62,24 @@ impl Sandbox for BwrapSandbox {
     }
 }
 
+/// `bwrap` if it can create a user namespace on this host.
+#[cfg(test)]
+pub(crate) fn usable_bwrap() -> Option<std::path::PathBuf> {
+    use std::process::Stdio;
+
+    let bwrap = bux_bwrap::path()?;
+    Command::new(bwrap)
+        .args(["--unshare-pid", "--ro-bind", "/", "/", "--"])
+        .arg(bwrap)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()?
+        .success()
+        .then(|| bwrap.to_path_buf())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "unit tests")]
 mod tests {

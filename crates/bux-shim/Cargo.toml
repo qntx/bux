@@ -24,6 +24,7 @@ libc = { workspace = true }
 nix = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+bux-landlock = { workspace = true }
 bux-seccomp = { workspace = true, optional = true }
 
 [lints]

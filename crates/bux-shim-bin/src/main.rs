@@ -28,6 +28,11 @@ fn main() {
     };
 
     let exit_path = std::path::Path::new(&config_path).with_extension("exit");
+    #[cfg(target_os = "linux")]
+    if let Err(e) = bux_shim::enter_landlock_domain() {
+        bux_shim::write_exit_error(&exit_path, &e.to_string());
+        std::process::exit(1);
+    }
     bux_shim::install_crash_capture(&exit_path);
     bux_shim::start_watchdog_thread();
 

@@ -30,11 +30,14 @@ const DEV_RW_LEAVES: &[&str] = &[
     "/dev/shm",
 ];
 
-/// Assemble allow-lists matching bwrap binds + paths the shim needs.
+/// Assemble allow-lists for the shim: the paths it needs, on the host or bound by bwrap.
+///
+/// Rules attach to host inodes, so the `/tmp` and `/dev/shm` tmpfs mounts bwrap
+/// creates are not covered and the jailed shim cannot use them.
 fn path_restrictions(jail: &JailConfig, shim: &Path, config_path: &Path) -> PathRestrictions {
     let mut r = PathRestrictions::new();
 
-    // System trees the shim / bwrap / libkrun need (exist-only).
+    // System trees the shim / libkrun need (exist-only).
     for p in [
         "/usr",
         "/bin",
