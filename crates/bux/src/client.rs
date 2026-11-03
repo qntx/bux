@@ -64,7 +64,7 @@ pub struct ExecHandle {
     /// Write half — sends [`ExecIn`] messages to the guest. Unlike
     /// `OwnedWriteHalf`, dropping it does not shut the socket down: the
     /// guest kills the job on EOF, so the connection must stay open until
-    /// both halves are gone (#197).
+    /// both halves are gone.
     writer: WriteHalf<Stream>,
 }
 

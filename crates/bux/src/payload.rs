@@ -57,8 +57,8 @@ pub fn default_payload_dir() -> PathBuf {
 
 /// Closed CD-matrix host triple. A musl build and Intel Mac are `InvalidConfig`.
 ///
-/// A glibc build that runs at all can run the glibc shim, so a musl loader on
-/// disk (e.g. from `musl-tools`) does not make the host unsupported.
+/// The build's libc decides, not the files on the host: a glibc build that runs
+/// can run the glibc shim.
 ///
 /// # Errors
 ///
