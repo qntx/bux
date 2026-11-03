@@ -37,6 +37,9 @@ pub use process::{Keepalive, ShimProcess};
 pub use security::{LayerStatus, SandboxKind, SecurityReport};
 
 #[cfg(target_os = "linux")]
+pub use bwrap::probe_bwrap;
+
+#[cfg(target_os = "linux")]
 use bwrap::BwrapSandbox;
 #[cfg(target_os = "macos")]
 use seatbelt::SeatbeltSandbox;

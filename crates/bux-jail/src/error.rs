@@ -27,6 +27,10 @@ pub enum Error {
     #[error("bwrap required (jailer); install with: curl -fsSL https://sh.qntx.org/bux | sh")]
     BwrapUnavailable,
 
+    /// A `bwrap` cannot start a jail on this host. Holds what it printed.
+    #[error("{0}")]
+    BwrapProbe(String),
+
     /// Landlock ruleset construction failed (kernel error, not mere unavailability).
     #[error("landlock ruleset failed: {0}")]
     Landlock(String),

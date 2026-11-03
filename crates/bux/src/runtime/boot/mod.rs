@@ -29,7 +29,6 @@ use crate::Result;
 use crate::options::{ImageRef, NetworkSpec, VmOptions};
 use crate::ports::parse_publish_spec;
 use crate::process::merge_image_config;
-use crate::security::HostInfo;
 use crate::state::{VirtioFs, VmConfig};
 
 /// Create and start a managed VM from product options.
@@ -45,7 +44,7 @@ pub(crate) async fn create(
 ) -> Result<Vm> {
     on_progress("validating options");
     validate(&opts)?;
-    require_virtualization(HostInfo::probe().virtualization)?;
+    require_virtualization(bux_jail::checks::check_host().virtualization)?;
 
     on_progress("fetching bux payload");
     {

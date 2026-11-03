@@ -304,7 +304,7 @@ pub(crate) fn spawn_shim(
     #[cfg(target_os = "linux")]
     if config.security.jailer && bwrap_path.is_none() {
         return Err(crate::Error::SecurityUnavailable(
-            "bwrap required (jailer); install with: curl -fsSL https://sh.qntx.org/bux | sh".into(),
+            bux_jail::Error::BwrapUnavailable.to_string(),
         ));
     }
     let policy = spawn_policy(config);
@@ -406,9 +406,9 @@ fn write_shim_json(path: &Path, json: &[u8]) -> io::Result<()> {
 /// Map jail errors to product errors (preserve K22 fail-closed).
 fn map_jail_error(e: bux_jail::Error, shim: &Path) -> crate::Error {
     match e {
-        bux_jail::Error::BwrapUnavailable => crate::Error::SecurityUnavailable(
-            "bwrap required (jailer); install with: curl -fsSL https://sh.qntx.org/bux | sh".into(),
-        ),
+        e @ bux_jail::Error::BwrapUnavailable => {
+            crate::Error::SecurityUnavailable(e.to_string())
+        }
         bux_jail::Error::LandlockUnavailable => crate::Error::SecurityUnavailable(
             "landlock required but unavailable on this kernel (set SecurityOptions.allow_degraded to proceed)"
                 .into(),

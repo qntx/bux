@@ -21,7 +21,7 @@ Process isolation for the `bux-shim` child process (`bux-bwrap`,
   detached. Dropping it makes the shim shut down.
 - [`SecurityReport`] / [`LayerStatus`] — actual posture after spawn
 - [`Sandbox`] / [`NoopSandbox`] — pluggable sandbox trait
-- Host capability probes (`check_host`, `audit_isolation`)
+- Host capability probes (`check_host`, `audit_isolation`, `probe_bwrap`)
 
 ## Dependency rules
 

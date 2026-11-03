@@ -58,7 +58,7 @@ pub fn audit_isolation(caps: &HostCapabilities) -> Vec<String> {
     {
         if !caps.namespaces {
             warnings.push(
-                "no namespace isolation (bubblewrap not found) — shim runs without namespaces"
+                "no namespace isolation (no usable bubblewrap) — the jailer cannot start a VM"
                     .to_owned(),
             );
         }
