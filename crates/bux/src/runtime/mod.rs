@@ -426,8 +426,9 @@ impl Runtime {
     /// detached VM.
     ///
     /// Copied from the source: overlay contents, `vcpus`, `ram_mib`, `network`,
-    /// `auto_remove`, and `tenant_id`. Always `detach: true` so CLI/`Runtime`
-    /// Drop does not SIGTERM the clone (same process model as `bux create`).
+    /// `auto_remove`, `security`, and `tenant_id`. Always `detach: true` so
+    /// CLI/`Runtime` Drop does not SIGTERM the clone (same process model as
+    /// `bux create`).
     ///
     /// `source_id` is the exact primary key (not name, not prefix). CLI
     /// resolves name/prefix with [`Self::get`] first.
@@ -437,8 +438,8 @@ impl Runtime {
     /// `None`. Source volumes are not copied; a new `ws-{tenant}-{agent}`
     /// volume is attached when both ids are known.
     ///
-    /// Not copied: ports, volumes, secrets, security, command, env, workdir,
-    /// user, auto-stop/delete, ready timeout, or name (unless `name` is passed).
+    /// Not copied: ports, volumes, secrets, command, env, workdir, user,
+    /// auto-stop/delete, ready timeout, or name (unless `name` is passed).
     ///
     /// # Errors
     ///
@@ -467,11 +468,12 @@ impl Runtime {
     /// base, then boot a detached VM (same disk recipe as [`Self::clone`]).
     ///
     /// Copied from the source VM: overlay contents (via the snapshot file),
-    /// `vcpus`, `ram_mib`, `network`, `auto_remove`, and `tenant_id`. Always
-    /// `detach: true`. `agent_id` follows the same name rule as [`Self::clone`].
+    /// `vcpus`, `ram_mib`, `network`, `auto_remove`, `security`, and `tenant_id`.
+    /// Always `detach: true`. `agent_id` follows the same name rule as
+    /// [`Self::clone`].
     ///
-    /// Not copied: ports, volumes, secrets, security, command, env, workdir,
-    /// user, auto-stop/delete, ready timeout, or name (unless `name` is passed).
+    /// Not copied: ports, volumes, secrets, command, env, workdir, user,
+    /// auto-stop/delete, ready timeout, or name (unless `name` is passed).
     ///
     /// Requires the source VM row, loaded by exact `snapshots.vm_id` (not
     /// name/prefix). After [`Self::remove`] of the source, snapshot rows are
@@ -708,7 +710,7 @@ fn restore_vm_options(
 }
 
 /// Create-options for a disk-clone or snapshot-restore: copy
-/// `vcpus`/`ram_mib`/`network`/`auto_remove`/`tenant_id`; always detach.
+/// `vcpus`/`ram_mib`/`network`/`auto_remove`/`security`/`tenant_id`; always detach.
 ///
 /// Serve always passes `a-{tenant}-{agent}`. That form is injective (`-` is
 /// not in the id alphabet), so `agent_id` can be recovered from `name`.
@@ -722,7 +724,8 @@ fn clone_vm_options(config: &VmConfig, name: Option<String>, clone_base: PathBuf
         .ram_mib(config.ram_mib)
         .auto_remove(config.auto_remove)
         .detach(true) // durable disk-clone; CLI drop must not SIGTERM
-        .network(config.network.clone());
+        .network(config.network.clone())
+        .security(config.security);
     if let Some(tenant) = config.tenant_id.as_deref() {
         opts = opts.tenant_id(tenant.to_owned());
         if let Some(agent) = name
@@ -1058,6 +1061,20 @@ mod tests {
             matches!(&opts.image, ImageRef::BaseDisk(p) if p == Path::new("/tmp/clone.qcow2")),
             "clone image must be the flattened base"
         );
+    }
+
+    #[test]
+    fn clone_vm_options_copies_security() {
+        let security = crate::security::SecurityOptions::new()
+            .jailer(false)
+            .landlock(false)
+            .allow_degraded(true);
+        let source = VmConfig {
+            security,
+            ..VmConfig::default()
+        };
+        let opts = clone_vm_options(&source, None, PathBuf::from("/tmp/clone.qcow2"));
+        assert_eq!(opts.security, security);
     }
 
     #[test]
