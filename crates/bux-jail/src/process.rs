@@ -25,6 +25,16 @@ use nix::unistd::{Pid, pipe};
 /// How long [`ShimProcess::kill`] waits for the killed processes to be gone.
 const KILL_WAIT: Duration = Duration::from_secs(10);
 
+/// Whether [`ShimProcess::kill`] sent `SIGKILL` to the group, which it does only
+/// while the pid still names this process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Signalled {
+    /// The group was sent `SIGKILL`.
+    Group,
+    /// The pid no longer named this process, so nothing was sent.
+    Nothing,
+}
+
 /// A `bux-shim` process, identified by pid and start time.
 ///
 /// Plain identity: safe to persist and to rebuild with [`Self::open`]
@@ -138,11 +148,13 @@ impl ShimProcess {
     /// Returns the OS error if the signal cannot be delivered, and
     /// [`io::ErrorKind::TimedOut`] if a process of the group is still alive.
     pub fn kill(self) -> io::Result<()> {
-        let identified = self.is_alive();
-        if identified {
+        let signalled = if self.is_alive() {
             self.deliver(Signal::SIGKILL)?;
-        }
-        self.wait_group_gone(identified, KILL_WAIT)
+            Signalled::Group
+        } else {
+            Signalled::Nothing
+        };
+        self.wait_group_gone(signalled, KILL_WAIT)
     }
 
     /// Send the POSIX signal number `sig` to the process group.
@@ -208,10 +220,10 @@ impl ShimProcess {
         clippy::disallowed_methods,
         reason = "blocks its thread; `Vm` runs it on a blocking one, and the error-path teardowns accept the wait"
     )]
-    fn wait_group_gone(self, identified: bool, timeout: Duration) -> io::Result<()> {
+    fn wait_group_gone(self, signalled: Signalled, timeout: Duration) -> io::Result<()> {
         let deadline = Instant::now() + timeout;
         loop {
-            if self.group_gone(identified) {
+            if self.group_gone(signalled) {
                 return Ok(());
             }
             if Instant::now() >= deadline {
@@ -235,7 +247,7 @@ impl ShimProcess {
     /// another process with this pid means the group is gone, and a pid that
     /// no process holds can still name a group whose leader was killed alone.
     #[cfg(target_os = "linux")]
-    fn group_gone(self, _identified: bool) -> bool {
+    fn group_gone(self, _signalled: Signalled) -> bool {
         match stat(self.pid) {
             Some(stat) if stat.start_time != self.start_time => true,
             Some(stat) if !matches!(stat.state, 'Z' | 'X') => false,
@@ -250,12 +262,13 @@ impl ShimProcess {
     /// process. On macOS the group is the shim alone: `sandbox-exec` execs it in
     /// place.
     ///
-    /// macOS cannot look up a zombie, so only a pid `identified` before the signal
-    /// is known to be this process when `waitpid` finds it running.
+    /// macOS cannot look up a zombie, so a child that `waitpid` finds running is
+    /// known to be this process only if `kill` signalled it: `kill` checks the pid
+    /// right before the signal.
     #[cfg(not(target_os = "linux"))]
-    fn group_gone(self, identified: bool) -> bool {
+    fn group_gone(self, signalled: Signalled) -> bool {
         match waitpid(self.nix_pid(), Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::StillAlive) => !identified,
+            Ok(WaitStatus::StillAlive) => signalled == Signalled::Nothing,
             Ok(_) => true,
             Err(_) => !self.is_alive(),
         }
@@ -577,13 +590,15 @@ mod tests {
         drop(leader.wait());
 
         let err = process
-            .wait_group_gone(true, Duration::from_millis(50))
+            .wait_group_gone(Signalled::Nothing, Duration::from_millis(50))
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
 
         drop(member.kill());
         drop(member.wait());
-        process.wait_group_gone(true, KILL_WAIT).unwrap();
+        process
+            .wait_group_gone(Signalled::Nothing, KILL_WAIT)
+            .unwrap();
     }
 
     #[cfg(target_os = "linux")]
@@ -591,7 +606,9 @@ mod tests {
     fn a_reused_pid_means_the_group_is_gone() {
         let (_child, live) = exiting_child("");
         let reused = ShimProcess::open(live.pid(), live.start_time() + 1);
-        reused.wait_group_gone(true, Duration::ZERO).unwrap();
+        reused
+            .wait_group_gone(Signalled::Nothing, Duration::ZERO)
+            .unwrap();
         assert!(live.is_alive());
         live.kill().unwrap();
     }
