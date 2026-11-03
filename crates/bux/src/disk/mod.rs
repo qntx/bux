@@ -308,7 +308,7 @@ fn dir_size(dir: &Path) -> io::Result<u64> {
     Ok(total)
 }
 
-/// Backing-chain paths that the jail should bind read-only (parents + files).
+/// Backing-chain paths the jail makes readable: the files and their parent directories.
 #[cfg(unix)]
 pub(crate) fn readonly_disk_paths(path: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
