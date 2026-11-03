@@ -98,14 +98,14 @@ pub(crate) async fn create(
             .volumes()
             .link_vm(vm.stored().id.as_str(), &resolved_vols)
     {
-        vm.abort_unready();
+        vm.abort_unready().await;
         return Err(e);
     }
 
     if !opts.ready_timeout.is_zero() {
         on_progress("waiting for guest agent");
         if let Err(e) = vm.wait_ready(opts.ready_timeout).await {
-            vm.abort_unready();
+            vm.abort_unready().await;
             return Err(e);
         }
     }

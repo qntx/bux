@@ -39,4 +39,5 @@ Optional env:
 | `prepare` | create libkrun ctx + apply config (never starts gvproxy) |
 | `install_seccomp` | default VMM seccomp (Linux `x86_64`/`aarch64`; Darwin no-op). Binary installs after gvproxy threads exist. |
 | `start` | `krun_start_enter` (never returns on success) |
+| `die_with_jail` | as PID 1 of a jail, die with bwrap's outer process (Linux) |
 | `ExitInfo` | crash diagnostics JSON |

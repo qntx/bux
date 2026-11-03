@@ -355,7 +355,7 @@ pub fn kill(args: &KillArgs) -> Result<()> {
 }
 
 #[cfg(unix)]
-pub fn rm(args: &RmArgs) -> Result<()> {
+pub async fn rm(args: &RmArgs) -> Result<()> {
     let rt = open_runtime()?;
     let mut errors = Vec::new();
 
@@ -363,8 +363,10 @@ pub fn rm(args: &RmArgs) -> Result<()> {
         // Force mode: kill before removing.
         if args.force
             && let Ok(mut h) = rt.get(target)
+            && let Err(e) = h.kill().await
         {
-            let _ = h.kill();
+            errors.push(format!("{target}: {e}"));
+            continue;
         }
         match rt.remove(target) {
             Ok(()) => println!("{target}"),

@@ -51,9 +51,15 @@ impl Drop for SpawnAbort<'_> {
 }
 
 /// Kill the shim if spawned, then secrets/overlay/volumes/row.
+///
+/// The cleanup also runs for a shim that survives the kill: the VM has no row yet,
+/// so nothing could find what is left, and an unlinked overlay stays usable for a
+/// process that has it open.
 fn abort_partial_spawn(rt: &Runtime, id: &str, socket: &Path, process: Option<ShimProcess>) {
-    if let Some(process) = process {
-        process.kill().ok();
+    if let Some(process) = process
+        && let Err(e) = process.kill()
+    {
+        tracing::warn!(vm_id = id, error = %e, "a shim that failed to start survived its kill");
     }
     rt.secrets
         .lock()
