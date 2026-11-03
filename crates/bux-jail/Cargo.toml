@@ -23,5 +23,8 @@ bux-landlock = { path = "../bux-landlock", version = "0.2" }
 [dev-dependencies]
 tempfile.workspace = true
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+nix = { workspace = true, features = ["resource"] }
+
 [lints]
 workspace = true

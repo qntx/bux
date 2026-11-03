@@ -156,13 +156,13 @@ mod tests {
 
         // bwrap's outer process and the shim.
         let deadline = Instant::now() + Duration::from_secs(10);
-        while live_group_members(group) < 2 && Instant::now() < deadline {
+        while live_group_members(group).unwrap() < 2 && Instant::now() < deadline {
             std::thread::yield_now();
         }
-        assert_eq!(live_group_members(group), 2);
+        assert_eq!(live_group_members(group).unwrap(), 2);
 
         spawned.process.kill().unwrap();
-        assert_eq!(live_group_members(group), 0);
+        assert_eq!(live_group_members(group).unwrap(), 0);
     }
 
     #[test]

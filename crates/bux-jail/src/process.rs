@@ -145,8 +145,9 @@ impl ShimProcess {
     ///
     /// # Errors
     ///
-    /// Returns the OS error if the signal cannot be delivered, and
-    /// [`io::ErrorKind::TimedOut`] if a process of the group is still alive.
+    /// Returns the OS error if the signal cannot be delivered or the group cannot be
+    /// checked, and [`io::ErrorKind::TimedOut`] if a process of the group is still
+    /// alive.
     pub fn kill(self) -> io::Result<()> {
         let signalled = if self.is_alive() {
             self.deliver(Signal::SIGKILL)?;
@@ -215,7 +216,8 @@ impl ShimProcess {
         }
     }
 
-    /// Poll until no process of the group is alive.
+    /// Poll until no process of the group is alive. A check that fails counts as
+    /// not gone.
     #[allow(
         clippy::disallowed_methods,
         reason = "blocks its thread; `Vm` runs it on a blocking one, and the error-path teardowns accept the wait"
@@ -223,21 +225,36 @@ impl ShimProcess {
     fn wait_group_gone(self, signalled: Signalled, timeout: Duration) -> io::Result<()> {
         let deadline = Instant::now() + timeout;
         loop {
-            if self.group_gone(signalled) {
-                return Ok(());
+            match self.group_gone(signalled) {
+                Ok(true) => return Ok(()),
+                last if Instant::now() >= deadline => {
+                    return Err(self.not_gone_error(last.err(), timeout));
+                }
+                _ => std::thread::sleep(Duration::from_millis(20)),
             }
-            if Instant::now() >= deadline {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!(
-                        "process group {0} is still alive after {1} s; stop it with: kill -9 -- -{0}",
-                        self.pid,
-                        timeout.as_secs()
-                    ),
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// The error for a group not seen gone within `timeout`. `failure` is why the
+    /// last check could not tell, if it could not.
+    fn not_gone_error(self, failure: Option<io::Error>, timeout: Duration) -> io::Error {
+        let Some(e) = failure else {
+            return io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "process group {0} is still alive after {1} s; stop it with: kill -9 -- -{0}",
+                    self.pid,
+                    timeout.as_secs()
+                ),
+            );
+        };
+        io::Error::new(
+            e.kind(),
+            format!(
+                "cannot tell whether process group {} is gone: {e}",
+                self.pid
+            ),
+        )
     }
 
     /// `true` once no process of the group is alive, reaping this process if it
@@ -246,14 +263,18 @@ impl ShimProcess {
     /// A group keeps its id reserved as a pid until its last process is gone. So
     /// another process with this pid means the group is gone, and a pid that
     /// no process holds can still name a group whose leader was killed alone.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from [`live_group_members`].
     #[cfg(target_os = "linux")]
-    fn group_gone(self, _signalled: Signalled) -> bool {
+    fn group_gone(self, _signalled: Signalled) -> io::Result<bool> {
         match stat(self.pid) {
-            Some(stat) if stat.start_time != self.start_time => true,
-            Some(stat) if !matches!(stat.state, 'Z' | 'X') => false,
+            Some(stat) if stat.start_time != self.start_time => Ok(true),
+            Some(stat) if !matches!(stat.state, 'Z' | 'X') => Ok(false),
             _ => {
                 let _reaped = self.try_reap();
-                live_group_members(self.pid) == 0
+                Ok(live_group_members(self.pid)? == 0)
             }
         }
     }
@@ -265,12 +286,18 @@ impl ShimProcess {
     /// macOS cannot look up a zombie, so a child that `waitpid` finds running is
     /// known to be this process only if `kill` signalled it: `kill` checks the pid
     /// right before the signal.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from `waitpid`, other than `ECHILD` for a process that is
+    /// not a child of this process.
     #[cfg(not(target_os = "linux"))]
-    fn group_gone(self, signalled: Signalled) -> bool {
+    fn group_gone(self, signalled: Signalled) -> io::Result<bool> {
         match waitpid(self.nix_pid(), Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::StillAlive) => signalled == Signalled::Nothing,
-            Ok(_) => true,
-            Err(_) => !self.is_alive(),
+            Ok(WaitStatus::StillAlive) => Ok(signalled == Signalled::Nothing),
+            Ok(_) => Ok(true),
+            Err(Errno::ECHILD) => Ok(!self.is_alive()),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -311,17 +338,27 @@ fn start_time(pid: u32) -> Option<u64> {
 }
 
 /// Processes in group `pgid` that have not exited.
+///
+/// # Errors
+///
+/// Returns the error from listing `/proc` or from [`read_stat`]: a process left
+/// out could be a live member.
 #[cfg(target_os = "linux")]
-pub(crate) fn live_group_members(pgid: u32) -> usize {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
-        .filter_map(stat)
-        .filter(|stat| stat.pgrp == pgid && !matches!(stat.state, 'Z' | 'X'))
-        .count()
+pub(crate) fn live_group_members(pgid: u32) -> io::Result<usize> {
+    let mut live = 0;
+    for entry in std::fs::read_dir("/proc")? {
+        let name = entry?.file_name();
+        // Only the numeric entries are processes.
+        let Some(pid) = name.to_str().and_then(|text| text.parse().ok()) else {
+            continue;
+        };
+        let live_member = read_stat(pid)?
+            .is_some_and(|stat| stat.pgrp == pgid && !matches!(stat.state, 'Z' | 'X'));
+        if live_member {
+            live += 1;
+        }
+    }
+    Ok(live)
 }
 
 /// Fields of `/proc/<pid>/stat` that identify a process.
@@ -336,10 +373,38 @@ struct Stat {
     start_time: u64,
 }
 
-/// `/proc/<pid>/stat` of `pid`, or `None` if no such process exists.
+/// `/proc/<pid>/stat` of `pid`, or `None` if no such process exists or it cannot
+/// be read.
 #[cfg(target_os = "linux")]
 fn stat(pid: u32) -> Option<Stat> {
-    parse_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+    read_stat(pid).ok().flatten()
+}
+
+/// `/proc/<pid>/stat` of `pid`, or `None` if no such process exists or it belongs
+/// to another user: a group this process started holds only this user's
+/// processes, which `/proc` shows to their owner.
+///
+/// # Errors
+///
+/// Returns the error from reading it otherwise, such as `EMFILE`, and
+/// [`io::ErrorKind::InvalidData`] if it does not parse.
+#[cfg(target_os = "linux")]
+fn read_stat(pid: u32) -> io::Result<Option<Stat>> {
+    let path = format!("/proc/{pid}/stat");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse_stat(&text).map(Some).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("cannot parse {path}"))
+        }),
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+            ) || e.raw_os_error() == Some(libc::ESRCH) =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Fields 3 (`state`), 5 (`pgrp`) and 22 (`starttime`) of `/proc/<pid>/stat`.
@@ -572,11 +637,11 @@ mod tests {
     fn kill_takes_the_whole_group_and_waits() {
         let (_child, process) = exiting_child("");
         let mut member = group_member(process);
-        assert_eq!(live_group_members(process.pid()), 2);
+        assert_eq!(live_group_members(process.pid()).unwrap(), 2);
 
         process.kill().unwrap();
 
-        assert_eq!(live_group_members(process.pid()), 0);
+        assert_eq!(live_group_members(process.pid()).unwrap(), 0);
         assert!(!process.is_alive());
         assert_eq!(member.wait().unwrap().signal(), Some(libc::SIGKILL));
     }
@@ -611,6 +676,71 @@ mod tests {
             .unwrap();
         assert!(live.is_alive());
         live.kill().unwrap();
+    }
+
+    /// Opens `/dev/null` until this process has no file descriptor left, under a
+    /// limit lowered so that this takes few files.
+    #[cfg(target_os = "linux")]
+    fn use_up_fds() -> Vec<std::fs::File> {
+        use nix::sys::resource::{Resource, getrlimit, setrlimit};
+
+        let (_, hard) = getrlimit(Resource::RLIMIT_NOFILE).unwrap();
+        setrlimit(Resource::RLIMIT_NOFILE, 64, hard).unwrap();
+        let mut held = Vec::new();
+        let err = loop {
+            match std::fs::File::open("/dev/null") {
+                Ok(file) => held.push(file),
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(err.raw_os_error(), Some(libc::EMFILE), "{err}");
+        held
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_group_that_cannot_be_read_is_not_taken_for_gone() {
+        const NAME: &str = "process::tests::a_group_that_cannot_be_read_is_not_taken_for_gone";
+        const IN_CHILD: &str = "BUX_JAIL_TEST_IN_CHILD";
+        // Using up the file descriptors would fail the tests running next to this
+        // one, so the body runs alone in a child of this test binary.
+        if std::env::var_os(IN_CHILD).is_none() {
+            let child = Command::new(std::env::current_exe().unwrap())
+                .args([NAME, "--exact", "--test-threads=1"])
+                .env(IN_CHILD, "1")
+                .output()
+                .unwrap();
+            let report = String::from_utf8_lossy(&child.stdout);
+            // A `NAME` that no longer matches would run no test and still succeed.
+            assert!(
+                child.status.success() && report.contains("1 passed"),
+                "{report}"
+            );
+            return;
+        }
+
+        let (mut leader, process) = exiting_child("exit 0");
+        let mut member = group_member(process);
+        drop(leader.stdin.take());
+        wait_for_zombie(process.pid());
+
+        let mut held = use_up_fds();
+        let unlisted = process.wait_group_gone(Signalled::Nothing, Duration::ZERO);
+        // One descriptor: enough to list `/proc`, not to read the processes in it.
+        drop(held.pop().unwrap());
+        let unread = process.wait_group_gone(Signalled::Nothing, Duration::ZERO);
+        drop(held);
+
+        for result in [unlisted, unread] {
+            let err = result.unwrap_err();
+            assert_ne!(err.kind(), io::ErrorKind::TimedOut, "{err}");
+        }
+        drop(member.kill());
+        drop(member.wait());
+        drop(leader.wait());
+        process
+            .wait_group_gone(Signalled::Nothing, KILL_WAIT)
+            .unwrap();
     }
 
     #[test]
