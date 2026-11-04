@@ -780,14 +780,16 @@ mod tests {
         drop(held.pop().unwrap());
         let unread = process.wait_group_gone(Signalled::Nothing, Duration::ZERO);
         drop(held);
+        // The member holds the output that the parent reads to the end, so it is
+        // stopped before a check can fail.
+        drop(member.kill());
+        drop(member.wait());
+        drop(leader.wait());
 
         for result in [unlisted, unread] {
             let err = result.unwrap_err();
             assert_ne!(err.kind(), io::ErrorKind::TimedOut, "{err}");
         }
-        drop(member.kill());
-        drop(member.wait());
-        drop(leader.wait());
         process
             .wait_group_gone(Signalled::Nothing, KILL_WAIT)
             .unwrap();
