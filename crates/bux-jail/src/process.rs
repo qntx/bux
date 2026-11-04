@@ -391,8 +391,8 @@ fn stat(pid: u32) -> Option<Stat> {
 #[cfg(target_os = "linux")]
 fn read_stat(pid: u32) -> io::Result<Option<Stat>> {
     let path = format!("/proc/{pid}/stat");
-    match std::fs::read_to_string(&path) {
-        Ok(text) => parse_stat(&text).map(Some).ok_or_else(|| {
+    match std::fs::read(&path) {
+        Ok(bytes) => parse_stat(&bytes).map(Some).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, format!("cannot parse {path}"))
         }),
         Err(e)
@@ -409,12 +409,16 @@ fn read_stat(pid: u32) -> io::Result<Option<Stat>> {
 
 /// Fields 3 (`state`), 5 (`pgrp`) and 22 (`starttime`) of `/proc/<pid>/stat`.
 ///
-/// `comm` (field 2) may contain spaces and parentheses, so fields are
-/// counted from the last `)`, which closes it.
+/// `comm` (field 2) is the process name as raw bytes. It may contain spaces and
+/// parentheses, and need not be UTF-8: the kernel cuts it to 15 bytes, which can
+/// split a character, and a process can set it to any bytes. So fields are
+/// counted from the last `)`, which closes it, and only the fields after it are
+/// read as text.
 #[cfg(any(target_os = "linux", test))]
-fn parse_stat(stat: &str) -> Option<Stat> {
-    let (_, rest) = stat.rsplit_once(')')?;
+fn parse_stat(stat: &[u8]) -> Option<Stat> {
+    let comm_end = stat.iter().rposition(|&byte| byte == b')')?;
     // `rest` starts at field 3 (state).
+    let rest = std::str::from_utf8(stat.get(comm_end + 1..)?).ok()?;
     let mut fields = rest.split_whitespace();
     let state = fields.next()?.chars().next()?;
     let pgrp = fields.nth(1)?.parse().ok()?;
@@ -539,17 +543,29 @@ mod tests {
 
     #[test]
     fn parses_state_and_start_time_after_last_paren() {
-        let stat = "42 (a) b (c)) S 1 43 44 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 98765 1 2";
+        let stat = b"42 (a) b (c)) S 1 43 44 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 98765 1 2";
         let expected = Stat {
             state: 'S',
             pgrp: 43,
             start_time: 98_765,
         };
         assert_eq!(parse_stat(stat), Some(expected));
-        let zombie = "7 (sh) Z 1 7 7 0 -1 4227084 0 0 0 0 0 0 0 0 20 0 1 0 555 0 0";
+        let zombie = b"7 (sh) Z 1 7 7 0 -1 4227084 0 0 0 0 0 0 0 0 20 0 1 0 555 0 0";
         assert_eq!(parse_stat(zombie).map(|parsed| parsed.state), Some('Z'));
-        assert_eq!(parse_stat("42 (x) S 1"), None);
-        assert_eq!(parse_stat("no paren"), None);
+        assert_eq!(parse_stat(b"42 (x) S 1"), None);
+        assert_eq!(parse_stat(b"no paren"), None);
+    }
+
+    #[test]
+    fn parses_a_name_that_is_not_utf8() {
+        // The name ends in the first two bytes of a three-byte character.
+        let stat = b"42 (a\xe5\x90) S 1 43 44 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 98765 1 2";
+        let expected = Stat {
+            state: 'S',
+            pgrp: 43,
+            start_time: 98_765,
+        };
+        assert_eq!(parse_stat(stat), Some(expected));
     }
 
     #[cfg(target_os = "linux")]
@@ -643,6 +659,40 @@ mod tests {
 
         assert_eq!(live_group_members(process.pid()).unwrap(), 0);
         assert!(!process.is_alive());
+        assert_eq!(member.wait().unwrap().signal(), Some(libc::SIGKILL));
+    }
+
+    /// A second process in `leader`'s group, named with the byte `0xff`, which is
+    /// not UTF-8. It runs until its stdin closes and is returned once named.
+    #[cfg(target_os = "linux")]
+    fn group_member_not_named_in_utf8(leader: ShimProcess) -> Child {
+        use std::io::Read;
+
+        let mut member = Command::new("/bin/sh")
+            .args(["-c", r"printf '\377' > /proc/self/comm && echo && read _"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .process_group(leader.pid().try_into().unwrap())
+            .spawn()
+            .unwrap();
+        // The shell writes a line once it is named.
+        let mut stdout = member.stdout.take().unwrap();
+        stdout.read_exact(&mut [0_u8]).unwrap();
+        let comm = std::fs::read(format!("/proc/{}/comm", member.id())).unwrap();
+        assert_eq!(comm, b"\xff\n");
+        member
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_member_not_named_in_utf8_is_counted_and_killed() {
+        let (_child, process) = exiting_child("");
+        let mut member = group_member_not_named_in_utf8(process);
+        assert_eq!(live_group_members(process.pid()).unwrap(), 2);
+
+        process.kill().unwrap();
+
+        assert_eq!(live_group_members(process.pid()).unwrap(), 0);
         assert_eq!(member.wait().unwrap().signal(), Some(libc::SIGKILL));
     }
 
