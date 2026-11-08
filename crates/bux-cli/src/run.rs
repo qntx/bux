@@ -401,8 +401,11 @@ enum Foreground {
 }
 
 async fn stop_handle(handle: &mut bux::Vm) {
-    if handle.stop().await.is_err() && handle.is_alive() {
-        drop(handle.kill());
+    if handle.stop().await.is_err()
+        && handle.is_alive()
+        && let Err(e) = handle.kill().await
+    {
+        eprintln!("bux: failed to stop the VM: {e}");
     }
 }
 

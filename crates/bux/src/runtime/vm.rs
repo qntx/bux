@@ -253,10 +253,16 @@ impl Vm {
     }
 
     /// Tear down a VM that never became ready (create failure).
-    pub(super) fn abort_unready(&mut self) {
+    ///
+    /// A VM whose processes survive the kill keeps its state, so that it can
+    /// still be found and removed.
+    pub(super) async fn abort_unready(&mut self) {
         let uptime_ms = u64::try_from(self.spawned_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.runtime_metrics.on_vm_failed(uptime_ms);
-        self.state.process().kill().ok();
+        if let Err(e) = kill_blocking(self.state.process()).await {
+            tracing::warn!(vm_id = %self.state.id, error = %e, "keeping the state of a VM that survived its kill");
+            return;
+        }
         self.secrets
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -614,7 +620,7 @@ impl Vm {
         )?;
 
         self.state.config.security_status = shim.security.clone();
-        self.commit_started(shim.process)?;
+        self.commit_started(shim.process).await?;
         self.client = Client::new(&self.state.socket);
         self.keepalive = shim.keepalive;
 
@@ -636,8 +642,8 @@ impl Vm {
             && let Err(e) = self.wait_ready(ready_timeout).await
         {
             self.runtime_metrics.record_failed();
-            if let Err(kill_err) = self.kill() {
-                tracing::warn!(error = %kill_err, "failed to stop VM after ready failure");
+            if let Err(kill_err) = self.kill().await {
+                tracing::warn!(vm_id = %self.state.id, error = %kill_err, "failed to stop VM after ready failure");
             }
             return Err(e);
         }
@@ -681,16 +687,17 @@ impl Vm {
         if result.is_ok() {
             return self.mark_stopped();
         }
-        self.kill()
+        self.kill().await
     }
 
-    /// Kills the VM process.
+    /// Kills the VM's processes and waits until they are gone.
     ///
     /// # Errors
     ///
-    /// Returns an error if the status update fails.
-    pub fn kill(&mut self) -> Result<()> {
-        self.state.process().kill().ok();
+    /// Returns an error if a process of the VM survives, which leaves the VM's
+    /// state in place, or if the status update fails.
+    pub async fn kill(&mut self) -> Result<()> {
+        kill_blocking(self.state.process()).await?;
         self.mark_stopped()
     }
 
@@ -699,7 +706,7 @@ impl Vm {
         self.state.process().is_alive()
     }
 
-    /// Sends a POSIX signal to the VM process.
+    /// Sends a POSIX signal to the VM's process group.
     ///
     /// # Errors
     ///
@@ -873,7 +880,7 @@ impl Vm {
     }
 
     /// Persist a freshly spawned shim as Running; kill it if that fails.
-    fn commit_started(&mut self, process: ShimProcess) -> Result<()> {
+    async fn commit_started(&mut self, process: ShimProcess) -> Result<()> {
         let persisted = self
             .db
             .update_process_status(
@@ -884,7 +891,7 @@ impl Vm {
             )
             .and_then(|()| self.db.update_config(&self.state.id, &self.state.config));
         if let Err(e) = persisted {
-            self.revert_failed_start(process);
+            self.revert_failed_start(process).await;
             return Err(e);
         }
         self.state.pid = process.pid();
@@ -897,8 +904,12 @@ impl Vm {
     ///
     /// Leaves the handle Stopped so `start_with` can be retried. Best-effort
     /// `update_status(Stopped)` covers a row whose new process already landed.
-    fn revert_failed_start(&mut self, process: ShimProcess) {
-        process.kill().ok();
+    /// A shim that survives the kill leaves the handle as it is.
+    async fn revert_failed_start(&mut self, process: ShimProcess) {
+        if let Err(e) = kill_blocking(process).await {
+            tracing::warn!(vm_id = %self.state.id, error = %e, "a shim that failed to start survived its kill");
+            return;
+        }
         clean_vsock_sock(&self.state.socket);
         clean_net_sock(&self.state.socket);
         self.state.status = Status::Stopped;
@@ -932,6 +943,13 @@ impl Vm {
         }
         Ok(())
     }
+}
+
+/// Run [`ShimProcess::kill`], which blocks, on a blocking thread.
+async fn kill_blocking(process: ShimProcess) -> io::Result<()> {
+    tokio::task::spawn_blocking(move || process.kill())
+        .await
+        .map_err(io::Error::other)?
 }
 
 #[cfg(test)]

@@ -1509,8 +1509,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn abort_unready_keeps_log_drops_json_and_row() {
+    #[tokio::test]
+    async fn abort_unready_keeps_log_drops_json_and_row() {
         let dir = tempfile::tempdir().unwrap();
         let rt = Runtime::open(dir.path()).unwrap();
         let id = "abortunready001";
@@ -1531,7 +1531,7 @@ mod tests {
         fs::write(&log, b"shim-and-guest-log").unwrap();
         fs::write(&json, b"{\"secrets\":true}").unwrap();
 
-        rt.get(id).unwrap().abort_unready();
+        rt.get(id).unwrap().abort_unready().await;
 
         assert!(log.exists(), "create_or_dump needs socks/*.log");
         assert_eq!(fs::read(&log).unwrap(), b"shim-and-guest-log");
@@ -1540,8 +1540,8 @@ mod tests {
         assert!(rt.db.get_by_id_prefix(id).is_err());
     }
 
-    #[test]
-    fn mark_stopped_non_auto_remove_unlinks_vsock_sock_keeps_log() {
+    #[tokio::test]
+    async fn mark_stopped_non_auto_remove_unlinks_vsock_sock_keeps_log() {
         let dir = tempfile::tempdir().unwrap();
         let rt = Runtime::open(dir.path()).unwrap();
         let id = "stopvsock000001";
@@ -1560,7 +1560,7 @@ mod tests {
         let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         fs::write(&log, b"shim-log").unwrap();
 
-        rt.get(id).unwrap().kill().unwrap();
+        rt.get(id).unwrap().kill().await.unwrap();
 
         assert!(
             !sock.exists(),
@@ -1939,10 +1939,11 @@ mod tests {
         insert_idle_stopped(&rt, &overlay, id);
 
         let mut vm = rt.get_exact(id).unwrap();
-        tokio::runtime::Builder::new_current_thread()
+        let tokio_rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .unwrap()
+            .unwrap();
+        tokio_rt
             .block_on(vm.start_with(StartOptions {
                 ready_timeout: Some(Duration::ZERO),
                 secrets: Vec::new(),
@@ -1955,7 +1956,7 @@ mod tests {
             "start_with must persist last_activity_at so sweep does not auto-stop"
         );
         assert_eq!(report.deleted, 0, "sweep must not delete the restarted VM");
-        drop(vm.kill());
+        drop(tokio_rt.block_on(vm.kill()));
     }
 
     #[test]

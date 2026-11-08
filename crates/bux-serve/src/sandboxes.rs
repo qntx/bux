@@ -261,7 +261,7 @@ pub(crate) async fn delete_one(
     };
     stop_for_delete(&mut vm).await?;
     if vm.info().status.is_active() {
-        vm.kill().map_err(ApiError::from_engine)?;
+        vm.kill().await.map_err(ApiError::from_engine)?;
     }
     state
         .runtime
@@ -525,12 +525,12 @@ async fn stop_for_delete(vm: &mut Vm) -> Result<(), ApiError> {
     match vm.info().status {
         Status::Running => {
             if vm.stop_timeout(STOP_WAIT).await.is_err() {
-                vm.kill().map_err(ApiError::from_engine)?;
+                vm.kill().await.map_err(ApiError::from_engine)?;
             }
         }
         Status::Stopping => match tokio::time::timeout(STOP_WAIT, vm.wait()).await {
             Ok(Ok(())) => {}
-            _ => vm.kill().map_err(ApiError::from_engine)?,
+            _ => vm.kill().await.map_err(ApiError::from_engine)?,
         },
         _ => {}
     }
