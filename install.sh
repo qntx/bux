@@ -114,7 +114,7 @@ http() {
 }
 
 # True if the host is musl: no glibc loader $1 but a musl loader $2, both for
-# the target architecture. musl-tools on a glibc distro adds a musl loader.
+# the target architecture. A glibc host may have a musl loader too.
 # $3 roots both paths (tests only).
 musl_host() {
     [ ! -e "${3:-}$1" ] && [ -e "${3:-}$2" ]

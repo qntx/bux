@@ -372,9 +372,7 @@ mod tests {
 
     #[test]
     fn allowlists_include_disk_and_virtiofs_io() {
-        // libkrun's virtio-blk (imago) and virtio-fs passthrough threads make
-        // these; one missing entry kills the shim at the first disk or volume
-        // access.
+        // libkrun's virtio-blk (imago) and virtio-fs passthrough threads make these.
         for (nr, name) in [
             (295, "preadv"),
             (296, "pwritev"),
