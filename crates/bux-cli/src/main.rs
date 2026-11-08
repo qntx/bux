@@ -613,7 +613,10 @@ fn system_info(format: OutputFormat) -> Result<()> {
     println!("data dir:     {}", data_dir.display());
     println!("payload dir:  {}", payload_dir.display());
     println!("virtualization: {}", yn(host.virtualization));
-    println!("namespaces:     {} (bwrap)", yn(host.namespaces));
+    match &host.bwrap {
+        Some(bwrap) => println!("namespaces:     yes ({})", bwrap.display()),
+        None => println!("namespaces:     no (bwrap)"),
+    }
     println!("landlock:       {}", yn(host.landlock));
     println!("seccomp:        {}", yn(host.seccomp));
     println!("cgroups v2:     {}", yn(host.cgroups));
@@ -622,7 +625,7 @@ fn system_info(format: OutputFormat) -> Result<()> {
     if !host.isolation_warnings.is_empty() {
         println!("warnings:");
         for w in &host.isolation_warnings {
-            println!("  - {w}");
+            println!("  - {}", w.replace('\n', "\n    "));
         }
     }
     println!("capture env:");

@@ -43,7 +43,7 @@ overrides are local files and are not checked either.
 | `BUX_HOME` | Runtime data directory (lock, SQLite, disks, volumes, socks) |
 | `BUX_LISTEN` | Serve listen specs, comma-separated (`HOST:PORT` or `unix://PATH`) |
 | `BUX_API_KEYS` | Serve API keys as `id:secret` pairs, comma-separated |
-| `PATH` | Locates `bwrap` (Linux jailer fallback), `sandbox-exec` (macOS), `go` |
+| `PATH` | Locates `bwrap` (the Linux jailer tries it before the bundled one), `sandbox-exec` (macOS), `go` |
 
 Release packaging ships `bux`, `bux-shim`, `bux-guest-*`,
 `libkrun*`/`libkrunfw*` (including soname aliases), and Linux `bwrap` in the
